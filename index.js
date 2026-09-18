@@ -9,18 +9,19 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
-// التعديل السحري هنا: تبسيط المانيفست لأقصى حد ليتوافق مع Nuvio النسخة القديمة
+// رفعنا الإصدار لـ 1.0.1 وشلنا القيود حتى Nuvio يتعرف عليها كإضافة جديدة وتقبل كلشي
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.0.0',
+    version: '1.0.1',
     name: 'Nuvio AI Subs',
-    description: 'Auto-translate any subtitle into Arabic using APInex AI.',
-    // Nuvio القديم يفضل مصفوفة نصوص بسيطة للموارد بدلاً من كائنات معقدة
+    description: 'Auto-translate any subtitle into Arabic using APInex AI Model.',
     resources: ['subtitles'],
-    types: ['movie', 'series', 'anime'],
-    // إضافة idPrefixes هنا ضرورية جداً للنسخ القديمة
-    idPrefixes: ['tt', 'kitsu'],
-    catalogs: []
+    types: ['movie', 'series', 'anime', 'other'],
+    catalogs: [],
+    behaviorHints: {
+        configurable: false,
+        configurationRequired: false
+    }
 };
 
 function getBaseUrl(req) {
@@ -36,7 +37,7 @@ app.get(['/', '/configure'], (req, res) => {
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Nuvio AI Subs</title>
+        <title>Nuvio AI Subs (v1.0.1)</title>
         <style>
             body { background: #0b1120; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
             h1 { color: #38bdf8; }
@@ -45,7 +46,7 @@ app.get(['/', '/configure'], (req, res) => {
         </style>
     </head>
     <body>
-        <h1>Nuvio AI Subs</h1>
+        <h1>Nuvio AI Subs (v1.0.1)</h1>
         <p>هذه الإضافة تسحب أي ترجمة وتحولها للعربية فورياً عبر الذكاء الاصطناعي.</p>
         <a class="btn" href="stremio://${req.headers.host}/manifest.json">تثبيت الإضافة 🚀</a>
     </body>
@@ -93,28 +94,32 @@ async function findSourceSubtitle(imdbId, season, episode, type) {
     return null;
 }
 
-app.get('/subtitles/:type/:id', async (req, res) => {
+// التعديل الأهم: مسار ذكي يقبل أي زيادة يضيفها Nuvio للرابط
+app.get('/subtitles/:type/:reqId(*)', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    let targetId = req.params.id || '';
+    const type = req.params.type;
+    const fullId = req.params.reqId || '';
+    
+    // نستخرج المعرف الأصلي بس، ونهمل أي إضافات مثل videoHash
+    let targetId = fullId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
 
-    const type = req.params.type;
     const parts = targetId.split(':');
     const imdbId = parts[0];
     const season = parts[1] || 1;
     const episode = parts[2] || 1;
     const baseUrl = getBaseUrl(req);
 
-    console.log(`[Request Received] Nuvio is asking for subtitles! ID=${imdbId}`);
+    console.log(`[Request Received] Type=${type} | ID=${imdbId} | RawPath=${fullId}`);
 
     try {
         const subUrl = await findSourceSubtitle(imdbId, season, episode, type);
         
         if (!subUrl) {
-             console.log(`[Result] No source found, returning empty.`);
+             console.log(`[Result] Empty array sent to Nuvio.`);
              return res.json({ subtitles: [] });
         }
 
@@ -128,7 +133,7 @@ app.get('/subtitles/:type/:id', async (req, res) => {
             { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass', title: 'APInex ASS 2' }
         ];
 
-        console.log(`[Success] Sent 5 subtitle options to Nuvio!`);
+        console.log(`[Success] Sent 5 AI subtitle links to Nuvio!`);
         res.json({ subtitles: transSubs });
     } catch (err) {
         console.error("[Route Error]:", err.message);
