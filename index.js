@@ -52,7 +52,7 @@ app.get(['/', '/configure'], (req, res) => {
     </head>
     <body>
         <h1>Nuvio AI Subs</h1>
-        <p>هذه الإضافة متخصصة في جلب الترجمات الأجنبية وترجمتها للعربية فورياً بواسطة الذكاء الاصطناعي (APInex).</p>
+        <p>هذه الإضافة تسحب أي ترجمة (بأي لغة متوفرة) وتحولها للعربية فورياً عبر الذكاء الاصطناعي.</p>
         <a class="btn" href="stremio://${req.headers.host}/manifest.json">تثبيت الإضافة 🚀</a>
     </body>
     </html>
@@ -67,12 +67,21 @@ app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
 });
 
-// دالة البحث عن الترجمة الإنجليزية الأصلية كمرجع
-async function findEnglishSubtitle(imdbId, season, episode, type) {
+// دالة البحث عن الترجمة (أي لغة)
+async function findSourceSubtitle(imdbId, season, episode, type) {
     try {
-        const url = `https://api.subdl.com/api/v1/subtitles?imdb_id=${imdbId}${type === 'series' ? `&season_number=${season}&episode_number=${episode}` : ''}&languages=EN`;
-        const r = await axios.get(url, { timeout: 10000 });
+        // نبحث أولاً عن ترجمة إنجليزية (لأن الذكاء الاصطناعي يترجم منها بأعلى دقة)
+        let url = `https://api.subdl.com/api/v1/subtitles?imdb_id=${imdbId}${type === 'series' ? `&season_number=${season}&episode_number=${episode}` : ''}&languages=EN`;
+        let r = await axios.get(url, { timeout: 10000 });
+        
+        // إذا ماكو إنجليزي، نلغي فلتر اللغة ونسحب أي لغة متوفرة بالموقع كبديل
+        if (!r.data || !r.data.subtitles || r.data.subtitles.length === 0) {
+            url = `https://api.subdl.com/api/v1/subtitles?imdb_id=${imdbId}${type === 'series' ? `&season_number=${season}&episode_number=${episode}` : ''}`;
+            r = await axios.get(url, { timeout: 10000 });
+        }
+
         if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
+            // ناخذ أول ترجمة نلكاها
             const firstSub = r.data.subtitles[0];
             return `https://dl.subdl.com${firstSub.url}`;
         }
@@ -99,13 +108,15 @@ app.get('/subtitles/:type/:id', async (req, res) => {
     const baseUrl = getBaseUrl(req);
 
     try {
-        const subUrl = await findEnglishSubtitle(imdbId, season, episode, type);
+        const subUrl = await findSourceSubtitle(imdbId, season, episode, type);
         
         if (!subUrl) {
              return res.json({ subtitles: [] });
         }
 
         const encodedUrl = encodeURIComponent(subUrl);
+        
+        // تجهيز 5 ترجمات: 3 بصيغة SRT و 2 بصيغة ASS مثل ما طلبت
         const transSubs = [
             {
                 id: 'nuvio-ai-srt-1',
@@ -114,7 +125,25 @@ app.get('/subtitles/:type/:id', async (req, res) => {
                 format: 'srt'
             },
             {
+                id: 'nuvio-ai-srt-2',
+                url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`,
+                lang: 'ara',
+                format: 'srt'
+            },
+            {
+                id: 'nuvio-ai-srt-3',
+                url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`,
+                lang: 'ara',
+                format: 'srt'
+            },
+            {
                 id: 'nuvio-ai-ass-1',
+                url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`,
+                lang: 'ara',
+                format: 'ass'
+            },
+            {
+                id: 'nuvio-ai-ass-2',
                 url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`,
                 lang: 'ara',
                 format: 'ass'
