@@ -95,7 +95,10 @@ function parseRobustJsonArray(raw, expectedLength) {
     return null;
 }
 
-async function runConcurrentPool(tasks, limit = 2) {
+// دالة تأخير لتجنب الحظر
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function runConcurrentPool(tasks, limit = 1) { // خليناها 1 حتى يرسل طلب واحد فقط
     const results = new Array(tasks.length);
     let index = 0;
     async function worker() {
@@ -103,6 +106,8 @@ async function runConcurrentPool(tasks, limit = 2) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
+                // استراحة ثانية ونص بين كل طلب حتى APInex ما يحظرنا
+                await delay(1500); 
             } catch (err) {
                 results[current] = null;
             }
@@ -125,7 +130,7 @@ Input: ${JSON.stringify(texts)}`;
             { 
                 model: APINEX_MODEL, 
                 messages: [{ role: 'user', content: prompt }],
-                temperature: 0.2 // تقليل الهلوسة
+                temperature: 0.2
             },
             {
                 headers: { 
@@ -145,7 +150,6 @@ Input: ${JSON.stringify(texts)}`;
     return null;
 }
 
-// تعديل جوهري لتجاوز الحظر وتحميل الملفات بشكل صحيح
 async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
@@ -156,24 +160,21 @@ async function fetchAndExtractSub(subUrl) {
             responseType: 'arraybuffer', 
             timeout: 15000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
             }
         });
     } catch (err) {
-        console.error(`[Fetch Error] Failed to download source subtitle: ${err.message}`);
+        console.error(`[Fetch Error] Failed to download source: ${err.message}`);
         throw err;
     }
 
     let buffer = Buffer.from(response.data);
     
-    // فك الضغط إذا كان GZIP
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
         buffer = zlib.gunzipSync(buffer);
     }
     
-    // فك الضغط إذا كان ZIP
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
@@ -191,25 +192,25 @@ async function handleTranslationSrt(subUrl) {
     try {
         originalText = await fetchAndExtractSub(subUrl);
     } catch (e) {
-        console.log("[Error] Returning fallback SRT");
         return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n";
     }
 
     const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص من الملف.\n\n";
+    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
     console.log(`[Translate] Starting translation of ${cues.length} cues...`);
-    const CHUNK = 40;
+    const CHUNK = 80; // كبرنا الحزمة لـ 80 سطر حتى نقلل عدد الطلبات
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
         const translated = await translateChunkStrict(texts);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text); // إذا فشل يرجع النص الإنجليزي الأصلي
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, 3);
+    // 1 معناه طلب واحد فقط بالوقت الواحد (تسلسل مو توازي)
+    const chunkResults = await runConcurrentPool(tasks, 1); 
     const finalTranslations = chunkResults.flat();
 
     let srtOutput = '';
@@ -223,7 +224,6 @@ async function handleTranslationSrt(subUrl) {
         srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
     });
     
-    console.log(`[Translate] Done. Returning SRT.`);
     return srtOutput;
 }
 
@@ -236,9 +236,9 @@ async function handleTranslationAss(subUrl) {
     }
 
     const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص من الملف.`;
+    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-    const CHUNK = 40;
+    const CHUNK = 80;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
@@ -248,7 +248,7 @@ async function handleTranslationAss(subUrl) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, 3);
+    const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
     const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
