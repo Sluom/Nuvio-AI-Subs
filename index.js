@@ -108,14 +108,14 @@ app.get('/subtitles/:type/:id', async (req, res) => {
         const encodedUrl = encodeURIComponent(subUrl);
         const transSubs = [
             {
-                id: \`nuvio-ai-srt-1\`,
-                url: \`${baseUrl}/stream-ai.srt?url=${encodedUrl}\`,
+                id: 'nuvio-ai-srt-1',
+                url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`,
                 lang: 'ara',
                 format: 'srt'
             },
             {
-                id: \`nuvio-ai-ass-1\`,
-                url: \`${baseUrl}/stream-ai.ass?url=${encodedUrl}\`,
+                id: 'nuvio-ai-ass-1',
+                url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`,
                 lang: 'ara',
                 format: 'ass'
             }
@@ -158,7 +158,7 @@ app.get(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
 
 // تشغيل السيرفر الدائم على Render بدون شروط
 app.listen(PORT, () => {
-    console.log(\`✅ Nuvio AI Subs Server is LIVE and listening on port \${PORT}\`);
+    console.log(`✅ Nuvio AI Subs Server is LIVE and listening on port ${PORT}`);
 });
 
 module.exports = app;
