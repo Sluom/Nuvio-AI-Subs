@@ -5,7 +5,7 @@ const zlib = require('zlib');
 
 // إعدادات APInex الثابتة
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
-const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
+const APINEX_API_KEY = process.env.API_KEY_APInex;
 const APINEX_MODEL = 'free/claude-sonnet-4.6';
 
 const ASS_DEFAULT_HEADER = `[Script Info]
