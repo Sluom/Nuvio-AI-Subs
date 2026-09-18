@@ -9,14 +9,14 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
-// المانيفست متوافق مع هيكل إضافتك الثانية
+// رفعنا الإصدار حتى Nuvio يفرمت الكاش ويقراها كإضافة جديدة
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.0.2',
+    version: '1.0.3',
     name: 'Nuvio AI Subs',
     description: 'Auto-translate any subtitle into Arabic using APInex AI Model.',
     resources: ['subtitles'],
-    types: ['movie', 'series', 'anime'],
+    types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
     catalogs: [],
     behaviorHints: {
@@ -38,7 +38,7 @@ app.get(['/', '/configure'], (req, res) => {
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Nuvio AI Subs (v1.0.2)</title>
+        <title>Nuvio AI Subs (v1.0.3)</title>
         <style>
             body { background: #0b1120; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
             h1 { color: #38bdf8; }
@@ -47,15 +47,15 @@ app.get(['/', '/configure'], (req, res) => {
         </style>
     </head>
     <body>
-        <h1>Nuvio AI Subs (v1.0.2)</h1>
-        <p>هذه الإضافة تسحب أي ترجمة وتحولها للعربية فورياً عبر الذكاء الاصطناعي.</p>
+        <h1>Nuvio AI Subs (v1.0.3)</h1>
+        <p>هذه الإضافة جاهزة وتسحب الترجمات مجاناً بدون API Keys للتحويل عبر الذكاء الاصطناعي.</p>
         <a class="btn" href="stremio://${req.headers.host}/manifest.json">تثبيت الإضافة 🚀</a>
     </body>
     </html>
     `);
 });
 
-// دعم المانيفست مع وبدون Config (نفس كود Vercel مالتك)
+// مسار المانيفست متوافق مع Vercel
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -63,86 +63,68 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.json(MANIFEST);
 });
 
-async function findSourceSubtitle(imdbId, season, episode, type) {
-    try {
-        let url = `https://api.subdl.com/api/v1/subtitles?imdb_id=${imdbId}`;
-        if (type === 'series') {
-            url += `&season_number=${season}&episode_number=${episode}`;
-        }
-        
-        console.log(`[Search] SubDL => ID: ${imdbId}`);
-        
-        const r = await axios.get(url, { 
-            timeout: 10000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } 
-        });
-        
-        if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
-            let selectedSub = r.data.subtitles.find(sub => sub.language && sub.language.toLowerCase() === 'english');
-            if (!selectedSub) selectedSub = r.data.subtitles[0];
-            
-            const dlLink = `https://dl.subdl.com${selectedSub.url}`;
-            return dlLink;
-        }
-    } catch (e) {
-        console.error("[Search Error]:", e.message);
-    }
-    return null;
-}
-
-// التعديل الأهم: مسارات متوافقة 100% مع Nuvio (نسخاً من كود Vercel)
+// مسار جلب الترجمات (نفس نظام Vercel بالضبط للروابط الذكية)
 app.get([
-  '/subtitles/:type/:id', 
-  '/subtitles/:type/:id/:extra',
-  '/:config/subtitles/:type/:id',
-  '/:config/subtitles/:type/:id/:extra'
+  '/subtitles/:type/:reqId(*)', 
+  '/:config/subtitles/:type/:reqId(*)'
 ], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    // معالجة الـ ID بنفس طريقتك الذكية
-    let targetId = req.params.id || '';
+    // استخراج الـ ID النظيف (مثال: tt0903747:1:1)
+    let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) {
         targetId = targetId.slice(0, -5);
     }
 
     const type = req.params.type;
-    const parts = targetId.split(':');
-    const imdbId = parts[0];
-    const season = parts[1] || 1;
-    const episode = parts[2] || 1;
     const baseUrl = getBaseUrl(req);
 
-    console.log(`[Nuvio Request] Type=${type} | ID=${imdbId}`);
+    console.log(`[Request] Nuvio is asking for: ${type} - ${targetId}`);
 
     try {
-        const subUrl = await findSourceSubtitle(imdbId, season, episode, type);
+        // الحركة الذكية: البحث في إضافة OpenSubtitles الرسمية المجانية بدون مفاتيح
+        const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
+        const r = await axios.get(osUrl, { timeout: 10000 });
         
-        if (!subUrl) {
-             return res.json({ subtitles: [] });
+        if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
+            // نبحث عن أي ترجمة إنجليزية كمرجع للذكاء الاصطناعي
+            let sourceSub = r.data.subtitles.find(s => (s.lang || '').toLowerCase().startsWith('en'));
+            
+            // إذا ماكو إنجليزي، ناخذ أول ترجمة متوفرة
+            if (!sourceSub) {
+                sourceSub = r.data.subtitles[0];
+            }
+
+            const sourceUrl = sourceSub.url;
+            const encodedUrl = encodeURIComponent(sourceUrl);
+            
+            // تجهيز الـ 5 خيارات مالتك للذكاء الاصطناعي
+            const transSubs = [
+                { id: 'nuvio-ai-srt-1', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 1' },
+                { id: 'nuvio-ai-srt-2', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 2' },
+                { id: 'nuvio-ai-srt-3', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 3' },
+                { id: 'nuvio-ai-ass-1', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', title: 'APInex ASS 1' },
+                { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', title: 'APInex ASS 2' }
+            ];
+
+            console.log(`[Success] Retrieved free source & sent 5 AI links to Nuvio!`);
+            return res.json({ subtitles: transSubs });
         }
-
-        const encodedUrl = encodeURIComponent(subUrl);
         
-        const transSubs = [
-            { id: 'nuvio-ai-srt-1', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-srt-2', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-srt-3', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-ass-1', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass' },
-            { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass' }
-        ];
-
-        console.log(`[Success] 5 AI Subtitles sent!`);
-        res.json({ subtitles: transSubs });
+        // إذا ماكو أي ترجمة أصلية
+        console.log(`[Result] No source found at all.`);
+        return res.json({ subtitles: [] });
+        
     } catch (err) {
-        console.error("[Route Error]:", err.message);
-        res.json({ subtitles: [] });
+        console.error("[Search Error]:", err.message);
+        return res.json({ subtitles: [] });
     }
 });
 
+// مسار الترجمة بالذكاء الاصطناعي
 app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
-    // دعم OPTIONS مثل Vercel
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     
     const targetUrl = req.query.url;
@@ -157,23 +139,24 @@ app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
         if (isAss) {
             finalContent = await handleTranslationAss(targetUrl);
             res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-            res.setHeader('Content-Disposition', 'inline; filename="subtitle.ssa"');
+            res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
         } else {
             finalContent = await handleTranslationSrt(targetUrl);
             res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
-            res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+            res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
         }
 
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
         res.send(finalContent);
+        console.log(`[Translate Success] Delivery Done!`);
     } catch (e) {
         console.error('[Translation Error]:', e.message);
-        res.status(500).send('Error generating translation');
+        res.status(500).send('Error generating AI translation');
     }
 });
 
-// ريندر يحتاج السيرفر يشتغل دائماً بدون شرط (عكس Vercel)
+// تشغيل سيرفر ريندر بشكل مستمر
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
 });
