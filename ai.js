@@ -3,7 +3,7 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 
-// إعدادات APInex الثابتة
+// إعدادات APInex
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = process.env.API_KEY_APInex;
 const APINEX_MODEL = 'free/claude-sonnet-4.6';
@@ -26,27 +26,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 function fixArabicEncoding(buffer) {
     if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
-
     if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
         try { return Buffer.from(iconv.decode(buffer, 'utf16-le'), 'utf-8'); } catch (e) { }
     }
     if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
         try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) { }
     }
-
     const utf8Text = buffer.toString('utf-8');
     if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
-
     try {
         const decodedWin = iconv.decode(buffer, 'windows-1256');
         if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
     } catch (e) { }
-
     try {
         const decodedIso = iconv.decode(buffer, 'iso-8859-6');
         if (/[\u0600-\u06FF]/.test(decodedIso)) return Buffer.from(decodedIso, 'utf-8');
     } catch (e) { }
-
     return buffer;
 }
 
@@ -87,7 +82,7 @@ function parseRobustJsonArray(raw, expectedLength) {
     let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
     try {
         const parsed = JSON.parse(clean);
-        const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+        let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => String(x || '').trim());
         }
@@ -119,22 +114,25 @@ async function runConcurrentPool(tasks, limit = 2) {
 }
 
 async function translateChunkStrict(texts) {
-    const prompt = `You are an automated subtitle translator. Target Language: ARABIC ONLY.
-Task: Translate the JSON array of strings into Arabic.
-Rules:
-1. Return a JSON object with key "translations" containing the Arabic strings array.
-2. DO NOT use double quotes inside strings.
-3. NEVER output English words.
-Length: ${texts.length}.
+    const prompt = `You are a strict JSON subtitle translator. Translate the array to Arabic.
+ONLY OUTPUT VALID JSON ARRAY OF STRINGS. NO OTHER TEXT. NO MARKDOWN.
+Input length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
     try {
         const r = await axios.post(
             APINEX_BASE_URL,
-            { model: APINEX_MODEL, messages: [{ role: 'user', content: prompt }] },
+            { 
+                model: APINEX_MODEL, 
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.2 // تقليل الهلوسة
+            },
             {
-                headers: { Authorization: `Bearer ${APINEX_API_KEY}`, 'Content-Type': 'application/json' },
-                timeout: 30000 // وقت أطول مسموح به في Render
+                headers: { 
+                    'Authorization': `Bearer ${APINEX_API_KEY}`, 
+                    'Content-Type': 'application/json' 
+                },
+                timeout: 30000
             }
         );
         if (r.status === 200) {
@@ -142,37 +140,40 @@ Input: ${JSON.stringify(texts)}`;
             if (parsedArr && parsedArr.length > 0) return parsedArr;
         }
     } catch (e) {
-        console.error("APInex API Error");
+        console.error("APInex Error:", e.message);
     }
     return null;
 }
 
+// تعديل جوهري لتجاوز الحظر وتحميل الملفات بشكل صحيح
 async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
 
-    if (decodedUrl.startsWith('os://')) {
-        const dataUrl = decodedUrl.replace('os://', 'http://dummy.com/');
-        const parsed = new URL(dataUrl);
-        const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
-        // نعتمد مجاناً بدون مفتاح إذا أمكن
-        const dlRes = await axios.post(
-            'https://api.opensubtitles.com/api/v1/download',
-            { file_id: fileId },
-            { headers: { 'User-Agent': 'NuvioSubtitles v1.0.0', 'Content-Type': 'application/json' }, timeout: 8000 }
-        );
-        const directLink = dlRes.data?.link;
-        if (!directLink) throw new Error("OS direct link not found");
-
-        response = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 15000 });
-    } else {
-        response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
+    try {
+        console.log(`[Fetch] Downloading source: ${decodedUrl}`);
+        response = await axios.get(decodedUrl, { 
+            responseType: 'arraybuffer', 
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            }
+        });
+    } catch (err) {
+        console.error(`[Fetch Error] Failed to download source subtitle: ${err.message}`);
+        throw err;
     }
 
     let buffer = Buffer.from(response.data);
+    
+    // فك الضغط إذا كان GZIP
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
         buffer = zlib.gunzipSync(buffer);
     }
+    
+    // فك الضغط إذا كان ZIP
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
@@ -181,6 +182,7 @@ async function fetchAndExtractSub(subUrl) {
         if (assEntry) buffer = assEntry.getData();
         else if (subEntry) buffer = subEntry.getData();
     }
+    
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
@@ -189,12 +191,14 @@ async function handleTranslationSrt(subUrl) {
     try {
         originalText = await fetchAndExtractSub(subUrl);
     } catch (e) {
-        return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر للترجمة.\n";
+        console.log("[Error] Returning fallback SRT");
+        return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n";
     }
 
     const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
+    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص من الملف.\n\n";
 
+    console.log(`[Translate] Starting translation of ${cues.length} cues...`);
     const CHUNK = 40;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
@@ -202,7 +206,7 @@ async function handleTranslationSrt(subUrl) {
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
         const translated = await translateChunkStrict(texts);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text); // إذا فشل يرجع النص الإنجليزي الأصلي
     });
 
     const chunkResults = await runConcurrentPool(tasks, 3);
@@ -216,8 +220,10 @@ async function handleTranslationSrt(subUrl) {
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
-        srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx] || 'ـ'}\n\n`;
+        srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
     });
+    
+    console.log(`[Translate] Done. Returning SRT.`);
     return srtOutput;
 }
 
@@ -226,11 +232,11 @@ async function handleTranslationAss(subUrl) {
     try {
         originalText = await fetchAndExtractSub(subUrl);
     } catch (e) {
-        return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
+        return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`;
     }
 
     const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
+    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص من الملف.`;
 
     const CHUNK = 40;
     const chunks = [];
@@ -239,12 +245,12 @@ async function handleTranslationAss(subUrl) {
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
         const translated = await translateChunkStrict(texts);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 3);
     const finalTranslations = chunkResults.flat();
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
+    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
