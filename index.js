@@ -9,26 +9,18 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
-// المانيفست المعدل ليكون متوافق 100% مع Nuvio و Stremio
+// التعديل السحري هنا: تبسيط المانيفست لأقصى حد ليتوافق مع Nuvio النسخة القديمة
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
     version: '1.0.0',
     name: 'Nuvio AI Subs',
-    description: 'Auto-translate any subtitle into Arabic using APInex AI Model.',
-    resources: [
-        {
-            name: "subtitles",
-            types: ["movie", "series", "anime"],
-            idPrefixes: ["tt", "kitsu"]
-        }
-    ],
+    description: 'Auto-translate any subtitle into Arabic using APInex AI.',
+    // Nuvio القديم يفضل مصفوفة نصوص بسيطة للموارد بدلاً من كائنات معقدة
+    resources: ['subtitles'],
     types: ['movie', 'series', 'anime'],
+    // إضافة idPrefixes هنا ضرورية جداً للنسخ القديمة
     idPrefixes: ['tt', 'kitsu'],
-    catalogs: [],
-    behaviorHints: {
-        configurable: false, // تم تعطيلها لأن Nuvio مرات ما يدعمها زين
-        configurationRequired: false
-    }
+    catalogs: []
 };
 
 function getBaseUrl(req) {
@@ -54,7 +46,7 @@ app.get(['/', '/configure'], (req, res) => {
     </head>
     <body>
         <h1>Nuvio AI Subs</h1>
-        <p>هذه الإضافة تسحب أي ترجمة (بأي لغة متوفرة) وتحولها للعربية فورياً عبر الذكاء الاصطناعي.</p>
+        <p>هذه الإضافة تسحب أي ترجمة وتحولها للعربية فورياً عبر الذكاء الاصطناعي.</p>
         <a class="btn" href="stremio://${req.headers.host}/manifest.json">تثبيت الإضافة 🚀</a>
     </body>
     </html>
@@ -75,7 +67,7 @@ async function findSourceSubtitle(imdbId, season, episode, type) {
             url += `&season_number=${season}&episode_number=${episode}`;
         }
         
-        console.log(`[Search] Searching SubDL for: ${imdbId} | URL: ${url}`);
+        console.log(`[Search] Searching SubDL for: ${imdbId}`);
         
         const r = await axios.get(url, { 
             timeout: 10000,
@@ -93,10 +85,10 @@ async function findSourceSubtitle(imdbId, season, episode, type) {
             console.log(`[Search] Found Subtitle: ${dlLink}`);
             return dlLink;
         } else {
-            console.log(`[Search] No subtitles found for ${imdbId} on SubDL.`);
+            console.log(`[Search] No subtitles found.`);
         }
     } catch (e) {
-        console.error("[Search Error] SubDL failed:", e.message);
+        console.error("[Search Error]:", e.message);
     }
     return null;
 }
@@ -116,30 +108,30 @@ app.get('/subtitles/:type/:id', async (req, res) => {
     const episode = parts[2] || 1;
     const baseUrl = getBaseUrl(req);
 
-    console.log(`[Request] Nuvio asked for: Type=${type}, ID=${imdbId}, Season=${season}, Episode=${episode}`);
+    console.log(`[Request Received] Nuvio is asking for subtitles! ID=${imdbId}`);
 
     try {
         const subUrl = await findSourceSubtitle(imdbId, season, episode, type);
         
         if (!subUrl) {
-             console.log(`[Result] Returning empty array to Nuvio for ${imdbId}`);
+             console.log(`[Result] No source found, returning empty.`);
              return res.json({ subtitles: [] });
         }
 
         const encodedUrl = encodeURIComponent(subUrl);
         
         const transSubs = [
-            { id: 'nuvio-ai-srt-1', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-srt-2', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-srt-3', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt' },
-            { id: 'nuvio-ai-ass-1', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass' },
-            { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass' }
+            { id: 'nuvio-ai-srt-1', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt', title: 'APInex SRT 1' },
+            { id: 'nuvio-ai-srt-2', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt', title: 'APInex SRT 2' },
+            { id: 'nuvio-ai-srt-3', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', format: 'srt', title: 'APInex SRT 3' },
+            { id: 'nuvio-ai-ass-1', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass', title: 'APInex ASS 1' },
+            { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', format: 'ass', title: 'APInex ASS 2' }
         ];
 
-        console.log(`[Result] Sending 5 AI options to Nuvio for ${imdbId}`);
+        console.log(`[Success] Sent 5 subtitle options to Nuvio!`);
         res.json({ subtitles: transSubs });
     } catch (err) {
-        console.error("Subtitle Route Error:", err.message);
+        console.error("[Route Error]:", err.message);
         res.json({ subtitles: [] });
     }
 });
@@ -150,7 +142,7 @@ app.get(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
 
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
     
-    console.log(`[Translate] Starting translation for: ${targetUrl} (isAss: ${isAss})`);
+    console.log(`[Translate Start] isAss: ${isAss}`);
 
     try {
         let finalContent = '';
@@ -167,10 +159,10 @@ app.get(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
         res.send(finalContent);
-        console.log(`[Translate] Translation sent successfully!`);
+        console.log(`[Translate Success] Done!`);
     } catch (e) {
         console.error('[Translate Error]:', e.message);
-        res.status(500).send('Error generating AI translation');
+        res.status(500).send('Error generating translation');
     }
 });
 
