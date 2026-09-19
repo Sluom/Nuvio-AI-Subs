@@ -120,7 +120,8 @@ async function translateChunkStrict(texts) {
         return null;
     }
 
-    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    // التعديل هنا: تم تصحيح اسم الموديل إلى gemini-1.5-flash-latest
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
     
     const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
 
@@ -144,7 +145,7 @@ async function translateChunkStrict(texts) {
             const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             const parsedArr = parseRobustJsonArray(responseText, texts.length);
             if (parsedArr && parsedArr.length > 0) {
-                console.log(`[Success] Translated chunk with Gemini 1.5 Flash`);
+                console.log(`[Success] Translated chunk with Gemini 1.5 Flash Latest`);
                 return parsedArr;
             }
         }
