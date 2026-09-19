@@ -121,7 +121,8 @@ async function translateChunkStrict(texts) {
     }
 
     // التعديل هنا: تم تصحيح اسم الموديل إلى gemini-1.5-flash-latest
-    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  
     
     const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
 
