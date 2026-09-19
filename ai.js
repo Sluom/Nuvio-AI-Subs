@@ -102,7 +102,7 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                await delay(1500); 
+                await delay(1500);
             } catch (err) {
                 results[current] = null;
             }
@@ -120,12 +120,15 @@ async function translateChunkStrict(texts) {
     }
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-    
-    // الأسماء الصحيحة 100% حسب توثيق OpenRouter (لا يمكن أن تعطي 404 الآن)
+
+    // قائمة موديلات مجانية محدّثة - آخر تحديث سبتمبر 2026
+    // ملاحظة: أسماء الموديلات المجانية عند OpenRouter تتغير/تنسحب باستمرار بدون إشعار مسبق.
+    // إذا رجعت كلها 404 لاحقًا، راجع https://openrouter.ai/models?max_price=0 لأحدث الأسماء.
     const modelsToTry = [
-        'google/gemini-1.5-flash',
-        'meta-llama/llama-3.1-8b-instruct:free',
-        'qwen/qwen-2-7b-instruct:free'
+        'openrouter/free:free',                    // راوتر تلقائي يختار موديل مجاني متاح حاليًا (أضمن خيار)
+        'google/gemini-2.0-flash-exp:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'qwen/qwen-2.5-72b-instruct:free'
     ];
 
     const prompt = `You are a professional subtitle translator. Translate the following JSON array of English strings to Arabic.
@@ -143,29 +146,34 @@ Input: ${JSON.stringify(texts)}`;
                     temperature: 0.1
                 },
                 {
-                    headers: { 
+                    headers: {
                         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                        'HTTP-Referer': 'https://nuvio-ai.com', 
-                        'X-Title': 'Nuvio Subtitles', 
-                        'Content-Type': 'application/json' 
+                        'HTTP-Referer': 'https://nuvio-ai.com',
+                        'X-Title': 'Nuvio Subtitles',
+                        'Content-Type': 'application/json'
                     },
                     timeout: 30000
                 }
             );
-            
+
             if (r.status === 200) {
                 const responseText = r.data?.choices?.[0]?.message?.content;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length);
                 if (parsedArr && parsedArr.length > 0) {
                     console.log(`[Success] Translated chunk via OpenRouter using: ${model}`);
                     return parsedArr;
+                } else {
+                    console.error(`[Parse Fail - ${model}] Raw response:`, responseText?.slice(0, 300));
                 }
             }
         } catch (e) {
-            console.error(`[OpenRouter Error - ${model}]: ${e.response?.status || e.message}`);
+            // نطبع رسالة الخطأ الكاملة من OpenRouter مو بس رقم الحالة، هذا أهم شي لتشخيص 400/404 مستقبلًا
+            const status = e.response?.status || 'no-status';
+            const body = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+            console.error(`[OpenRouter Error - ${model}] status=${status} body=${body}`);
         }
     }
-    
+
     console.error("[Error] All OpenRouter models failed.");
     return null;
 }
@@ -176,8 +184,8 @@ async function fetchAndExtractSub(subUrl) {
 
     try {
         console.log(`[Fetch] Downloading source: ${decodedUrl}`);
-        response = await axios.get(decodedUrl, { 
-            responseType: 'arraybuffer', 
+        response = await axios.get(decodedUrl, {
+            responseType: 'arraybuffer',
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -190,11 +198,11 @@ async function fetchAndExtractSub(subUrl) {
     }
 
     let buffer = Buffer.from(response.data);
-    
+
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
         buffer = zlib.gunzipSync(buffer);
     }
-    
+
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
@@ -203,7 +211,7 @@ async function fetchAndExtractSub(subUrl) {
         if (assEntry) buffer = assEntry.getData();
         else if (subEntry) buffer = subEntry.getData();
     }
-    
+
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
@@ -229,7 +237,7 @@ async function handleTranslationSrt(subUrl) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, 1); 
+    const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
 
     let srtOutput = '';
@@ -242,7 +250,7 @@ async function handleTranslationSrt(subUrl) {
         if (eTime.split(',')[1].length === 2) eTime += '0';
         srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
     });
-    
+
     return srtOutput;
 }
 
