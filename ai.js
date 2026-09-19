@@ -3,7 +3,6 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 
-// إعدادات Gemini API الرسمية
 const GEMINI_API_KEY = process.env.API_KEY_GEMINI;
 
 const ASS_DEFAULT_HEADER = `[Script Info]
@@ -116,47 +115,53 @@ async function runConcurrentPool(tasks, limit = 1) {
 
 async function translateChunkStrict(texts) {
     if (!GEMINI_API_KEY) {
-        console.error("Gemini API Key is missing!");
+        console.error("[Fatal] Gemini API Key is missing!");
         return null;
     }
 
-    // التعديل الجذري: المسار الصحيح المعتمد في توثيق جوجل لإصدار v1beta
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key=${GEMINI_API_KEY}`;
+    // خوارزمية الهجوم الشامل: كل نماذج جوجل المتاحة (من الأحدث للأقدم والأكثر استقراراً)
+    const modelsToTry = [
+        'gemini-1.5-flash',
+        'gemini-1.5-flash-001',
+        'gemini-1.5-flash-002',
+        'gemini-1.5-pro',
+        'gemini-pro' // الموديل الكلاسيكي المفتوح 100% لكل الحسابات
+    ];
 
-    
-    const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
+    const prompt = `You are a strict JSON subtitle translator. Translate the array to Arabic.
+ONLY OUTPUT VALID JSON ARRAY OF STRINGS. NO OTHER TEXT. NO MARKDOWN.
+Input length: ${texts.length}.
+Input: ${JSON.stringify(texts)}`;
 
-    try {
-        const r = await axios.post(
-            GEMINI_URL,
-            {
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: {
-                    temperature: 0.1,
-                    responseMimeType: "application/json"
-                }
-            },
-            {
-                headers: { 
-                    'Content-Type': 'application/json',
+    for (const model of modelsToTry) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        try {
+            const r = await axios.post(
+                url,
+                {
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { temperature: 0.1 }
                 },
-                timeout: 30000
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    timeout: 30000
+                }
+            );
+            
+            if (r.status === 200) {
+                const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const parsedArr = parseRobustJsonArray(responseText, texts.length);
+                if (parsedArr && parsedArr.length > 0) {
+                    console.log(`[Success] Translated chunk with Google Model: ${model}`);
+                    return parsedArr;
+                }
             }
-        );
-        
-        if (r.status === 200) {
-            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            const parsedArr = parseRobustJsonArray(responseText, texts.length);
-            if (parsedArr && parsedArr.length > 0) {
-                console.log(`[Success] Translated chunk with Gemini 1.5 Flash`);
-                return parsedArr;
-            }
+        } catch (e) {
+            console.error(`[Gemini Error - ${model}]: ${e.response?.data?.error?.message || e.message}`);
         }
-    } catch (e) {
-        // طباعة تفاصيل الخطأ بدقة لمعرفة المشكلة إذا تكررت
-        console.error(`[Gemini Error]: ${e.response?.data?.error?.message || e.message}`);
     }
     
+    console.error("[Error] All Google Gemini models failed or are unauthorized for this API Key.");
     return null;
 }
 
