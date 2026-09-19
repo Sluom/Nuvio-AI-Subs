@@ -3,17 +3,8 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 
-// إعدادات APInex
-const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
-const APINEX_API_KEY = process.env.API_KEY_APInex;
-
-// مصفوفة النماذج الاحتياطية (بالتسلسل حسب الأولوية والسرعة)
-const APINEX_MODELS = [
-    'free/gemini-3.8-flash',
-    'free/deepseek-v4-flash',
-    'free/qwen-3.8-max',
-    'free/gemini-3.1-pro'
-];
+// إعدادات Gemini API الرسمية
+const GEMINI_API_KEY = process.env.API_KEY_GEMINI;
 
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -112,7 +103,7 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                await delay(1500); 
+                await delay(1500); // استراحة لتجنب حظر جوجل
             } catch (err) {
                 results[current] = null;
             }
@@ -124,45 +115,43 @@ async function runConcurrentPool(tasks, limit = 1) {
 }
 
 async function translateChunkStrict(texts) {
-    const prompt = `You are a strict JSON subtitle translator. Translate the array to Arabic.
-ONLY OUTPUT VALID JSON ARRAY OF STRINGS. NO OTHER TEXT. NO MARKDOWN.
-Input length: ${texts.length}.
-Input: ${JSON.stringify(texts)}`;
+    if (!GEMINI_API_KEY) {
+        console.error("Gemini API Key is missing!");
+        return null;
+    }
 
-    // التعديل الذكي: تجربة النماذج واحد ورا الثاني
-    for (const modelName of APINEX_MODELS) {
-        try {
-            const r = await axios.post(
-                APINEX_BASE_URL,
-                { 
-                    model: modelName, 
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature: 0.2
-                },
-                {
-                    headers: { 
-                        'Authorization': `Bearer ${APINEX_API_KEY}`, 
-                        'Content-Type': 'application/json' 
-                    },
-                    timeout: 30000
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    
+    const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
+
+    try {
+        const r = await axios.post(
+            GEMINI_URL,
+            {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                    temperature: 0.1, // تقليل الهلوسة
+                    responseMimeType: "application/json" // إجبار النموذج على إرجاع JSON صافي فقط
                 }
-            );
-            
-            if (r.status === 200) {
-                const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-                if (parsedArr && parsedArr.length > 0) {
-                    // إذا نجح يطبعلك بالسجل ياهو اللي اشتغل حتى تعرف
-                    console.log(`[Success] Translated using model: ${modelName}`);
-                    return parsedArr;
-                }
+            },
+            {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 30000
             }
-        } catch (e) {
-            // إذا فشل هذا الموديل راح يطبع الخطأ ويعبر للموديل اللي بعده تلقائياً
-            console.error(`[Warning] Model ${modelName} failed: ${e.response?.status || e.message}. Trying next...`);
+        );
+        
+        if (r.status === 200) {
+            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const parsedArr = parseRobustJsonArray(responseText, texts.length);
+            if (parsedArr && parsedArr.length > 0) {
+                console.log(`[Success] Translated chunk with Gemini 1.5 Flash`);
+                return parsedArr;
+            }
         }
+    } catch (e) {
+        console.error(`[Gemini Error]: ${e.response?.data?.error?.message || e.message}`);
     }
     
-    console.error("[Error] All fallback models failed.");
     return null;
 }
 
