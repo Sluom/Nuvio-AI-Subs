@@ -111,6 +111,35 @@ async function runConcurrentPool(tasks, limit) {
     return results;
 }
 
+// --- Fallback ثانوي: يشتغل فقط لو OpenRouter فشل تمامًا (مثلاً سقف الـ 50 طلب/يوم) ---
+// نسخة Google غير الرسمية: بدون مفتاح، بدون سقف يومي ثابت، لكن غير موثقة رسميًا
+// وممكن جوجل يحظر IP السيرفر مؤقتًا لو الاستخدام كثيف جدًا. الجودة أبسط من AI حقيقي
+// لكنها أفضل بكثير من عرض الإنجليزي بدون أي ترجمة.
+async function translateSingleGoogle(text) {
+    const params = new URLSearchParams({ client: 'gtx', sl: 'en', tl: 'ar', dt: 't', q: text });
+    const url = `https://translate.googleapis.com/translate_a/single?${params.toString()}`;
+    const r = await axios.get(url, { timeout: 8000 });
+    // شكل الرد: [[["ترجمة1","original1",...],["ترجمة2","original2",...]], ...]
+    const segments = r.data?.[0];
+    if (!Array.isArray(segments)) return null;
+    const joined = segments.map(seg => seg[0]).join('');
+    return joined.trim() || null;
+}
+
+async function translateChunkGoogleFallback(texts) {
+    console.log(`[Fallback] Using Google Translate for ${texts.length} lines (OpenRouter unavailable)...`);
+    const tasks = texts.map(text => async () => {
+        try {
+            const translated = await translateSingleGoogle(text);
+            return translated || text;
+        } catch (e) {
+            return text; // سطر واحد يفشل ما يفسد باقي الشنك
+        }
+    });
+    // تزامن محدود (8) حتى ما نضرب IP السيرفر بحظر مؤقت من جوجل
+    return runConcurrentPool(tasks, 8);
+}
+
 // مهلة كل نداء API لموديل واحد (بالميلي ثانية). خليتها أعلى لأن نوفيو فعليًا يصبر
 // دقيقة-دقيقتين على تحميل ملف الترجمة (مو ثواني معدودة كما افترضت غلط سابقًا).
 const MODEL_CALL_TIMEOUT_MS = 25000;
@@ -118,7 +147,7 @@ const MODEL_CALL_TIMEOUT_MS = 25000;
 async function translateChunkStrict(texts, attempt = 1) {
     if (!OPENROUTER_API_KEY) {
         console.error("[Fatal] OpenRouter API Key is missing!");
-        return null;
+        return translateChunkGoogleFallback(texts);
     }
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -166,6 +195,12 @@ Input: ${JSON.stringify(texts)}`;
         const status = e.response?.status || 'no-status';
         const body = e.response?.data ? JSON.stringify(e.response.data) : e.message;
         console.error(`[OpenRouter Error - ${model}] status=${status} body=${body}`);
+
+        // سقف يومي (429) ما فيه فايدة نعيد المحاولة على نفس المزود - روح على جوجل فورًا
+        if (status === 429) {
+            console.error(`[RateLimit] OpenRouter daily cap hit — switching to Google fallback immediately.`);
+            return translateChunkGoogleFallback(texts);
+        }
     }
 
     // محاولة إعادة واحدة بس (الراوتر أحيانًا يوجّه لموديل مزدحم لحظيًا فيرجع رد فاضي)
@@ -173,8 +208,8 @@ Input: ${JSON.stringify(texts)}`;
         return translateChunkStrict(texts, attempt + 1);
     }
 
-    console.error("[Error] OpenRouter translation failed after retry.");
-    return null;
+    console.error("[Error] OpenRouter translation failed after retry — falling back to Google Translate.");
+    return translateChunkGoogleFallback(texts);
 }
 
 // يبني نتيجة بدون ترجمة فعلية (نص إنجليزي كما هو) - يُستخدم كـ fallback فوري وسريع
@@ -243,24 +278,61 @@ async function fetchAndExtractSub(subUrl) {
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
-async function handleTranslationSrt(subUrl) {
-    let originalText = "";
-    try {
-        originalText = await fetchAndExtractSub(subUrl);
-    } catch (e) {
-        return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n";
+// كاش بسيط بالذاكرة: نفس رابط الترجمة (نفس الفيلم/الحلقة) ما يُترجم إلا مرة وحدة،
+// أي طلب ثاني له (من نفس المستخدم أو مستخدم غيره) يرجع فورًا بدون أي نداء API جديد.
+// هذا يقلل استهلاك الحد اليومي عند OpenRouter بشكل كبير جدًا لأن نفس الأفلام تتكرر كثير.
+const translationCache = new Map();
+const CACHE_MAX_ENTRIES = 500; // حماية بسيطة من نمو غير محدود للذاكرة
+
+function getCached(subUrl) {
+    return translationCache.get(subUrl) || null;
+}
+
+function setCached(subUrl, finalTranslations) {
+    if (translationCache.size >= CACHE_MAX_ENTRIES) {
+        const oldestKey = translationCache.keys().next().value;
+        translationCache.delete(oldestKey);
+    }
+    translationCache.set(subUrl, finalTranslations);
+}
+
+// يجيب النصوص المترجمة (كل cue على حدة) لرابط ترجمة معيّن، مستخدم من طرف
+// كل من SRT و ASS عشان ما نكرر نفس العمل ولا نفس نداءات الـ API.
+async function getTranslatedCues(subUrl) {
+    const cached = getCached(subUrl);
+    if (cached) {
+        console.log(`[Cache Hit] Reusing cached translation for: ${subUrl}`);
+        return cached;
     }
 
+    const originalText = await fetchAndExtractSub(subUrl);
     const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
+    if (!cues.length) return { cues: [], finalTranslations: [] };
 
     console.log(`[Translate] Starting translation of ${cues.length} cues...`);
-    const CHUNK = 80;
+    // شنكات أكبر (250 بدل 80) تقلل عدد نداءات الـ API لكل ملف من ~5 إلى 1-2،
+    // وهذا يوفر نسبة كبيرة من السقف اليومي المحدود عند OpenRouter.
+    const CHUNK = 250;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
     const chunkResults = await translateAllChunks(chunks);
     const finalTranslations = chunkResults.flat();
+
+    const result = { cues, finalTranslations };
+    setCached(subUrl, result);
+    return result;
+}
+
+async function handleTranslationSrt(subUrl) {
+    let cues, finalTranslations;
+    try {
+        ({ cues, finalTranslations } = await getTranslatedCues(subUrl));
+    } catch (e) {
+        return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n";
+    }
+
+    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
     let srtOutput = '';
     cues.forEach((c, idx) => {
@@ -277,22 +349,15 @@ async function handleTranslationSrt(subUrl) {
 }
 
 async function handleTranslationAss(subUrl) {
-    let originalText = "";
+    let cues, finalTranslations;
     try {
-        originalText = await fetchAndExtractSub(subUrl);
+        ({ cues, finalTranslations } = await getTranslatedCues(subUrl));
     } catch (e) {
         return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`;
     }
 
-    const cues = extractCuesUniversal(originalText);
     if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-    const CHUNK = 80;
-    const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
-
-    const chunkResults = await translateAllChunks(chunks);
-    const finalTranslations = chunkResults.flat();
     const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
