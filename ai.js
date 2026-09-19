@@ -6,7 +6,14 @@ const zlib = require('zlib');
 // إعدادات APInex
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = process.env.API_KEY_APInex;
-const APINEX_MODEL = 'free/claude-sonnet-4.6';
+
+// مصفوفة النماذج الاحتياطية (بالتسلسل حسب الأولوية والسرعة)
+const APINEX_MODELS = [
+    'free/gemini-3.8-flash',
+    'free/deepseek-v4-flash',
+    'free/qwen-3.8-max',
+    'free/gemini-3.1-pro'
+];
 
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -95,10 +102,9 @@ function parseRobustJsonArray(raw, expectedLength) {
     return null;
 }
 
-// دالة تأخير لتجنب الحظر
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function runConcurrentPool(tasks, limit = 1) { // خليناها 1 حتى يرسل طلب واحد فقط
+async function runConcurrentPool(tasks, limit = 1) {
     const results = new Array(tasks.length);
     let index = 0;
     async function worker() {
@@ -106,7 +112,6 @@ async function runConcurrentPool(tasks, limit = 1) { // خليناها 1 حتى 
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                // استراحة ثانية ونص بين كل طلب حتى APInex ما يحظرنا
                 await delay(1500); 
             } catch (err) {
                 results[current] = null;
@@ -124,29 +129,40 @@ ONLY OUTPUT VALID JSON ARRAY OF STRINGS. NO OTHER TEXT. NO MARKDOWN.
 Input length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-    try {
-        const r = await axios.post(
-            APINEX_BASE_URL,
-            { 
-                model: APINEX_MODEL, 
-                messages: [{ role: 'user', content: prompt }],
-                temperature: 0.2
-            },
-            {
-                headers: { 
-                    'Authorization': `Bearer ${APINEX_API_KEY}`, 
-                    'Content-Type': 'application/json' 
+    // التعديل الذكي: تجربة النماذج واحد ورا الثاني
+    for (const modelName of APINEX_MODELS) {
+        try {
+            const r = await axios.post(
+                APINEX_BASE_URL,
+                { 
+                    model: modelName, 
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.2
                 },
-                timeout: 30000
+                {
+                    headers: { 
+                        'Authorization': `Bearer ${APINEX_API_KEY}`, 
+                        'Content-Type': 'application/json' 
+                    },
+                    timeout: 30000
+                }
+            );
+            
+            if (r.status === 200) {
+                const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
+                if (parsedArr && parsedArr.length > 0) {
+                    // إذا نجح يطبعلك بالسجل ياهو اللي اشتغل حتى تعرف
+                    console.log(`[Success] Translated using model: ${modelName}`);
+                    return parsedArr;
+                }
             }
-        );
-        if (r.status === 200) {
-            const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-            if (parsedArr && parsedArr.length > 0) return parsedArr;
+        } catch (e) {
+            // إذا فشل هذا الموديل راح يطبع الخطأ ويعبر للموديل اللي بعده تلقائياً
+            console.error(`[Warning] Model ${modelName} failed: ${e.response?.status || e.message}. Trying next...`);
         }
-    } catch (e) {
-        console.error("APInex Error:", e.message);
     }
+    
+    console.error("[Error] All fallback models failed.");
     return null;
 }
 
@@ -199,7 +215,7 @@ async function handleTranslationSrt(subUrl) {
     if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
     console.log(`[Translate] Starting translation of ${cues.length} cues...`);
-    const CHUNK = 80; // كبرنا الحزمة لـ 80 سطر حتى نقلل عدد الطلبات
+    const CHUNK = 80;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
@@ -209,7 +225,6 @@ async function handleTranslationSrt(subUrl) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    // 1 معناه طلب واحد فقط بالوقت الواحد (تسلسل مو توازي)
     const chunkResults = await runConcurrentPool(tasks, 1); 
     const finalTranslations = chunkResults.flat();
 
