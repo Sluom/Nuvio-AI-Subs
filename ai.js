@@ -3,7 +3,7 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 
-const GEMINI_API_KEY = process.env.API_KEY_GEMINI;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -114,54 +114,58 @@ async function runConcurrentPool(tasks, limit = 1) {
 }
 
 async function translateChunkStrict(texts) {
-    if (!GEMINI_API_KEY) {
-        console.error("[Fatal] Gemini API Key is missing!");
+    if (!OPENROUTER_API_KEY) {
+        console.error("[Fatal] OpenRouter API Key is missing!");
         return null;
     }
 
-    // خوارزمية الهجوم الشامل: كل نماذج جوجل المتاحة (من الأحدث للأقدم والأكثر استقراراً)
+    const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+    
+    // استخدام موديل Gemini Flash المجاني على سيرفرات OpenRouter
     const modelsToTry = [
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-001',
-        'gemini-1.5-flash-002',
-        'gemini-1.5-pro',
-        'gemini-pro' // الموديل الكلاسيكي المفتوح 100% لكل الحسابات
+        'google/gemini-flash-1.5',
+        'meta-llama/llama-3-8b-instruct:free' 
     ];
 
-    const prompt = `You are a strict JSON subtitle translator. Translate the array to Arabic.
-ONLY OUTPUT VALID JSON ARRAY OF STRINGS. NO OTHER TEXT. NO MARKDOWN.
+    const prompt = `You are a professional subtitle translator. Translate the following JSON array of English strings to Arabic.
+ONLY OUTPUT A VALID JSON ARRAY OF STRINGS. NO OTHER TEXT.
 Input length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
     for (const model of modelsToTry) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
         try {
             const r = await axios.post(
-                url,
+                OPENROUTER_URL,
                 {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { temperature: 0.1 }
+                    model: model,
+                    messages: [{ role: "user", content: prompt }],
+                    temperature: 0.1
                 },
                 {
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                        'HTTP-Referer': 'https://nuvio-ai.com', 
+                        'X-Title': 'Nuvio Subtitles', 
+                        'Content-Type': 'application/json' 
+                    },
                     timeout: 30000
                 }
             );
             
             if (r.status === 200) {
-                const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const responseText = r.data?.choices?.[0]?.message?.content;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length);
                 if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk with Google Model: ${model}`);
+                    console.log(`[Success] Translated chunk via OpenRouter using: ${model}`);
                     return parsedArr;
                 }
             }
         } catch (e) {
-            console.error(`[Gemini Error - ${model}]: ${e.response?.data?.error?.message || e.message}`);
+            console.error(`[OpenRouter Error - ${model}]: ${e.response?.status || e.message}`);
         }
     }
     
-    console.error("[Error] All Google Gemini models failed or are unauthorized for this API Key.");
+    console.error("[Error] All OpenRouter models failed.");
     return null;
 }
 
