@@ -92,9 +92,7 @@ function parseRobustJsonArray(raw, expectedLength) {
     return null;
 }
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-async function runConcurrentPool(tasks, limit = 1) {
+async function runConcurrentPool(tasks, limit) {
     const results = new Array(tasks.length);
     let index = 0;
     async function worker() {
@@ -102,18 +100,22 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                await delay(1500);
             } catch (err) {
                 results[current] = null;
             }
         }
     }
-    const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+    const effectiveLimit = Math.max(1, Math.min(limit || tasks.length, tasks.length));
+    const workers = Array.from({ length: effectiveLimit }, () => worker());
     await Promise.all(workers);
     return results;
 }
 
-async function translateChunkStrict(texts) {
+// مهلة كل نداء API لموديل واحد (بالميلي ثانية). خليتها أعلى لأن نوفيو فعليًا يصبر
+// دقيقة-دقيقتين على تحميل ملف الترجمة (مو ثواني معدودة كما افترضت غلط سابقًا).
+const MODEL_CALL_TIMEOUT_MS = 25000;
+
+async function translateChunkStrict(texts, attempt = 1) {
     if (!OPENROUTER_API_KEY) {
         console.error("[Fatal] OpenRouter API Key is missing!");
         return null;
@@ -121,61 +123,87 @@ async function translateChunkStrict(texts) {
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-    // قائمة موديلات مجانية محدّثة - آخر تحديث سبتمبر 2026
-    // ملاحظة: أسماء الموديلات المجانية عند OpenRouter تتغير/تنسحب باستمرار بدون إشعار مسبق.
-    // إذا رجعت كلها 404 لاحقًا، راجع https://openrouter.ai/models?max_price=0 لأحدث الأسماء.
-    const modelsToTry = [
-        'openrouter/free:free',                    // راوتر تلقائي يختار موديل مجاني متاح حاليًا (أضمن خيار)
-        'google/gemini-2.0-flash-exp:free',
-        'meta-llama/llama-3.3-70b-instruct:free',
-        'qwen/qwen-2.5-72b-instruct:free'
-    ];
+    // openrouter/free:free راوتر تلقائي يختار موديل مجاني متاح حاليًا عند OpenRouter،
+    // وهو الوحيد اللي أثبت نجاحه من اللوق. باقي الأسماء الثابتة (llama/qwen/gemini :free)
+    // انسحبت رسميًا (404 "unavailable for free") فحذفناها عشان ما تضيّع وقت كل طلب.
+    const model = 'openrouter/free:free';
 
     const prompt = `You are a professional subtitle translator. Translate the following JSON array of English strings to Arabic.
 ONLY OUTPUT A VALID JSON ARRAY OF STRINGS. NO OTHER TEXT.
 Input length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-    for (const model of modelsToTry) {
-        try {
-            const r = await axios.post(
-                OPENROUTER_URL,
-                {
-                    model: model,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.1
+    try {
+        const r = await axios.post(
+            OPENROUTER_URL,
+            {
+                model: model,
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.1
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                    'HTTP-Referer': 'https://nuvio-ai.com',
+                    'X-Title': 'Nuvio Subtitles',
+                    'Content-Type': 'application/json'
                 },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                        'HTTP-Referer': 'https://nuvio-ai.com',
-                        'X-Title': 'Nuvio Subtitles',
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 30000
-                }
-            );
-
-            if (r.status === 200) {
-                const responseText = r.data?.choices?.[0]?.message?.content;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length);
-                if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk via OpenRouter using: ${model}`);
-                    return parsedArr;
-                } else {
-                    console.error(`[Parse Fail - ${model}] Raw response:`, responseText?.slice(0, 300));
-                }
+                timeout: MODEL_CALL_TIMEOUT_MS
             }
-        } catch (e) {
-            // نطبع رسالة الخطأ الكاملة من OpenRouter مو بس رقم الحالة، هذا أهم شي لتشخيص 400/404 مستقبلًا
-            const status = e.response?.status || 'no-status';
-            const body = e.response?.data ? JSON.stringify(e.response.data) : e.message;
-            console.error(`[OpenRouter Error - ${model}] status=${status} body=${body}`);
+        );
+
+        if (r.status === 200) {
+            const responseText = r.data?.choices?.[0]?.message?.content;
+            const parsedArr = parseRobustJsonArray(responseText, texts.length);
+            if (parsedArr && parsedArr.length > 0) {
+                console.log(`[Success] Translated chunk via OpenRouter using: ${model}`);
+                return parsedArr;
+            }
+            // نطبع كامل جسم الرد (مختصر) لو المحتوى مفقود، عشان نعرف شكل الرد الحقيقي وقت الفشل
+            console.error(`[Parse Fail - ${model}] Full response:`, JSON.stringify(r.data)?.slice(0, 500));
         }
+    } catch (e) {
+        const status = e.response?.status || 'no-status';
+        const body = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+        console.error(`[OpenRouter Error - ${model}] status=${status} body=${body}`);
     }
 
-    console.error("[Error] All OpenRouter models failed.");
+    // محاولة إعادة واحدة بس (الراوتر أحيانًا يوجّه لموديل مزدحم لحظيًا فيرجع رد فاضي)
+    if (attempt < 2) {
+        return translateChunkStrict(texts, attempt + 1);
+    }
+
+    console.error("[Error] OpenRouter translation failed after retry.");
     return null;
+}
+
+// يبني نتيجة بدون ترجمة فعلية (نص إنجليزي كما هو) - يُستخدم كـ fallback فوري وسريع
+function buildUntranslatedResult(chunks) {
+    return chunks.map(chunk => chunk.map(c => c.text));
+}
+
+// سقف زمني إجمالي كحماية أخيرة فقط (مو لأن نوفيو يقطع بسرعة - هو يصبر دقيقة-دقيقتين
+// فعليًا كما لاحظت). هذا مجرد أمان لو صار تعليق كامل غير متوقع في الشبكة.
+const OVERALL_TRANSLATE_DEADLINE_MS = 100000;
+
+async function translateAllChunks(chunks) {
+    const tasks = chunks.map(chunk => async () => {
+        const texts = chunk.map(c => c.text);
+        const translated = await translateChunkStrict(texts);
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+    });
+
+    // كل الشنكات تترجم بالتوازي (مو تسلسليًا) عشان نقلل الزمن الكلي
+    const translationPromise = runConcurrentPool(tasks, chunks.length);
+    const timeoutPromise = new Promise(resolve => {
+        setTimeout(() => resolve(null), OVERALL_TRANSLATE_DEADLINE_MS);
+    });
+
+    const result = await Promise.race([translationPromise, timeoutPromise]);
+    if (result) return result;
+
+    console.error(`[Timeout] Translation exceeded ${OVERALL_TRANSLATE_DEADLINE_MS}ms — returning English fallback immediately.`);
+    return buildUntranslatedResult(chunks);
 }
 
 async function fetchAndExtractSub(subUrl) {
@@ -231,13 +259,7 @@ async function handleTranslationSrt(subUrl) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
-    const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
-    });
-
-    const chunkResults = await runConcurrentPool(tasks, 1);
+    const chunkResults = await translateAllChunks(chunks);
     const finalTranslations = chunkResults.flat();
 
     let srtOutput = '';
@@ -269,13 +291,7 @@ async function handleTranslationAss(subUrl) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
-    const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
-    });
-
-    const chunkResults = await runConcurrentPool(tasks, 1);
+    const chunkResults = await translateAllChunks(chunks);
     const finalTranslations = chunkResults.flat();
     const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
