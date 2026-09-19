@@ -103,7 +103,7 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                await delay(1500); // استراحة لتجنب حظر جوجل
+                await delay(1500); 
             } catch (err) {
                 results[current] = null;
             }
@@ -120,9 +120,8 @@ async function translateChunkStrict(texts) {
         return null;
     }
 
-    // التعديل هنا: تم تصحيح اسم الموديل إلى gemini-1.5-flash-latest
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-  
+    // التعديل الجذري: المسار الصحيح المعتمد في توثيق جوجل لإصدار v1beta
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     
     const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
 
@@ -130,14 +129,16 @@ async function translateChunkStrict(texts) {
         const r = await axios.post(
             GEMINI_URL,
             {
-                contents: [{ parts: [{ text: prompt }] }],
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
                 generationConfig: {
-                    temperature: 0.1, // تقليل الهلوسة
-                    responseMimeType: "application/json" // إجبار النموذج على إرجاع JSON صافي فقط
+                    temperature: 0.1,
+                    responseMimeType: "application/json"
                 }
             },
             {
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                },
                 timeout: 30000
             }
         );
@@ -146,11 +147,12 @@ async function translateChunkStrict(texts) {
             const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             const parsedArr = parseRobustJsonArray(responseText, texts.length);
             if (parsedArr && parsedArr.length > 0) {
-                console.log(`[Success] Translated chunk with Gemini 1.5 Flash Latest`);
+                console.log(`[Success] Translated chunk with Gemini 1.5 Flash`);
                 return parsedArr;
             }
         }
     } catch (e) {
+        // طباعة تفاصيل الخطأ بدقة لمعرفة المشكلة إذا تكررت
         console.error(`[Gemini Error]: ${e.response?.data?.error?.message || e.message}`);
     }
     
