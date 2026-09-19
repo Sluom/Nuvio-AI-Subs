@@ -121,7 +121,8 @@ async function translateChunkStrict(texts) {
     }
 
     // التعديل الجذري: المسار الصحيح المعتمد في توثيق جوجل لإصدار v1beta
-    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key=${GEMINI_API_KEY}`;
+
     
     const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
 
