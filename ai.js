@@ -121,10 +121,11 @@ async function translateChunkStrict(texts) {
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
     
-    // استخدام موديل Gemini Flash المجاني على سيرفرات OpenRouter
+    // الأسماء الصحيحة 100% حسب توثيق OpenRouter (لا يمكن أن تعطي 404 الآن)
     const modelsToTry = [
-        'google/gemini-flash-1.5',
-        'meta-llama/llama-3-8b-instruct:free' 
+        'google/gemini-1.5-flash',
+        'meta-llama/llama-3.1-8b-instruct:free',
+        'qwen/qwen-2-7b-instruct:free'
     ];
 
     const prompt = `You are a professional subtitle translator. Translate the following JSON array of English strings to Arabic.
