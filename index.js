@@ -19,21 +19,13 @@ class RequestQueue {
     async add(task) {
         return new Promise((resolve, reject) => {
             this.queue.push(async () => {
-                try {
-                    const result = await task();
-                    resolve(result);
-                } catch (e) {
-                    reject(e);
-                }
+                try { resolve(await task()); } catch (e) { reject(e); }
             });
             if (!this.isProcessing) this.processNext();
         });
     }
     async processNext() {
-        if (this.queue.length === 0) {
-            this.isProcessing = false;
-            return;
-        }
+        if (this.queue.length === 0) { this.isProcessing = false; return; }
         this.isProcessing = true;
         const task = this.queue.shift();
         try { await task(); } catch (e) { console.error("[Queue Error]", e.message); }
@@ -44,7 +36,7 @@ const globalTranslationQueue = new RequestQueue();
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '2.6.0',
+    version: '2.7.0',
     name: 'Nuvio AI Subs (Ultra Max)',
     description: 'Auto-translate from Official OpenSubtitles Legacy API. Strict SDH removal, up to 6 SRT & 4 true SSA tracks.',
     resources: ['subtitles'],
@@ -85,19 +77,14 @@ app.get(['/', '/configure'], (req, res) => {
         </style>
     </head>
     <body>
-        <h1>إعدادات المترجم الذكي (نسخة Legacy)</h1>
+        <h1>إعدادات المترجم الذكي (النسخة المستقرة)</h1>
         <div class="container">
-            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام يعتمد على الجلب الرسمي المباشر.</p>
+            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا.</p>
             <div id="keys-container">
                 <div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>
             </div>
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
             
-            <div class="input-group" style="margin-top: 20px;">
-                <label>مفتاح OpenSubtitles API (اختياري - لتجاوز الحظر)</label>
-                <input type="text" id="os-api-key" placeholder="أدخل مفتاح OpenSubtitles هنا">
-            </div>
-
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
@@ -123,8 +110,7 @@ app.get(['/', '/configure'], (req, res) => {
                 inputs.forEach(input => { let val = input.value.trim(); if(val) keys.push(val); });
                 if(keys.length === 0) return alert('الرجاء إدخال مفتاح Gemini API واحد على الأقل!');
                 
-                const osKey = document.getElementById('os-api-key').value.trim();
-                const config = { keys: keys, osKey: osKey, model: document.getElementById('model-select').value };
+                const config = { keys: keys, model: document.getElementById('model-select').value };
                 window.location.href = 'stremio://' + window.location.host + '/' + encodeURIComponent(JSON.stringify(config)) + '/manifest.json';
             }
         </script>
@@ -159,20 +145,17 @@ function matchEpisode(fileName, targetEpisode) {
     return patterns.some(p => p.test(name));
 }
 
-// دالة جلب البيانات من السيرفر القديم (تم التعديل لتشمل المفتاح إذا توفر)
-async function fetchLegacyData(url, osKey) {
+// دالة جلب البيانات مع إرجاع الهيدر الأصلي الخاص بك بحذافيره
+async function fetchLegacyData(url) {
     try {
-        const headers = { 
-            'User-Agent': 'VLSub 0.10.3',
-            'Accept': 'application/json'
-        };
-        // إذا قام المستخدم بتوفير مفتاح OpenSubtitles، نرسله في الـ Header لتجاوز الحظر
-        if (osKey) {
-            headers['Api-Key'] = osKey;
-            headers['X-User-Agent'] = 'Nuvio AI Subs';
-        }
-
-        const response = await axios.get(url, { headers: headers, timeout: 8000 });
+        const response = await axios.get(url, { 
+            headers: { 
+                'User-Agent': 'VLSub 0.10.3',
+                'X-User-Agent': 'VLSub 0.10.3',
+                'Accept': 'application/json'
+            }, 
+            timeout: 8000 
+        });
         if (!Array.isArray(response.data)) return [];
         const results = [];
         response.data.forEach(entry => {
@@ -190,14 +173,14 @@ async function fetchLegacyData(url, osKey) {
     }
 }
 
-async function fetchLegacyApiEnglish(imdbId, season, episode, osKey) {
+async function fetchLegacyApiEnglish(imdbId, season, episode) {
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
     let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
     if (season != null && episode != null) primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
-    let results = await fetchLegacyData(primaryUrl, osKey);
+    let results = await fetchLegacyData(primaryUrl);
     if (season != null && episode != null) {
         if (!results.some(r => r.isAss)) {
-            const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`, osKey);
+            const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
             results = [...results, ...fallbackResults.filter(r => r.isAss && matchEpisode(r.fileName, episode))];
         }
     }
@@ -223,15 +206,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     res.setHeader('Content-Type', 'application/json');
     const configParam = req.params.config || '';
     
-    // استخراج مفتاح OpenSubtitles من الإعدادات إذا كان موجوداً
-    let osKey = null;
-    if (configParam) {
-        try {
-            const decodedConfig = JSON.parse(decodeURIComponent(configParam));
-            if (decodedConfig.osKey) osKey = decodedConfig.osKey;
-        } catch (e) {}
-    }
-
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
     const type = req.params.type;
@@ -244,8 +218,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     }
 
     try {
-        // تمرير osKey لدالة الجلب الخاصة بالسيرفر القديم
-        const allSubs = [...await fetchLegacyApiEnglish(imdbId, season, episode, osKey), ...await fetchMirrorEnglish(imdbId, season, episode, type)];
+        const allSubs = [...await fetchLegacyApiEnglish(imdbId, season, episode), ...await fetchMirrorEnglish(imdbId, season, episode, type)];
         const unique = [];
         const seenUrls = new Set();
         for (const sub of allSubs) {
