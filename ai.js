@@ -100,7 +100,6 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                // تم تعديل التاخير الى 2000 لتخفيف الضغط
                 await delay(2000); 
             } catch (err) {
                 results[current] = null;
@@ -121,7 +120,6 @@ function getNextApiKey(keysArray) {
 }
 
 async function translateChunkStrict(texts, keysArray, modelName) {
-    // نظام المحاولات والانتظار الذكي مطابق لـ SubMaker
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
@@ -136,7 +134,12 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+        // بناء الرابط بقطع منفصلة لمنع المتصفح من تشويهه أثناء اللصق
+        const p1 = "https://";
+        const p2 = "generativelanguage.googleapis.com";
+        const p3 = "/v1beta/models/";
+        const p4 = ":generateContent";
+        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
         
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
