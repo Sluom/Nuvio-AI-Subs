@@ -82,8 +82,23 @@ function parseRobustJsonArray(raw, expectedLength) {
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-        // تصحيح ظهور حرف الـ n بالسطر التالي
-        if (Array.isArray(arr) && arr.length > 0) return arr.map(x => String(x || '').replace(/\\\\n/g, '\n').replace(/\\n/g, '\n').trim());
+        
+        // ==========================================
+        // التنظيف الكاسح للرموز الغريبة ولحرف الـ N الكابتل والسمول
+        // ==========================================
+        if (Array.isArray(arr) && arr.length > 0) {
+            return arr.map(x => {
+                let txt = String(x || '');
+                // 1. مسح الرموز الموسيقية والترميزات الغريبة نهائياً
+                txt = txt.replace(/[♪♫âTMه]/gi, '');
+                // 2. تحويل أي صيغة من صيغ النزول للسطر إلى نزول حقيقي
+                txt = txt.replace(/\\\\n/gi, '\n')
+                         .replace(/\\\\N/g, '\n')
+                         .replace(/\\n/gi, '\n')
+                         .replace(/\\N/g, '\n');
+                return txt.trim();
+            });
+        }
 
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
@@ -136,14 +151,12 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        // بناء الرابط بقطع منفصلة لمنع المتصفح من تشويهه أثناء اللصق
         const p1 = "https://";
         const p2 = "generativelanguage.googleapis.com";
         const p3 = "/v1beta/models/";
         const p4 = ":generateContent";
         const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
         
-        // التعليمات الشاملة لترجمة الأقواس لكل أنواع الترجمات
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
