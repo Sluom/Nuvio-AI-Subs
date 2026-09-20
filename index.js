@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios'); // نبقيها للذكاء الاصطناعي فقط
+const axios = require('axios');
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 const app = express();
@@ -9,47 +9,162 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
+// ==========================================
+// 1. ذاكرة السيرفر (Cache) لتخزين الترجمات الجاهزة
+// ==========================================
 const translationCache = {};
 
+// ==========================================
+// 2. الطابور الذكي (Global Queue) للعمل بالخلفية
+// ==========================================
 class RequestQueue {
     constructor() {
         this.queue = [];
         this.isProcessing = false;
     }
+
     async add(task) {
         return new Promise((resolve, reject) => {
             this.queue.push(async () => {
-                try { resolve(await task()); } catch (e) { reject(e); }
+                try {
+                    const result = await task();
+                    resolve(result);
+                } catch (e) {
+                    reject(e);
+                }
             });
-            if (!this.isProcessing) this.processNext();
+            if (!this.isProcessing) {
+                this.processNext();
+            }
         });
     }
+
     async processNext() {
-        if (this.queue.length === 0) { this.isProcessing = false; return; }
+        if (this.queue.length === 0) {
+            this.isProcessing = false;
+            return;
+        }
         this.isProcessing = true;
         const task = this.queue.shift();
-        try { await task(); } catch (e) { console.error("[Queue Error]", e.message); }
+        try {
+            await task();
+        } catch (e) {
+            console.error("[Queue Error]", e.message);
+        }
         this.processNext();
     }
 }
 const globalTranslationQueue = new RequestQueue();
 
+// ==========================================
+// المانيفست الأساسي
+// ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '2.8.0',
-    name: 'Nuvio AI Subs (Ultra Max)',
-    description: 'Auto-translate from Official OpenSubtitles Legacy API. Strict SDH removal, up to 6 SRT & 4 true SSA tracks.',
+    version: '1.8.0',
+    name: 'Nuvio AI Subs (Pro Max)',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 3 SRT & 3 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
     catalogs: [],
-    behaviorHints: { configurable: true, configurationRequired: true }
+    behaviorHints: {
+        configurable: true, 
+        configurationRequired: true
+    }
 };
 
 function getBaseUrl(req) {
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = req.headers['x-forwarded-proto'] || 'https';
     return `${proto}://${host}`;
+}
+
+// ==========================================
+// دوال جلب الترجمات من OpenSubtitles.org (Legacy REST)
+// نفس أسلوب تخطي الحماية: User-Agent الخاص بـ VLSub
+// ==========================================
+const LEGACY_UA = 'VLSub 0.10.3';
+
+function matchEpisode(fileName, targetEpisode) {
+    if (!targetEpisode) return true; // فيلم مو مسلسل
+    const name = (fileName || '').toLowerCase();
+
+    if (name.includes('.zip') || name.includes('.rar')) return true;
+
+    const epStr = parseInt(targetEpisode, 10).toString();
+    const patterns = [
+        new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
+        new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
+        new RegExp(`\\[0*${epStr}\\]`, 'i'),
+        new RegExp(`\\(0*${epStr}\\)`, 'i'),
+        new RegExp(`\\b0*${epStr}\\b`, 'i')
+    ];
+    return patterns.some(p => p.test(name));
+}
+
+async function fetchLegacyData(url) {
+    try {
+        const res = await axios.get(url, {
+            headers: {
+                'User-Agent': LEGACY_UA,
+                'X-User-Agent': LEGACY_UA,
+                'Accept': 'application/json'
+            },
+            timeout: 10000
+        });
+        const data = res.data;
+        if (!Array.isArray(data)) return [];
+
+        return data
+            .filter(e => e.SubDownloadLink)
+            .map(e => {
+                const format = (e.SubFormat || '').toLowerCase();
+                const isHI = e.SubHearingImpaired === '1' || e.SubHearingImpaired === 1;
+                return {
+                    url: e.SubDownloadLink,
+                    subtitleFileName: e.SubFileName || e.MovieReleaseName || 'OpenSubtitles',
+                    format: format || 'srt',
+                    isHI
+                };
+            });
+    } catch (e) {
+        return [];
+    }
+}
+
+// جلب ترجمات إنجليزية (SRT + ASS الحقيقية) من OpenSubtitles.org حصراً
+async function fetchOpenSubtitlesEnglish(imdbId, season, episode) {
+    if (!imdbId || !imdbId.startsWith('tt')) return [];
+    const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
+
+    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+    if (season != null && episode != null) {
+        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
+    }
+
+    let results = await fetchLegacyData(primaryUrl);
+
+    // لو محددين حلقة معينة وما لقينا ass بها، نبحث بكامل المسلسل ونفلتر برقم الحلقة
+    if (season != null && episode != null) {
+        const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
+        if (!hasAss) {
+            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+            const fallbackResults = await fetchLegacyData(fallbackUrl);
+            const filteredAss = fallbackResults.filter(r =>
+                (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.subtitleFileName, episode)
+            );
+            results = [...results, ...filteredAss];
+        }
+    }
+
+    // إزالة التكرار حسب رابط التحميل
+    const seen = new Set();
+    return results.filter(r => {
+        if (seen.has(r.url)) return false;
+        seen.add(r.url);
+        return true;
+    });
 }
 
 app.get(['/', '/configure'], (req, res) => {
@@ -71,6 +186,7 @@ app.get(['/', '/configure'], (req, res) => {
             .btn { background: #0284c7; color: #fff; padding: 12px; border: none; border-radius: 8px; font-weight: bold; width: 100%; cursor: pointer; margin-top: 10px; transition: 0.3s; }
             .btn:hover { background: #0369a1; }
             .btn-secondary { background: #475569; margin-bottom: 20px; }
+            .btn-secondary:hover { background: #334155; }
             .key-row { display: flex; gap: 10px; margin-bottom: 10px; }
             .key-row input { flex: 1; }
             .remove-btn { background: #ef4444; color: white; border: none; border-radius: 6px; padding: 0 15px; cursor: pointer; font-weight: bold; }
@@ -79,11 +195,16 @@ app.get(['/', '/configure'], (req, res) => {
     <body>
         <h1>إعدادات المترجم الذكي</h1>
         <div class="container">
-            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا.</p>
+            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
+            
             <div id="keys-container">
-                <div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>
+                <div class="key-row">
+                    <input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)">
+                </div>
             </div>
+
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
+            
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
@@ -93,24 +214,42 @@ app.get(['/', '/configure'], (req, res) => {
                     <option value="gemini-3.5-flash">Gemini 3.5 Flash (beta)</option>
                 </select>
             </div>
+
             <button class="btn" onclick="generateInstallLink()">تثبيت الإضافة في Nuvio 🚀</button>
         </div>
+
         <script>
             function addKeyField() {
                 const container = document.getElementById('keys-container');
                 const row = document.createElement('div');
                 row.className = 'key-row';
-                row.innerHTML = \`<input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)"><button class="remove-btn" onclick="this.parentElement.remove()">X</button>\`;
+                row.innerHTML = \`
+                    <input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)">
+                    <button class="remove-btn" onclick="this.parentElement.remove()">X</button>
+                \`;
                 container.appendChild(row);
             }
+
             function generateInstallLink() {
                 const inputs = document.querySelectorAll('.api-key');
                 let keys = [];
-                inputs.forEach(input => { let val = input.value.trim(); if(val) keys.push(val); });
-                if(keys.length === 0) return alert('الرجاء إدخال مفتاح Gemini API واحد على الأقل!');
+                inputs.forEach(input => {
+                    let val = input.value.trim();
+                    if(val) keys.push(val);
+                });
+
+                if(keys.length === 0) {
+                    alert('الرجاء إدخال مفتاح API واحد على الأقل!');
+                    return;
+                }
+
+                const model = document.getElementById('model-select').value;
+                const config = { keys: keys, model: model };
+                const configStr = encodeURIComponent(JSON.stringify(config));
+                const host = window.location.host;
+                const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
                 
-                const config = { keys: keys, model: document.getElementById('model-select').value };
-                window.location.href = 'stremio://' + window.location.host + '/' + encodeURIComponent(JSON.stringify(config)) + '/manifest.json';
+                window.location.href = installUrl;
             }
         </script>
     </body>
@@ -120,163 +259,105 @@ app.get(['/', '/configure'], (req, res) => {
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
+    
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
         modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
+    
     res.json(modifiedManifest);
 });
 
-function matchEpisode(fileName, targetEpisode) {
-    if (!targetEpisode) return true;
-    const name = (fileName || '').toLowerCase();
-    if (name.includes('.zip') || name.includes('.rar') || name.includes('.gz')) return true;
-    const epStr = parseInt(targetEpisode, 10).toString();
-    const patterns = [
-        new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
-        new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
-        new RegExp(`\\[0*${epStr}\\]`, 'i'),
-        new RegExp(`\\(0*${epStr}\\)`, 'i'),
-        new RegExp(`\\b0*${epStr}\\b`, 'i')
-    ];
-    return patterns.some(p => p.test(name));
-}
-
-// الرجوع لكودك الأصلي العبقري واستخدام (fetch) بدل (axios) لتجنب حظر كلاودفلير
-async function fetchLegacyData(url) {
-    try {
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'VLSub 0.10.3', 
-                'X-User-Agent': 'VLSub 0.10.3',
-                'Accept': 'application/json'
-            }
-        });
-
-        if (!response.ok) {
-            console.error(`[Legacy API Error]: Request failed with status ${response.status}`);
-            return [];
-        }
-
-        const data = await response.json();
-        if (!Array.isArray(data)) return [];
-
-        const results = [];
-        data.forEach(entry => {
-            const downloadLink = entry.SubDownloadLink;
-            if (!downloadLink) return;
-            const format = (entry.SubFormat || '').toLowerCase();
-            const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
-            const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
-            results.push({ url: downloadLink, fileName: rawName, isAss: isAss });
-        });
-        return results;
-    } catch (e) {
-        console.error("[Legacy API Exception]:", e.message);
-        return [];
-    }
-}
-
-async function fetchLegacyApiEnglish(imdbId, season, episode) {
-    const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
-    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
-    if (season != null && episode != null) primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
-    
-    let results = await fetchLegacyData(primaryUrl);
-    if (season != null && episode != null) {
-        if (!results.some(r => r.isAss)) {
-            const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
-            results = [...results, ...fallbackResults.filter(r => r.isAss && matchEpisode(r.fileName, episode))];
-        }
-    }
-    return results;
-}
-
-async function fetchMirrorEnglish(imdbId, season, episode, type) {
-    const mediaType = (type === 'series' || type === 'anime' || !!season) ? 'series' : 'movie';
-    const targetId = (mediaType === 'series' && season) ? `${imdbId}:${season}:${episode || 1}` : imdbId;
-    try {
-        const response = await fetch(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`);
-        if (!response.ok) return [];
-        const data = await response.json();
-        return (data.subtitles || []).filter(s => (s.lang || '').toLowerCase().startsWith('en') && s.url).map(s => {
-            const rawName = (s.SubFileName || s.subtitleFileName || s.title || '').toLowerCase();
-            const subFormat = (s.SubFormat || s.format || '').toLowerCase();
-            const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawName.includes('.ass') || rawName.includes('.ssa');
-            return { url: s.url, fileName: s.SubFileName || s.title || 'Mirror', isAss: isAss };
-        });
-    } catch(e) { return []; }
-}
-
-app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
+// ==========================================
+// مسار جلب الترجمات (OpenSubtitles.org حصراً + الفرز الصارم للـ ASS والـ SRT)
+// ==========================================
+app.get([
+  '/subtitles/:type/:reqId(*)', 
+  '/:config/subtitles/:type/:reqId(*)'
+], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
+
     const configParam = req.params.config || '';
     
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
+
     const type = req.params.type;
     const baseUrl = getBaseUrl(req);
-    
-    let imdbId = targetId, season = null, episode = null;
-    if (targetId.includes(':')) {
-        const parts = targetId.split(':');
-        imdbId = parts[0]; season = parts[1]; episode = parts[2];
-    }
+
+    // فك تفكيك معرف Stremio: tt1234567 أو tt1234567:season:episode
+    const idParts = targetId.split(':');
+    const imdbId = idParts[0];
+    const season = idParts.length > 1 ? idParts[1] : null;
+    const episode = idParts.length > 2 ? idParts[2] : null;
 
     try {
-        const allSubs = [...await fetchLegacyApiEnglish(imdbId, season, episode), ...await fetchMirrorEnglish(imdbId, season, episode, type)];
-        const unique = [];
-        const seenUrls = new Set();
-        for (const sub of allSubs) {
-            const cleanUrl = sub.url.split('?')[0];
-            if (seenUrls.has(cleanUrl)) continue;
-            seenUrls.add(cleanUrl);
-            unique.push(sub);
-        }
+        const rawSubs = await fetchOpenSubtitlesEnglish(imdbId, season, episode);
 
-        const cleanSubs = unique.filter(sub => {
-            const fname = (sub.fileName || '').toLowerCase();
-            return !(fname.includes('sdh') || fname.includes('hi ') || fname.includes('hearing impaired'));
-        });
+        if (rawSubs.length > 0) {
 
-        if (cleanSubs.length === 0) return res.json({ subtitles: [] });
-
-        const srtSubs = cleanSubs.filter(s => !s.isAss);
-        const assSubs = cleanSubs.filter(s => s.isAss);
-        const transSubs = [];
-        
-        const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
-        const streamPathAss = configParam ? `/${configParam}/stream-ai.ssa` : `/stream-ai.ssa`; 
-        
-        const maxSrt = Math.min(6, srtSubs.length);
-        for (let i = 0; i < maxSrt; i++) {
-            transSubs.push({
-                id: `nuvio-ai-srt-${i+1}`,
-                url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(srtSubs[i].url)}&track=${i+1}&ext=.srt`,
-                lang: 'ara',
-                title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
+            // استبعاد SDH مطلقاً ونهائياً (بالحقل الرسمي + الاسم احتياطاً)
+            const cleanSubs = rawSubs.filter(sub => {
+                if (sub.isHI) return false;
+                const name = (sub.subtitleFileName || '').toLowerCase();
+                return !(name.includes('sdh') || name.includes('hi ') || name.includes('hearing impaired'));
             });
-        }
 
-        const maxAss = Math.min(4, assSubs.length);
-        for (let i = 0; i < maxAss; i++) {
-            transSubs.push({
-                id: `nuvio-ai-ssa-${i+1}`,
-                url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assSubs[i].url)}&track=${i+7}&ext=.ssa`,
-                lang: 'ara',
-                title: `Nuvio AI SSA ${i+1} (Sync ${String.fromCharCode(65+i)})`
-            });
-        }
+            if (cleanSubs.length === 0) return res.json({ subtitles: [] });
 
-        return res.json({ subtitles: transSubs });
-    } catch (err) { return res.json({ subtitles: [] }); }
+            // الفرز إلى SRT و ASS بناءً على حقل SubFormat الحقيقي القادم من OpenSubtitles
+            const assSubs = cleanSubs.filter(s => s.format === 'ass' || s.format === 'ssa');
+            const srtSubs = cleanSubs.filter(s => s.format !== 'ass' && s.format !== 'ssa');
+
+            const transSubs = [];
+            const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
+            const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
+            
+            // إضافة 3 روابط SRT (بملفات مستقلة)
+            if (srtSubs.length > 0) {
+                for (let i = 0; i < 3; i++) {
+                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 3
+                    transSubs.push({
+                        id: `nuvio-ai-srt-${i+1}`,
+                        url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
+                        lang: 'ara',
+                        title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                    });
+                }
+            }
+
+            // إضافة 3 روابط ASS (تظهر فقط إذا كان هناك ملفات ASS حقيقية متوفرة فعلاً)
+            if (assSubs.length > 0) {
+                for (let i = 0; i < 3; i++) {
+                    const sub = assSubs[i] || assSubs[assSubs.length - 1];
+                    transSubs.push({
+                        id: `nuvio-ai-ass-${i+1}`,
+                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(sub.url)}&track=${i+4}`,
+                        lang: 'ara',
+                        title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                    });
+                }
+            }
+
+            return res.json({ subtitles: transSubs });
+        }
+        return res.json({ subtitles: [] });
+    } catch (err) {
+        return res.json({ subtitles: [] });
+    }
 });
 
-app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa', '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'], async (req, res) => {
+app.all([
+    '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
+    '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
+], async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
+    
     const targetUrl = req.query.url;
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
@@ -303,15 +384,21 @@ app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa', '/:config/stream-
 
     if (!translationCache[cacheKey]) {
         translationCache[cacheKey] = { status: 'pending' };
+
         globalTranslationQueue.add(async () => {
             try {
-                let finalContent = isAss ? await handleTranslationAss(targetUrl, userKeys, userModel) : await handleTranslationSrt(targetUrl, userKeys, userModel);
+                let finalContent = '';
+                if (isAss) {
+                    finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
+                } else {
+                    finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
+                }
                 translationCache[cacheKey] = { status: 'done', content: finalContent };
             } catch (e) {
                 console.error(`[Background Error] Track ${trackNum}:`, e.message);
                 const errorSub = isAss 
-                    ? `[Script Info]\nScriptType: v4.00+\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي.`
-                    : `1\n00:00:01,000 --> 01:00:00,000\nفشل الترجمة النهائي.\n\n`;
+                    ? `[Script Info]\nScriptType: v4.00+\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`
+                    : `1\n00:00:01,000 --> 01:00:00,000\nفشل الترجمة النهائي. حاول مجدداً.\n\n`;
                 translationCache[cacheKey] = { status: 'done', content: errorSub };
             }
         });
@@ -324,11 +411,9 @@ Collisions: Normal
 PlayDepth: 0
 WrapStyle: 0
 ScaledBorderAndShadow: yes
-
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
-
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 Dialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳\\Nانقر لإعادة التحميل بمجرد جاهزيتها.`
@@ -340,5 +425,8 @@ Dialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التن
     res.send(fakeSub);
 });
 
-app.listen(PORT, () => console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
+});
+
 module.exports = app;
