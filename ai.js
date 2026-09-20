@@ -48,6 +48,7 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
+// رجعتها للنزول الطبيعي \n حتى يختفي الحرف من الشاشة
 function extractCuesUniversal(text) {
     const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
     const cues = [];
@@ -57,13 +58,14 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        const text2 = lines.slice(idx + 1).join('\\N'); // الاحتفاظ المبدئي بـ \N
+        const text2 = lines.slice(idx + 1).join('\n'); // رجعناها \n طبيعية!
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
 }
 
-function parseRobustJsonArray(raw, expectedLength, isAssFile) {
+// فلتر استخراج الترجمة (نظيف ومباشر بدون تعقيدات)
+function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
     if (clean.startsWith('```json')) clean = clean.substring(7);
@@ -76,19 +78,7 @@ function parseRobustJsonArray(raw, expectedLength, isAssFile) {
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
         
         if (Array.isArray(arr) && arr.length > 0) {
-            return arr.map(x => {
-                let txt = String(x || '');
-                txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                
-                // معالجة النزول بسطر حسب نوع الملف
-                if (isAssFile) {
-                    txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
-                } else {
-                    txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
-                }
-                
-                return txt.trim();
-            });
+            return arr.map(x => String(x || '').replace(/[♪♫]/g, '').trim());
         }
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
@@ -122,23 +112,15 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
-    const MAX_RETRIES = 4;
-    let baseDelay = 3000;
+async function translateChunkStrict(texts, keysArray, modelName) {
+    const MAX_RETRIES = 3;
+    let baseDelay = 2000;
     
-    // إرجاع البرومبت الصارم لمنع الموديل من إرجاع الإنجليزية
-    const prompt = `You are a professional Arabic subtitle translator.
-Translate the following JSON array of strings into ARABIC strictly.
-
-RULES:
-1. Translate to Arabic.
-2. Preserve all timing, tags, and array structure.
-3. Translate text inside brackets [] or parentheses () into Arabic while strictly keeping the brackets/parentheses.
-4. Do NOT overthink. Do NOT overplan. Do NOT include acknowledgements, explanations, or notes.
-
-Output ONLY A VALID JSON ARRAY OF STRINGS containing the Arabic translation.
-
-Content to translate:
+    // البرومبت القديم البسيط والفعال (بدون فلسفة)
+    const prompt = `Translate the following JSON array of strings into Arabic.
+Maintain the exact array structure and number of elements.
+Do NOT include any additional text, notes, or markdown formatting outside the JSON array. Output ONLY the array.
+Texts to translate:
 ${JSON.stringify(texts)}`;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -152,11 +134,11 @@ ${JSON.stringify(texts)}`;
             const r = await axios.post(GEMINI_URL, {
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: { temperature: 0.1, responseMimeType: "application/json" }
-            }, { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey }, timeout: 30000 });
+            }, { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey }, timeout: 25000 });
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
+                const parsedArr = parseRobustJsonArray(responseText, texts.length);
                 if (parsedArr && parsedArr.length > 0) return parsedArr;
             }
         } catch (e) {
@@ -165,7 +147,7 @@ ${JSON.stringify(texts)}`;
             await delay(baseDelay * Math.pow(2, attempt));
         }
     }
-    return null; // إذا فشل نرجع null ليتولى الكود أدناه إرجاع الأصل
+    return null;
 }
 
 async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
@@ -205,8 +187,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, false);
-        // فلتر الأمان: إذا فشل الذكاء أو رجّع نص فارغ، يرجع النص الإنجليزي الأصلي غصباً عنه
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
@@ -251,8 +232,7 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, true);
-        // فلتر الأمان: إذا فشل الذكاء، يرجع النص الإنجليزي الأصلي بدل الفراغ
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
