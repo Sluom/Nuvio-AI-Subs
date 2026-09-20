@@ -72,6 +72,7 @@ function extractCuesUniversal(text) {
     return cues;
 }
 
+// التصحيح في هذه الدالة
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
-    let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*
+    let clean = raw.trim().replace(/^```(?:json)?/i, '').replace(/
