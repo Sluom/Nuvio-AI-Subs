@@ -10,7 +10,12 @@ app.use(express.json());
 const PORT = process.env.PORT || 7000;
 
 // ==========================================
-// 🚀 الطابور الذكي (Global Queue) لمنع الـ Timeout والـ Quota
+// 1. ذاكرة السيرفر (Cache) لتخزين الترجمات الجاهزة
+// ==========================================
+const translationCache = {};
+
+// ==========================================
+// 2. الطابور الذكي (Global Queue) للعمل بالخلفية
 // ==========================================
 class RequestQueue {
     constructor() {
@@ -50,13 +55,15 @@ class RequestQueue {
     }
 }
 const globalTranslationQueue = new RequestQueue();
-// ==========================================
 
+// ==========================================
+// المانيفست الأساسي
+// ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.4.0',
+    version: '1.5.0',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Key Rotation and Smart Queue limits.',
+    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Background Processing and Cache.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -73,6 +80,7 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
+// مسار صفحة الإعدادات
 app.get(['/', '/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`
@@ -101,7 +109,7 @@ app.get(['/', '/configure'], (req, res) => {
     <body>
         <h1>إعدادات المترجم الذكي</h1>
         <div class="container">
-            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً لتجاوز حدود الطلبات (Key Rotation).</p>
+            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
             
             <div id="keys-container">
                 <div class="key-row">
@@ -118,7 +126,6 @@ app.get(['/', '/configure'], (req, res) => {
                     <option value="gemini-3.7-flash">Gemini 3.7 Flash (beta)</option>
                     <option value="gemini-3.6-flash">Gemini 3.6 Flash (beta)</option>
                     <option value="gemini-3.5-flash">Gemini 3.5 Flash (beta)</option>
-                    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (beta)</option>
                 </select>
             </div>
 
@@ -164,6 +171,7 @@ app.get(['/', '/configure'], (req, res) => {
     `);
 });
 
+// مسار المانيفست
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -171,13 +179,14 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك المتعددة والطابور الذكي.';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة الخلفية السريعة (Background Translation).';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
     res.json(modifiedManifest);
 });
 
+// مسار جلب الترجمات
 app.get([
   '/subtitles/:type/:reqId(*)', 
   '/:config/subtitles/:type/:reqId(*)'
@@ -194,8 +203,6 @@ app.get([
     const type = req.params.type;
     const baseUrl = getBaseUrl(req);
 
-    console.log(`[Request] Nuvio is asking for: ${type} - ${targetId}`);
-
     try {
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
         const r = await axios.get(osUrl, { timeout: 10000 });
@@ -210,7 +217,6 @@ app.get([
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
-            // إضافة 5 روابط بناءً على طلبك (3 SRT و 2 ASS)
             const transSubs = [
                 { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Gemini)' },
                 { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Gemini)' },
@@ -219,17 +225,17 @@ app.get([
                 { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Gemini)' }
             ];
 
-            console.log(`[Success] Sent 5 AI links to Nuvio!`);
             return res.json({ subtitles: transSubs });
         }
-        
         return res.json({ subtitles: [] });
     } catch (err) {
-        console.error("[Search Error]:", err.message);
         return res.json({ subtitles: [] });
     }
 });
 
+// ==========================================
+// مسار الترجمة (القلب النابض بالخلفية)
+// ==========================================
 app.all([
     '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
     '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
@@ -241,48 +247,75 @@ app.all([
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
+    const cacheKey = `${isAss ? 'ASS' : 'SRT'}_${targetUrl}`;
     
-    let userKeys = [];
-    let userModel = 'gemini-3.1-flash-lite'; 
-    
-    if (req.params.config) {
-        try {
-            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
-            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) {
-                userKeys = decodedConfig.keys;
-            }
-            if (decodedConfig.model) {
-                userModel = decodedConfig.model;
-            }
-        } catch (e) {
-            console.error("[Config Error] Failed to parse config");
-        }
-    }
-    
-    console.log(`[Queued] Track ${trackNum} (${isAss ? 'ASS' : 'SRT'}) added to waitlist...`);
-
-    // إرسال الطلب إلى الطابور الذكي لمعالجته بالدور
-    try {
-        const finalContent = await globalTranslationQueue.add(async () => {
-            console.log(`[Translating...] Now processing Track ${trackNum} - isAss: ${isAss}, Model: ${userModel}`);
-            if (isAss) {
-                return await handleTranslationAss(targetUrl, userKeys, userModel);
-            } else {
-                return await handleTranslationSrt(targetUrl, userKeys, userModel);
-            }
-        });
-
+    // 1. إذا الترجمة جاهزة بالذاكرة (Cache)، دزها فوراً
+    if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
+        console.log(`[Cache Hit] Delivering completed translation for track ${trackNum}`);
         res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Headers', '*');
-        res.send(finalContent);
-        
-        console.log(`[Delivery Done] Track ${trackNum} sent to player!`);
-    } catch (e) {
-        console.error('[Translation Error]:', e.message);
-        if (!res.headersSent) res.status(500).send('Error generating AI translation');
+        return res.send(translationCache[cacheKey].content);
     }
+
+    // 2. استخراج المفاتيح
+    let userKeys = [];
+    let userModel = 'gemini-3.1-flash-lite'; 
+    if (req.params.config) {
+        try {
+            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
+            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
+            if (decodedConfig.model) userModel = decodedConfig.model;
+        } catch (e) { }
+    }
+
+    // 3. إذا أول مرة ينطلب، نبدأ الترجمة بالخلفية ونخزن الحالة كـ pending
+    if (!translationCache[cacheKey]) {
+        console.log(`[Background Init] Starting background translation for track ${trackNum}...`);
+        translationCache[cacheKey] = { status: 'pending' };
+
+        globalTranslationQueue.add(async () => {
+            try {
+                let finalContent = '';
+                if (isAss) {
+                    finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
+                } else {
+                    finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
+                }
+                // خزن النتيجة بالذاكرة من تكمل
+                translationCache[cacheKey] = { status: 'done', content: finalContent };
+                console.log(`[Background Success] Translation completed and cached for track ${trackNum}!`);
+            } catch (e) {
+                console.error(`[Background Error] Track ${trackNum}:`, e.message);
+                const errorSub = isAss 
+                    ? `[Script Info]\nScriptType: v4.00+\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`
+                    : `1\n00:00:01,000 --> 01:00:00,000\nفشل الترجمة النهائي. حاول مجدداً.\n\n`;
+                translationCache[cacheKey] = { status: 'done', content: errorSub };
+            }
+        });
+    }
+
+    // 4. إرسال الترجمة الوهمية فوراً لمنع الـ Timeout (خداع المشغل)
+    console.log(`[Fake Sub Sent] Informing player that translation is in progress...`);
+    const fakeSub = isAss 
+        ? `[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayDepth: 0
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳\\Nانقر لإعادة التحميل بمجرد جاهزيتها.`
+        : `1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n`;
+
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+    res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(fakeSub);
 });
 
 app.listen(PORT, () => {
