@@ -72,7 +72,224 @@ function extractCuesUniversal(text) {
     return cues;
 }
 
-// التصحيح في هذه الدالة
+// التصحيح النهائي لتجنب أخطاء Regex في سيرفر Render
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
-    let clean = raw.trim().replace(/^```(?:json)?/i, '').replace(/
+    let clean = raw.trim();
+    
+    // استخدام طريقة آمنة للتنظيف بدلاً من Regex المباشر
+    if (clean.startsWith('```json')) {
+        clean = clean.substring(7);
+    } else if (clean.startsWith('```')) {
+        clean = clean.substring(3);
+    }
+    
+    if (clean.endsWith('```')) {
+        clean = clean.substring(0, clean.length - 3);
+    }
+    
+    clean = clean.trim();
+    
+    try {
+        const parsed = JSON.parse(clean);
+        let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+        if (Array.isArray(arr) && arr.length > 0) {
+            return arr.map(x => String(x || '').trim());
+        }
+    } catch (e) {
+        const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
+        if (stringMatches.length >= expectedLength * 0.5) {
+            return stringMatches.filter(s => s !== 'translations' && s !== 'data');
+        }
+    }
+    return null;
+}
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function runConcurrentPool(tasks, limit = 1) {
+    const results = new Array(tasks.length);
+    let index = 0;
+    async function worker() {
+        while (index < tasks.length) {
+            const current = index++;
+            try {
+                results[current] = await tasks[current]();
+                await delay(1000); 
+            } catch (err) {
+                results[current] = null;
+            }
+        }
+    }
+    const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+    await Promise.all(workers);
+    return results;
+}
+
+let currentKeyIndex = 0;
+function getNextApiKey(keysArray) {
+    if (!keysArray || keysArray.length === 0) return null;
+    const key = keysArray[currentKeyIndex];
+    currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
+    return key;
+}
+
+async function translateChunkStrict(texts, keysArray, modelName) {
+    const activeKey = getNextApiKey(keysArray);
+    
+    if (!activeKey) {
+        console.error("[Fatal] No Gemini API Keys configured in the URL!");
+        return null;
+    }
+
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${activeKey}`;
+    
+    const prompt = `Translate this JSON array of English strings to Arabic. ONLY return a valid JSON array of strings.\nInput: ${JSON.stringify(texts)}`;
+
+    try {
+        const safetySettings = [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ];
+
+        const r = await axios.post(
+            GEMINI_URL,
+            {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json"
+                },
+                safetySettings: safetySettings
+            },
+            {
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'x-goog-api-client': 'stremio-submaker/1.4.94'
+                },
+                timeout: 30000
+            }
+        );
+        
+        if (r.status === 200) {
+            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const parsedArr = parseRobustJsonArray(responseText, texts.length);
+            if (parsedArr && parsedArr.length > 0) {
+                console.log(`[Success] Translated chunk with ${modelName} using Key: ...${activeKey.slice(-4)}`);
+                return parsedArr;
+            }
+        }
+    } catch (e) {
+        console.error(`[Gemini Error - Key ...${activeKey.slice(-4)}]: ${e.response?.data?.error?.message || e.message}`);
+    }
+    
+    return null;
+}
+
+async function fetchAndExtractSub(subUrl) {
+    let response;
+    const decodedUrl = decodeURIComponent(subUrl);
+
+    try {
+        console.log(`[Fetch] Downloading source: ${decodedUrl}`);
+        response = await axios.get(decodedUrl, { 
+            responseType: 'arraybuffer', 
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            }
+        });
+    } catch (err) {
+        console.error(`[Fetch Error] Failed to download source: ${err.message}`);
+        throw err;
+    }
+
+    let buffer = Buffer.from(response.data);
+    
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+        buffer = zlib.gunzipSync(buffer);
+    }
+    
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+        const zip = new AdmZip(buffer);
+        const entries = zip.getEntries();
+        const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+        const subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
+        if (assEntry) buffer = assEntry.getData();
+        else if (subEntry) buffer = subEntry.getData();
+    }
+    
+    return fixArabicEncoding(buffer).toString('utf-8');
+}
+
+async function handleTranslationSrt(subUrl, keysArray, modelName) {
+    let originalText = "";
+    try {
+        originalText = await fetchAndExtractSub(subUrl);
+    } catch (e) {
+        return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n";
+    }
+
+    const cues = extractCuesUniversal(originalText);
+    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
+
+    console.log(`[Translate] Starting SRT translation of ${cues.length} cues...`);
+    const CHUNK = 80;
+    const chunks = [];
+    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+
+    const tasks = chunks.map(chunk => async () => {
+        const texts = chunk.map(c => c.text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+    });
+
+    const chunkResults = await runConcurrentPool(tasks, 1); 
+    const finalTranslations = chunkResults.flat();
+
+    let srtOutput = '';
+    cues.forEach((c, idx) => {
+        let sTime = c.start.replace('.', ',');
+        let eTime = c.end.replace('.', ',');
+        if (sTime.length === 10) sTime = '0' + sTime;
+        if (eTime.length === 10) eTime = '0' + eTime;
+        if (sTime.split(',')[1].length === 2) sTime += '0';
+        if (eTime.split(',')[1].length === 2) eTime += '0';
+        srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
+    });
+    
+    return srtOutput;
+}
+
+async function handleTranslationAss(subUrl, keysArray, modelName) {
+    let originalText = "";
+    try {
+        originalText = await fetchAndExtractSub(subUrl);
+    } catch (e) {
+        return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`;
+    }
+
+    const cues = extractCuesUniversal(originalText);
+    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
+
+    console.log(`[Translate] Starting ASS translation of ${cues.length} cues...`);
+    const CHUNK = 80;
+    const chunks = [];
+    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+
+    const tasks = chunks.map(chunk => async () => {
+        const texts = chunk.map(c => c.text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+    });
+
+    const chunkResults = await runConcurrentPool(tasks, 1);
+    const finalTranslations = chunkResults.flat();
+    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
+    return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+}
+
+module.exports = { handleTranslationSrt, handleTranslationAss };
