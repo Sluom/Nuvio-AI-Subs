@@ -61,9 +61,9 @@ const globalTranslationQueue = new RequestQueue();
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.5.0',
+    version: '1.6.0',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Background Processing and Cache.',
+    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Smart SDH Sorting and Background Cache.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -179,14 +179,16 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة الخلفية السريعة (Background Translation).';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية مع الفرز الذكي لملفات SDH.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
     res.json(modifiedManifest);
 });
 
-// مسار جلب الترجمات
+// ==========================================
+// مسار جلب الترجمات وفرز الـ SDH والملفات المختلفة
+// ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
   '/:config/subtitles/:type/:reqId(*)'
@@ -208,21 +210,43 @@ app.get([
         const r = await axios.get(osUrl, { timeout: 10000 });
         
         if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
-            let sourceSub = r.data.subtitles.find(s => (s.lang || '').toLowerCase().startsWith('en'));
-            if (!sourceSub) sourceSub = r.data.subtitles[0];
+            
+            // جلب كل الترجمات الإنجليزية المتوفرة
+            const engSubs = r.data.subtitles.filter(s => (s.lang || '').toLowerCase().startsWith('en'));
+            if (engSubs.length === 0) engSubs.push(r.data.subtitles[0]);
 
-            const sourceUrl = sourceSub.url;
-            const encodedUrl = encodeURIComponent(sourceUrl);
+            // فرز الترجمات إلى (عادية) و (ضعاف سمع SDH)
+            const normalSubs = [];
+            const sdhSubs = [];
+            
+            engSubs.forEach(sub => {
+                const isSdh = sub.id?.toLowerCase().includes('sdh') || 
+                              sub.id?.toLowerCase().includes('hi') || 
+                              sub.title?.toLowerCase().includes('sdh') || 
+                              sub.title?.toLowerCase().includes('hearing impaired');
+                if (isSdh) sdhSubs.push(sub);
+                else normalSubs.push(sub);
+            });
+
+            // اختيار 3 ملفات إنجليزية مختلفة لضمان تنوع التوقيتات
+            let sub1 = normalSubs.length > 0 ? normalSubs[0] : (sdhSubs[0] || engSubs[0]);
+            let sub2 = normalSubs.length > 1 ? normalSubs[1] : sub1;
+            let sub3 = sdhSubs.length > 0 ? sdhSubs[0] : (normalSubs.length > 2 ? normalSubs[2] : sub1);
+
+            const url1 = encodeURIComponent(sub1.url);
+            const url2 = encodeURIComponent(sub2.url);
+            const url3 = encodeURIComponent(sub3.url);
             
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
+            // إضافة 5 روابط تشير إلى ملفات مختلفة ومفصولة
             const transSubs = [
-                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Gemini)' },
-                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Gemini)' },
-                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (Gemini)' },
-                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Gemini)' },
-                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Gemini)' }
+                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${url1}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Normal)' },
+                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${url2}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Alt Sync)' },
+                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${url3}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (SDH)' },
+                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${url1}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Normal)' },
+                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${url2}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Alt Sync)' }
             ];
 
             return res.json({ subtitles: transSubs });
