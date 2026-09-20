@@ -9,19 +9,19 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
-// رفعنا الإصدار حتى Nuvio يفرمت الكاش ويقراها كإضافة جديدة
+// المانيفست الأساسي
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.0.3',
-    name: 'Nuvio AI Subs',
-    description: 'Auto-translate any subtitle into Arabic using APInex AI Model.',
+    version: '1.1.0',
+    name: 'Nuvio AI Subs (Pro)',
+    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Key Rotation.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
     catalogs: [],
     behaviorHints: {
-        configurable: false,
-        configurationRequired: false
+        configurable: true, // تفعيل صفحة الإعدادات
+        configurationRequired: true
     }
 };
 
@@ -31,6 +31,7 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
+// 1. مسار صفحة الإعدادات (Configuration Page)
 app.get(['/', '/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`
@@ -38,32 +39,112 @@ app.get(['/', '/configure'], (req, res) => {
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Nuvio AI Subs (v1.0.3)</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>إعدادات Nuvio AI Subs</title>
         <style>
-            body { background: #0b1120; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            h1 { color: #38bdf8; }
-            .btn { background: #0284c7; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; transition: 0.3s; }
-            .btn:hover { background: #0369a1; box-shadow: 0 4px 15px rgba(2, 132, 199, 0.5); }
+            body { background: #0b1120; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+            h1 { color: #38bdf8; text-align: center; }
+            .container { background: #1e293b; padding: 30px; border-radius: 12px; width: 100%; max-width: 500px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+            .input-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; color: #94a3b8; font-size: 14px; }
+            input[type="text"] { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff; box-sizing: border-box; }
+            .btn { background: #0284c7; color: #fff; padding: 12px; border: none; border-radius: 8px; font-weight: bold; width: 100%; cursor: pointer; margin-top: 10px; transition: 0.3s; }
+            .btn:hover { background: #0369a1; }
+            .btn-secondary { background: #475569; margin-bottom: 20px; }
+            .btn-secondary:hover { background: #334155; }
+            .key-row { display: flex; gap: 10px; margin-bottom: 10px; }
+            .key-row input { flex: 1; }
+            .remove-btn { background: #ef4444; color: white; border: none; border-radius: 6px; padding: 0 15px; cursor: pointer; font-weight: bold; }
         </style>
     </head>
     <body>
-        <h1>Nuvio AI Subs (v1.0.3)</h1>
-        <p>هذه الإضافة جاهزة وتسحب الترجمات مجاناً بدون API Keys للتحويل عبر الذكاء الاصطناعي.</p>
-        <a class="btn" href="stremio://${req.headers.host}/manifest.json">تثبيت الإضافة 🚀</a>
+        <h1>إعدادات المترجم الذكي</h1>
+        <div class="container">
+            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً لتجاوز حدود الطلبات (Key Rotation).</p>
+            
+            <div id="keys-container">
+                <div class="key-row">
+                    <input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)">
+                </div>
+            </div>
+
+            <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
+            
+            <div class="input-group" style="margin-top: 20px;">
+                <label>نموذج الترجمة (Model)</label>
+                <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash (السريع والمجاني)</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro (الأكثر دقة)</option>
+                </select>
+            </div>
+
+            <button class="btn" onclick="generateInstallLink()">تثبيت الإضافة في Nuvio 🚀</button>
+        </div>
+
+        <script>
+            function addKeyField() {
+                const container = document.getElementById('keys-container');
+                const row = document.createElement('div');
+                row.className = 'key-row';
+                row.innerHTML = \`
+                    <input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)">
+                    <button class="remove-btn" onclick="this.parentElement.remove()">X</button>
+                \`;
+                container.appendChild(row);
+            }
+
+            function generateInstallLink() {
+                const inputs = document.querySelectorAll('.api-key');
+                let keys = [];
+                inputs.forEach(input => {
+                    let val = input.value.trim();
+                    if(val) keys.push(val);
+                });
+
+                if(keys.length === 0) {
+                    alert('الرجاء إدخال مفتاح API واحد على الأقل!');
+                    return;
+                }
+
+                const model = document.getElementById('model-select').value;
+                
+                // تجميع الإعدادات في كائن وتحويلها لنص مشفر بالرابط
+                const config = {
+                    keys: keys,
+                    model: model
+                };
+                
+                const configStr = encodeURIComponent(JSON.stringify(config));
+                
+                // بناء رابط التثبيت
+                const host = window.location.host;
+                const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
+                
+                window.location.href = installUrl;
+            }
+        </script>
     </body>
     </html>
     `);
 });
 
-// مسار المانيفست متوافق مع Vercel
+// 2. مسار المانيفست (مع أو بدون إعدادات)
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
-    res.json(MANIFEST);
+    
+    // إذا كان الرابط يحتوي على إعدادات، نحدث وصف المانيفست ليظهر للمستخدم أنه مفعل
+    let modifiedManifest = { ...MANIFEST };
+    if (req.params.config) {
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك الخاصة.';
+        modifiedManifest.name = 'Nuvio AI Subs (Active)';
+    }
+    
+    res.json(modifiedManifest);
 });
 
-// مسار جلب الترجمات (نفس نظام Vercel بالضبط للروابط الذكية)
+// 3. مسار جلب الترجمات (يمرر الإعدادات المشفرة مع روابط الترجمة)
 app.get([
   '/subtitles/:type/:reqId(*)', 
   '/:config/subtitles/:type/:reqId(*)'
@@ -72,11 +153,10 @@ app.get([
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    // استخراج الـ ID النظيف (مثال: tt0903747:1:1)
+    const configParam = req.params.config || '';
+    
     let targetId = req.params.reqId.split('/')[0];
-    if (targetId.endsWith('.json')) {
-        targetId = targetId.slice(0, -5);
-    }
+    if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
 
     const type = req.params.type;
     const baseUrl = getBaseUrl(req);
@@ -84,47 +164,42 @@ app.get([
     console.log(`[Request] Nuvio is asking for: ${type} - ${targetId}`);
 
     try {
-        // الحركة الذكية: البحث في إضافة OpenSubtitles الرسمية المجانية بدون مفاتيح
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
         const r = await axios.get(osUrl, { timeout: 10000 });
         
         if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
-            // نبحث عن أي ترجمة إنجليزية كمرجع للذكاء الاصطناعي
             let sourceSub = r.data.subtitles.find(s => (s.lang || '').toLowerCase().startsWith('en'));
-            
-            // إذا ماكو إنجليزي، ناخذ أول ترجمة متوفرة
-            if (!sourceSub) {
-                sourceSub = r.data.subtitles[0];
-            }
+            if (!sourceSub) sourceSub = r.data.subtitles[0];
 
             const sourceUrl = sourceSub.url;
             const encodedUrl = encodeURIComponent(sourceUrl);
             
-            // تجهيز الـ 5 خيارات مالتك للذكاء الاصطناعي
+            // تمرير الـ Config (المفاتيح) إلى مسار الترجمة الفعلي
+            const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
+            const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
+            
             const transSubs = [
-                { id: 'nuvio-ai-srt-1', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 1' },
-                { id: 'nuvio-ai-srt-2', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 2' },
-                { id: 'nuvio-ai-srt-3', url: `${baseUrl}/stream-ai.srt?url=${encodedUrl}`, lang: 'ara', title: 'APInex SRT 3' },
-                { id: 'nuvio-ai-ass-1', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', title: 'APInex ASS 1' },
-                { id: 'nuvio-ai-ass-2', url: `${baseUrl}/stream-ai.ass?url=${encodedUrl}`, lang: 'ara', title: 'APInex ASS 2' }
+                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI SRT (Gemini)' },
+                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI SRT 2 (Gemini)' },
+                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI ASS (Gemini)' }
             ];
 
-            console.log(`[Success] Retrieved free source & sent 5 AI links to Nuvio!`);
+            console.log(`[Success] Sent AI links to Nuvio!`);
             return res.json({ subtitles: transSubs });
         }
         
-        // إذا ماكو أي ترجمة أصلية
-        console.log(`[Result] No source found at all.`);
         return res.json({ subtitles: [] });
-        
     } catch (err) {
         console.error("[Search Error]:", err.message);
         return res.json({ subtitles: [] });
     }
 });
 
-// مسار الترجمة بالذكاء الاصطناعي
-app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
+// 4. مسار الترجمة الفعلي بالذكاء الاصطناعي (يستلم المفاتيح من الرابط)
+app.all([
+    '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
+    '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
+], async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     
     const targetUrl = req.query.url;
@@ -132,23 +207,40 @@ app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
 
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
     
-    console.log(`[Translating...] isAss: ${isAss}`);
+    // استخراج الإعدادات (المفاتيح والموديل) من الرابط
+    let userKeys = [];
+    let userModel = 'gemini-1.5-flash'; // الافتراضي
+    
+    if (req.params.config) {
+        try {
+            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
+            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) {
+                userKeys = decodedConfig.keys;
+            }
+            if (decodedConfig.model) {
+                userModel = decodedConfig.model;
+            }
+        } catch (e) {
+            console.error("[Config Error] Failed to parse user config from URL");
+        }
+    }
+    
+    console.log(`[Translating...] isAss: ${isAss}, Total Keys Provided: ${userKeys.length}, Model: ${userModel}`);
 
     try {
         let finalContent = '';
         if (isAss) {
-            finalContent = await handleTranslationAss(targetUrl);
-            res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-            res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
+            finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
         } else {
-            finalContent = await handleTranslationSrt(targetUrl);
-            res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
-            res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
+            finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
         }
 
+        res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+        res.setHeader('Content-Disposition', `inline; filename="Trans-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
         res.send(finalContent);
+        
         console.log(`[Translate Success] Delivery Done!`);
     } catch (e) {
         console.error('[Translation Error]:', e.message);
@@ -156,7 +248,6 @@ app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res)
     }
 });
 
-// تشغيل سيرفر ريندر بشكل مستمر
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
 });
