@@ -103,7 +103,9 @@ function matchEpisode(fileName, targetEpisode) {
     return patterns.some(p => p.test(name));
 }
 
+// جلب صفحة واحدة من rest.opensubtitles.org مع تسجيل مفصّل لكل خطوة
 async function fetchLegacyData(url) {
+    console.log(`[OS Debug] Requesting: ${url}`);
     try {
         const res = await axios.get(url, {
             headers: {
@@ -113,8 +115,16 @@ async function fetchLegacyData(url) {
             },
             timeout: 10000
         });
+
+        console.log(`[OS Debug] Status: ${res.status} | Content-Type: ${res.headers['content-type']}`);
+
         const data = res.data;
-        if (!Array.isArray(data)) return [];
+        if (!Array.isArray(data)) {
+            console.log(`[OS Debug] Response is NOT an array. Type: ${typeof data} | Sample: ${JSON.stringify(data).slice(0, 300)}`);
+            return [];
+        }
+
+        console.log(`[OS Debug] Got ${data.length} raw entries from OpenSubtitles`);
 
         return data
             .filter(e => e.SubDownloadLink)
@@ -129,13 +139,22 @@ async function fetchLegacyData(url) {
                 };
             });
     } catch (e) {
+        console.error(`[OS Debug] FAILED: ${url}`);
+        console.error(`[OS Debug] Error: ${e.message} | Status: ${e.response?.status} | Code: ${e.code}`);
+        if (e.response?.data) {
+            console.error(`[OS Debug] Response body sample: ${JSON.stringify(e.response.data).slice(0, 300)}`);
+        }
         return [];
     }
 }
 
 // جلب ترجمات إنجليزية (SRT + ASS الحقيقية) من OpenSubtitles.org حصراً
 async function fetchOpenSubtitlesEnglish(imdbId, season, episode) {
-    if (!imdbId || !imdbId.startsWith('tt')) return [];
+    console.log(`[OS Debug] === Fetching for imdbId=${imdbId} season=${season} episode=${episode} ===`);
+    if (!imdbId || !imdbId.startsWith('tt')) {
+        console.log(`[OS Debug] Rejected: imdbId "${imdbId}" doesn't start with 'tt'`);
+        return [];
+    }
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
 
     let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
@@ -144,27 +163,33 @@ async function fetchOpenSubtitlesEnglish(imdbId, season, episode) {
     }
 
     let results = await fetchLegacyData(primaryUrl);
+    console.log(`[OS Debug] Primary query returned ${results.length} usable subs`);
 
     // لو محددين حلقة معينة وما لقينا ass بها، نبحث بكامل المسلسل ونفلتر برقم الحلقة
     if (season != null && episode != null) {
         const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
         if (!hasAss) {
+            console.log(`[OS Debug] No ASS in primary result, trying fallback (full series)`);
             const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
             const fallbackResults = await fetchLegacyData(fallbackUrl);
+            console.log(`[OS Debug] Fallback query returned ${fallbackResults.length} total subs`);
             const filteredAss = fallbackResults.filter(r =>
                 (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.subtitleFileName, episode)
             );
+            console.log(`[OS Debug] Fallback ASS matching episode ${episode}: ${filteredAss.length}`);
             results = [...results, ...filteredAss];
         }
     }
 
     // إزالة التكرار حسب رابط التحميل
     const seen = new Set();
-    return results.filter(r => {
+    const final = results.filter(r => {
         if (seen.has(r.url)) return false;
         seen.add(r.url);
         return true;
     });
+    console.log(`[OS Debug] Final unique results: ${final.length}`);
+    return final;
 }
 
 app.get(['/', '/configure'], (req, res) => {
@@ -298,6 +323,7 @@ app.get([
 
     try {
         const rawSubs = await fetchOpenSubtitlesEnglish(imdbId, season, episode);
+        console.log(`[Route Debug] rawSubs: ${rawSubs.length} for targetId=${targetId} type=${type}`);
 
         if (rawSubs.length > 0) {
 
@@ -308,11 +334,15 @@ app.get([
                 return !(name.includes('sdh') || name.includes('hi ') || name.includes('hearing impaired'));
             });
 
+            console.log(`[Route Debug] cleanSubs after SDH filter: ${cleanSubs.length}`);
+
             if (cleanSubs.length === 0) return res.json({ subtitles: [] });
 
             // الفرز إلى SRT و ASS بناءً على حقل SubFormat الحقيقي القادم من OpenSubtitles
             const assSubs = cleanSubs.filter(s => s.format === 'ass' || s.format === 'ssa');
             const srtSubs = cleanSubs.filter(s => s.format !== 'ass' && s.format !== 'ssa');
+
+            console.log(`[Route Debug] assSubs: ${assSubs.length} | srtSubs: ${srtSubs.length}`);
 
             const transSubs = [];
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
@@ -344,10 +374,13 @@ app.get([
                 }
             }
 
+            console.log(`[Route Debug] Final transSubs count: ${transSubs.length}`);
             return res.json({ subtitles: transSubs });
         }
+        console.log(`[Route Debug] rawSubs was empty, returning []`);
         return res.json({ subtitles: [] });
     } catch (err) {
+        console.error(`[Route Debug] EXCEPTION: ${err.message}`);
         return res.json({ subtitles: [] });
     }
 });
