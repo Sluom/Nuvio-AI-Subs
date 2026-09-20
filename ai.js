@@ -57,8 +57,7 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        // هنا نحتفظ بـ \N حتى نعالجها لاحقاً حسب نوع الملف
-        const text2 = lines.slice(idx + 1).join('\\N');
+        const text2 = lines.slice(idx + 1).join('\\N'); // الاحتفاظ المبدئي بـ \N
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
@@ -71,20 +70,20 @@ function parseRobustJsonArray(raw, expectedLength, isAssFile) {
     else if (clean.startsWith('```')) clean = clean.substring(3);
     if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
     clean = clean.trim();
+    
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+        
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
                 
-                // الحل السحري لمشكلة سطر SSA:
+                // معالجة النزول بسطر حسب نوع الملف
                 if (isAssFile) {
-                    // للـ ASS/SSA، نرجع علامة \N الأصلية حتى يتعرف عليها المشغل
                     txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
                 } else {
-                    // للـ SRT، ننزل سطر عادي
                     txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
                 }
                 
@@ -126,28 +125,28 @@ function getNextApiKey(keysArray) {
 async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = getNextApiKey(keysArray);
-        if (!activeKey) return null;
-        const cleanKey = String(activeKey).trim();
-        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
-        
-        // البرومبت الصارم رجعناه هنا حتى نمنع الموديل يرجع إنجليزي!
-        const prompt = `You are a professional Arabic subtitle translator.
-Translate the following JSON array of strings into ARABIC.
+    
+    // إرجاع البرومبت الصارم لمنع الموديل من إرجاع الإنجليزية
+    const prompt = `You are a professional Arabic subtitle translator.
+Translate the following JSON array of strings into ARABIC strictly.
 
-STRICT RULES:
-1. Translate to Arabic only.
-2. Preserve all timing, formatting tags, and structure exactly as given.
-3. Keep the same number of lines and array elements.
-4. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses.
-5. Do NOT overthink. Do NOT overplan. Do NOT include acknowledgements, explanations, notes or alternative translations.
+RULES:
+1. Translate to Arabic.
+2. Preserve all timing, tags, and array structure.
+3. Translate text inside brackets [] or parentheses () into Arabic while strictly keeping the brackets/parentheses.
+4. Do NOT overthink. Do NOT overplan. Do NOT include acknowledgements, explanations, or notes.
 
 Output ONLY A VALID JSON ARRAY OF STRINGS containing the Arabic translation.
 
 Content to translate:
 ${JSON.stringify(texts)}`;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const activeKey = getNextApiKey(keysArray);
+        if (!activeKey) return null;
+        const cleanKey = String(activeKey).trim();
+        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(GEMINI_URL, {
@@ -157,18 +156,16 @@ ${JSON.stringify(texts)}`;
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                // نمرر isAssFile للدالة حتى تعالج الـ \N صح
                 const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
                 if (parsedArr && parsedArr.length > 0) return parsedArr;
             }
-            return null;
         } catch (e) {
             const status = e.response?.status;
             if (attempt === MAX_RETRIES || (status !== 429 && status < 500 && e.code !== 'ECONNABORTED')) return null;
             await delay(baseDelay * Math.pow(2, attempt));
         }
     }
-    return null;
+    return null; // إذا فشل نرجع null ليتولى الكود أدناه إرجاع الأصل
 }
 
 async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
@@ -208,8 +205,9 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, false); // إرسال false لأن هذا SRT
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, false);
+        // فلتر الأمان: إذا فشل الذكاء أو رجّع نص فارغ، يرجع النص الإنجليزي الأصلي غصباً عنه
+        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1); 
@@ -253,8 +251,9 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, true); // إرسال true لأن هذا ASS
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, true);
+        // فلتر الأمان: إذا فشل الذكاء، يرجع النص الإنجليزي الأصلي بدل الفراغ
+        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
