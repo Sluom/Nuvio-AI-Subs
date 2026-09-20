@@ -57,13 +57,14 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
+        // هنا نحتفظ بـ \N حتى نعالجها لاحقاً حسب نوع الملف
         const text2 = lines.slice(idx + 1).join('\\N');
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
 }
 
-function parseRobustJsonArray(raw, expectedLength) {
+function parseRobustJsonArray(raw, expectedLength, isAssFile) {
     if (!raw) return null;
     let clean = raw.trim();
     if (clean.startsWith('```json')) clean = clean.substring(7);
@@ -77,7 +78,16 @@ function parseRobustJsonArray(raw, expectedLength) {
             return arr.map(x => {
                 let txt = String(x || '');
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
+                
+                // الحل السحري لمشكلة سطر SSA:
+                if (isAssFile) {
+                    // للـ ASS/SSA، نرجع علامة \N الأصلية حتى يتعرف عليها المشغل
+                    txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
+                } else {
+                    // للـ SRT، ننزل سطر عادي
+                    txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
+                }
+                
                 return txt.trim();
             });
         }
@@ -113,7 +123,7 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName) {
+async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -121,15 +131,21 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         if (!activeKey) return null;
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
         
-        const prompt = `Translate the following subtitles while:
-1. Preserving the timing and structure exactly as given
-2. Maintaining natural dialogue flow
-3. Keeping the same number of lines
-4. Preserving any formatting tags or special characters
-5. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-Translate to Arabic. Output ONLY A VALID JSON ARRAY OF STRINGS.
+        // البرومبت الصارم رجعناه هنا حتى نمنع الموديل يرجع إنجليزي!
+        const prompt = `You are a professional Arabic subtitle translator.
+Translate the following JSON array of strings into ARABIC.
+
+STRICT RULES:
+1. Translate to Arabic only.
+2. Preserve all timing, formatting tags, and structure exactly as given.
+3. Keep the same number of lines and array elements.
+4. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses.
+5. Do NOT overthink. Do NOT overplan. Do NOT include acknowledgements, explanations, notes or alternative translations.
+
+Output ONLY A VALID JSON ARRAY OF STRINGS containing the Arabic translation.
+
 Content to translate:
 ${JSON.stringify(texts)}`;
 
@@ -141,7 +157,8 @@ ${JSON.stringify(texts)}`;
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length);
+                // نمرر isAssFile للدالة حتى تعالج الـ \N صح
+                const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
                 if (parsedArr && parsedArr.length > 0) return parsedArr;
             }
             return null;
@@ -191,7 +208,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, false); // إرسال false لأن هذا SRT
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
@@ -212,13 +229,11 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     return srtOutput;
 }
 
-// دالة جديدة كلياً: تحتفظ بألوان وستايل الـ ASS الأصلي
 async function handleTranslationAss(subUrl, keysArray, modelName) {
     let originalText = "";
     try { originalText = await fetchAndExtractSub(subUrl, true); } 
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف الأصلي.`; }
 
-    // استخراج القالب (الستايل) الأصلي بالكامل للمحافظة على الألوان
     let headerMatch = originalText.match(/([\s\S]*?)(?=^Dialogue:)/im);
     let header = headerMatch ? headerMatch[1].trim() : ASS_DEFAULT_HEADER;
 
@@ -227,7 +242,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const cues = [];
     for (const line of assLines) {
-        // عزل الأكواد عن النص الحقيقي للترجمة
         const m = line.match(/^(Dialogue:\s*[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,)(.*)$/i);
         if (m) cues.push({ prefix: m[1], text: m[2] });
         else cues.push({ prefix: "Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,", text: line });
@@ -239,14 +253,13 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, true); // إرسال true لأن هذا ASS
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
 
-    // تركيب الترجمة العربية على الأكواد الأصلية
     const finalAssLines = cues.map((c, idx) => `${c.prefix}${finalTranslations[idx]}`);
 
     return header + '\n' + finalAssLines.join('\n') + '\n';
