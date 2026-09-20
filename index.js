@@ -9,12 +9,54 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
 
-// المانيفست الأساسي
+// ==========================================
+// 🚀 الطابور الذكي (Global Queue) لمنع الـ Timeout والـ Quota
+// ==========================================
+class RequestQueue {
+    constructor() {
+        this.queue = [];
+        this.isProcessing = false;
+    }
+
+    async add(task) {
+        return new Promise((resolve, reject) => {
+            this.queue.push(async () => {
+                try {
+                    const result = await task();
+                    resolve(result);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+            if (!this.isProcessing) {
+                this.processNext();
+            }
+        });
+    }
+
+    async processNext() {
+        if (this.queue.length === 0) {
+            this.isProcessing = false;
+            return;
+        }
+        this.isProcessing = true;
+        const task = this.queue.shift();
+        try {
+            await task();
+        } catch (e) {
+            console.error("[Queue Error]", e.message);
+        }
+        this.processNext();
+    }
+}
+const globalTranslationQueue = new RequestQueue();
+// ==========================================
+
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.2.0',
-    name: 'Nuvio AI Subs (Pro)',
-    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Key Rotation.',
+    version: '1.4.0',
+    name: 'Nuvio AI Subs (Pro Max)',
+    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Key Rotation and Smart Queue limits.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -31,7 +73,6 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
-// 1. مسار صفحة الإعدادات (Configuration Page) مع النماذج السحرية
 app.get(['/', '/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`
@@ -73,7 +114,6 @@ app.get(['/', '/configure'], (req, res) => {
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
-                    <!-- مطابقة دقيقة لنماذج SubMaker التي تتجاوز الحظر -->
                     <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
                     <option value="gemini-3.7-flash">Gemini 3.7 Flash (beta)</option>
                     <option value="gemini-3.6-flash">Gemini 3.6 Flash (beta)</option>
@@ -111,14 +151,8 @@ app.get(['/', '/configure'], (req, res) => {
                 }
 
                 const model = document.getElementById('model-select').value;
-                
-                const config = {
-                    keys: keys,
-                    model: model
-                };
-                
+                const config = { keys: keys, model: model };
                 const configStr = encodeURIComponent(JSON.stringify(config));
-                
                 const host = window.location.host;
                 const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
                 
@@ -130,7 +164,6 @@ app.get(['/', '/configure'], (req, res) => {
     `);
 });
 
-// 2. مسار المانيفست (مع أو بدون إعدادات)
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -138,14 +171,13 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك المتعددة.';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك المتعددة والطابور الذكي.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
     res.json(modifiedManifest);
 });
 
-// 3. مسار جلب الترجمات 
 app.get([
   '/subtitles/:type/:reqId(*)', 
   '/:config/subtitles/:type/:reqId(*)'
@@ -178,13 +210,16 @@ app.get([
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
+            // إضافة 5 روابط بناءً على طلبك (3 SRT و 2 ASS)
             const transSubs = [
-                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI SRT (Gemini)' },
-                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI SRT 2 (Gemini)' },
-                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}`, lang: 'ara', title: 'Nuvio AI ASS (Gemini)' }
+                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Gemini)' },
+                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Gemini)' },
+                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${encodedUrl}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (Gemini)' },
+                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Gemini)' },
+                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${encodedUrl}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Gemini)' }
             ];
 
-            console.log(`[Success] Sent AI links to Nuvio!`);
+            console.log(`[Success] Sent 5 AI links to Nuvio!`);
             return res.json({ subtitles: transSubs });
         }
         
@@ -195,7 +230,6 @@ app.get([
     }
 });
 
-// 4. مسار الترجمة الفعلي
 app.all([
     '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
     '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
@@ -203,6 +237,7 @@ app.all([
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     
     const targetUrl = req.query.url;
+    const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
@@ -220,30 +255,33 @@ app.all([
                 userModel = decodedConfig.model;
             }
         } catch (e) {
-            console.error("[Config Error] Failed to parse user config from URL");
+            console.error("[Config Error] Failed to parse config");
         }
     }
     
-    console.log(`[Translating...] isAss: ${isAss}, Total Keys Provided: ${userKeys.length}, Model: ${userModel}`);
+    console.log(`[Queued] Track ${trackNum} (${isAss ? 'ASS' : 'SRT'}) added to waitlist...`);
 
+    // إرسال الطلب إلى الطابور الذكي لمعالجته بالدور
     try {
-        let finalContent = '';
-        if (isAss) {
-            finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
-        } else {
-            finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
-        }
+        const finalContent = await globalTranslationQueue.add(async () => {
+            console.log(`[Translating...] Now processing Track ${trackNum} - isAss: ${isAss}, Model: ${userModel}`);
+            if (isAss) {
+                return await handleTranslationAss(targetUrl, userKeys, userModel);
+            } else {
+                return await handleTranslationSrt(targetUrl, userKeys, userModel);
+            }
+        });
 
         res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
-        res.setHeader('Content-Disposition', `inline; filename="Trans-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
+        res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
         res.send(finalContent);
         
-        console.log(`[Translate Success] Delivery Done!`);
+        console.log(`[Delivery Done] Track ${trackNum} sent to player!`);
     } catch (e) {
         console.error('[Translation Error]:', e.message);
-        res.status(500).send('Error generating AI translation');
+        if (!res.headersSent) res.status(500).send('Error generating AI translation');
     }
 });
 
