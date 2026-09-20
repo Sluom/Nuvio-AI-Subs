@@ -127,11 +127,13 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         return null;
     }
 
-    // تنظيف اسم الموديل لضمان توافقه مع مسار جوجل
+    // التنظيف الشامل للمفتاح واسم الموديل لمنع أخطاء Invalid URL
+    const cleanKey = String(activeKey).trim();
     const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-    const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent?key=${activeKey}`;
     
-    // هذا البرومبت تم استنساخه من كود SubMaker الذي أرسلته لي
+    // بناء الرابط بالضبط مثل إضافة SubMaker بدون إرفاق المفتاح بالرابط
+    const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+    
     const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
@@ -167,7 +169,8 @@ ${JSON.stringify(texts)}`;
             {
                 headers: { 
                     'Content-Type': 'application/json',
-                    // استنساخ دقيق لتعريف إضافة SubMaker لخداع فلتر جوجل
+                    // إرسال المفتاح من خلال الهيدرات تماماً كما تفعل إضافة SubMaker
+                    'x-goog-api-key': cleanKey,
                     'x-goog-api-client': 'stremio-submaker/1.4.94'
                 },
                 timeout: 30000
@@ -178,12 +181,12 @@ ${JSON.stringify(texts)}`;
             const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             const parsedArr = parseRobustJsonArray(responseText, texts.length);
             if (parsedArr && parsedArr.length > 0) {
-                console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${activeKey.slice(-4)}`);
+                console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
                 return parsedArr;
             }
         }
     } catch (e) {
-        console.error(`[Gemini Error - ${cleanModelName} - Key ...${activeKey.slice(-4)}]: ${e.response?.data?.error?.message || e.message}`);
+        console.error(`[Gemini Error - ${cleanModelName} - Key ...${cleanKey.slice(-4)}]: ${e.response?.data?.error?.message || e.message}`);
     }
     
     return null;
