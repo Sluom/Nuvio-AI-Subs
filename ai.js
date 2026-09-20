@@ -82,7 +82,8 @@ function parseRobustJsonArray(raw, expectedLength) {
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-        if (Array.isArray(arr) && arr.length > 0) return arr.map(x => String(x || '').trim());
+        if (Array.isArray(arr) && arr.length > 0) return arr.map(x => String(x || '').replace(/\\\\n/g, '\n').replace(/\\n/g, '\n').trim());
+
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         if (stringMatches.length >= expectedLength * 0.5) return stringMatches.filter(s => s !== 'translations' && s !== 'data');
