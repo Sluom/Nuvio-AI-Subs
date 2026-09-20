@@ -86,10 +86,9 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // 1. مسح الرموز الموسيقية فقط بدون المساس بالحروف العربية نهائياً
+                // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                
-                // 2. تحويل أي صيغة من صيغ النزول للسطر إلى نزول حقيقي
+                // إصلاح فواصل الأسطر
                 txt = txt.replace(/\\\\n/gi, '\n')
                          .replace(/\\\\N/g, '\n')
                          .replace(/\\n/gi, '\n')
