@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 7000;
 // المانيفست الأساسي
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.1.0',
+    version: '1.2.0',
     name: 'Nuvio AI Subs (Pro)',
     description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Key Rotation.',
     resources: ['subtitles'],
@@ -20,7 +20,7 @@ const MANIFEST = {
     idPrefixes: ['tt', 'kitsu'],
     catalogs: [],
     behaviorHints: {
-        configurable: true, // تفعيل صفحة الإعدادات
+        configurable: true, 
         configurationRequired: true
     }
 };
@@ -31,7 +31,7 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
-// 1. مسار صفحة الإعدادات (Configuration Page)
+// 1. مسار صفحة الإعدادات (Configuration Page) مع النماذج السحرية
 app.get(['/', '/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`
@@ -71,10 +71,14 @@ app.get(['/', '/configure'], (req, res) => {
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
             
             <div class="input-group" style="margin-top: 20px;">
-                <label>نموذج الترجمة (Model)</label>
+                <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
-                    <option value="gemini-1.5-flash">Gemini 1.5 Flash (السريع والمجاني)</option>
-                    <option value="gemini-1.5-pro">Gemini 1.5 Pro (الأكثر دقة)</option>
+                    <!-- مطابقة دقيقة لنماذج SubMaker التي تتجاوز الحظر -->
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
+                    <option value="gemini-3.7-flash">Gemini 3.7 Flash (beta)</option>
+                    <option value="gemini-3.6-flash">Gemini 3.6 Flash (beta)</option>
+                    <option value="gemini-3.5-flash">Gemini 3.5 Flash (beta)</option>
+                    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (beta)</option>
                 </select>
             </div>
 
@@ -108,7 +112,6 @@ app.get(['/', '/configure'], (req, res) => {
 
                 const model = document.getElementById('model-select').value;
                 
-                // تجميع الإعدادات في كائن وتحويلها لنص مشفر بالرابط
                 const config = {
                     keys: keys,
                     model: model
@@ -116,7 +119,6 @@ app.get(['/', '/configure'], (req, res) => {
                 
                 const configStr = encodeURIComponent(JSON.stringify(config));
                 
-                // بناء رابط التثبيت
                 const host = window.location.host;
                 const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
                 
@@ -134,17 +136,16 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
     
-    // إذا كان الرابط يحتوي على إعدادات، نحدث وصف المانيفست ليظهر للمستخدم أنه مفعل
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك الخاصة.';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية باستخدام مفاتيحك المتعددة.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
     res.json(modifiedManifest);
 });
 
-// 3. مسار جلب الترجمات (يمرر الإعدادات المشفرة مع روابط الترجمة)
+// 3. مسار جلب الترجمات 
 app.get([
   '/subtitles/:type/:reqId(*)', 
   '/:config/subtitles/:type/:reqId(*)'
@@ -174,7 +175,6 @@ app.get([
             const sourceUrl = sourceSub.url;
             const encodedUrl = encodeURIComponent(sourceUrl);
             
-            // تمرير الـ Config (المفاتيح) إلى مسار الترجمة الفعلي
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
@@ -195,7 +195,7 @@ app.get([
     }
 });
 
-// 4. مسار الترجمة الفعلي بالذكاء الاصطناعي (يستلم المفاتيح من الرابط)
+// 4. مسار الترجمة الفعلي
 app.all([
     '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
     '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
@@ -207,9 +207,8 @@ app.all([
 
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
     
-    // استخراج الإعدادات (المفاتيح والموديل) من الرابط
     let userKeys = [];
-    let userModel = 'gemini-1.5-flash'; // الافتراضي
+    let userModel = 'gemini-3.1-flash-lite'; 
     
     if (req.params.config) {
         try {
