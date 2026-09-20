@@ -44,7 +44,7 @@ const globalTranslationQueue = new RequestQueue();
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '2.5.0',
+    version: '2.6.0',
     name: 'Nuvio AI Subs (Ultra Max)',
     description: 'Auto-translate from Official OpenSubtitles Legacy API. Strict SDH removal, up to 6 SRT & 4 true SSA tracks.',
     resources: ['subtitles'],
@@ -92,6 +92,12 @@ app.get(['/', '/configure'], (req, res) => {
                 <div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>
             </div>
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
+            
+            <div class="input-group" style="margin-top: 20px;">
+                <label>مفتاح OpenSubtitles API (اختياري - لتجاوز الحظر)</label>
+                <input type="text" id="os-api-key" placeholder="أدخل مفتاح OpenSubtitles هنا">
+            </div>
+
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
@@ -115,8 +121,10 @@ app.get(['/', '/configure'], (req, res) => {
                 const inputs = document.querySelectorAll('.api-key');
                 let keys = [];
                 inputs.forEach(input => { let val = input.value.trim(); if(val) keys.push(val); });
-                if(keys.length === 0) return alert('الرجاء إدخال مفتاح API واحد على الأقل!');
-                const config = { keys: keys, model: document.getElementById('model-select').value };
+                if(keys.length === 0) return alert('الرجاء إدخال مفتاح Gemini API واحد على الأقل!');
+                
+                const osKey = document.getElementById('os-api-key').value.trim();
+                const config = { keys: keys, osKey: osKey, model: document.getElementById('model-select').value };
                 window.location.href = 'stremio://' + window.location.host + '/' + encodeURIComponent(JSON.stringify(config)) + '/manifest.json';
             }
         </script>
@@ -151,9 +159,20 @@ function matchEpisode(fileName, targetEpisode) {
     return patterns.some(p => p.test(name));
 }
 
-async function fetchLegacyData(url) {
+// دالة جلب البيانات من السيرفر القديم (تم التعديل لتشمل المفتاح إذا توفر)
+async function fetchLegacyData(url, osKey) {
     try {
-        const response = await axios.get(url, { headers: { 'User-Agent': 'VLSub 0.10.3' }, timeout: 8000 });
+        const headers = { 
+            'User-Agent': 'VLSub 0.10.3',
+            'Accept': 'application/json'
+        };
+        // إذا قام المستخدم بتوفير مفتاح OpenSubtitles، نرسله في الـ Header لتجاوز الحظر
+        if (osKey) {
+            headers['Api-Key'] = osKey;
+            headers['X-User-Agent'] = 'Nuvio AI Subs';
+        }
+
+        const response = await axios.get(url, { headers: headers, timeout: 8000 });
         if (!Array.isArray(response.data)) return [];
         const results = [];
         response.data.forEach(entry => {
@@ -165,17 +184,20 @@ async function fetchLegacyData(url) {
             results.push({ url: downloadLink, fileName: rawName, isAss: isAss });
         });
         return results;
-    } catch (e) { return []; }
+    } catch (e) {
+        console.error("[Legacy API Error]:", e.message);
+        return []; 
+    }
 }
 
-async function fetchLegacyApiEnglish(imdbId, season, episode) {
+async function fetchLegacyApiEnglish(imdbId, season, episode, osKey) {
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
     let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
     if (season != null && episode != null) primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
-    let results = await fetchLegacyData(primaryUrl);
+    let results = await fetchLegacyData(primaryUrl, osKey);
     if (season != null && episode != null) {
         if (!results.some(r => r.isAss)) {
-            const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
+            const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`, osKey);
             results = [...results, ...fallbackResults.filter(r => r.isAss && matchEpisode(r.fileName, episode))];
         }
     }
@@ -200,6 +222,16 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json');
     const configParam = req.params.config || '';
+    
+    // استخراج مفتاح OpenSubtitles من الإعدادات إذا كان موجوداً
+    let osKey = null;
+    if (configParam) {
+        try {
+            const decodedConfig = JSON.parse(decodeURIComponent(configParam));
+            if (decodedConfig.osKey) osKey = decodedConfig.osKey;
+        } catch (e) {}
+    }
+
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
     const type = req.params.type;
@@ -212,7 +244,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     }
 
     try {
-        const allSubs = [...await fetchLegacyApiEnglish(imdbId, season, episode), ...await fetchMirrorEnglish(imdbId, season, episode, type)];
+        // تمرير osKey لدالة الجلب الخاصة بالسيرفر القديم
+        const allSubs = [...await fetchLegacyApiEnglish(imdbId, season, episode, osKey), ...await fetchMirrorEnglish(imdbId, season, episode, type)];
         const unique = [];
         const seenUrls = new Set();
         for (const sub of allSubs) {
@@ -234,9 +267,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const transSubs = [];
         
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
-        const streamPathAss = configParam ? `/${configParam}/stream-ai.ssa` : `/stream-ai.ssa`; // استخدام .ssa صراحة
+        const streamPathAss = configParam ? `/${configParam}/stream-ai.ssa` : `/stream-ai.ssa`; 
         
-        // جلب SRT حسب المتوفر الفعلي (بحد أقصى 6) لمنع التكرار
         const maxSrt = Math.min(6, srtSubs.length);
         for (let i = 0; i < maxSrt; i++) {
             transSubs.push({
@@ -247,7 +279,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             });
         }
 
-        // جلب SSA حسب المتوفر الفعلي (بحد أقصى 4) لمنع التكرار
         const maxAss = Math.min(4, assSubs.length);
         for (let i = 0; i < maxAss; i++) {
             transSubs.push({
