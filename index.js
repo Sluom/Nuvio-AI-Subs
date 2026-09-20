@@ -61,9 +61,9 @@ const globalTranslationQueue = new RequestQueue();
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.6.0',
+    version: '1.7.0',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with Smart SDH Sorting and Background Cache.',
+    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with 5 distinct tracks and STRICT NO-SDH policy.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -179,7 +179,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية مع الفرز الذكي لملفات SDH.';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية بـ 5 روابط مستقلة وبدون SDH.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
@@ -187,7 +187,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات وفرز الـ SDH والملفات المختلفة
+// مسار جلب الترجمات وفرز الملفات المستقلة واستبعاد SDH نهائياً
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -213,40 +213,40 @@ app.get([
             
             // جلب كل الترجمات الإنجليزية المتوفرة
             const engSubs = r.data.subtitles.filter(s => (s.lang || '').toLowerCase().startsWith('en'));
-            if (engSubs.length === 0) engSubs.push(r.data.subtitles[0]);
-
-            // فرز الترجمات إلى (عادية) و (ضعاف سمع SDH)
-            const normalSubs = [];
-            const sdhSubs = [];
             
-            engSubs.forEach(sub => {
-                const isSdh = sub.id?.toLowerCase().includes('sdh') || 
-                              sub.id?.toLowerCase().includes('hi') || 
-                              sub.title?.toLowerCase().includes('sdh') || 
-                              sub.title?.toLowerCase().includes('hearing impaired');
-                if (isSdh) sdhSubs.push(sub);
-                else normalSubs.push(sub);
+            // فلترة وحذف أي ترجمة تحتوي على SDH أو إعاقة سمعية بشكل نهائي ومطلق
+            const cleanSubs = engSubs.filter(sub => {
+                const title = (sub.title || '').toLowerCase();
+                const idStr = (sub.id || '').toLowerCase();
+                return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired') || idStr.includes('sdh') || idStr.includes('hi'));
             });
 
-            // اختيار 3 ملفات إنجليزية مختلفة لضمان تنوع التوقيتات
-            let sub1 = normalSubs.length > 0 ? normalSubs[0] : (sdhSubs[0] || engSubs[0]);
-            let sub2 = normalSubs.length > 1 ? normalSubs[1] : sub1;
-            let sub3 = sdhSubs.length > 0 ? sdhSubs[0] : (normalSubs.length > 2 ? normalSubs[2] : sub1);
+            // إذا ماكو أي ترجمة إنجليزية نظيفة، نرجع قائمة فارغة (استبعاد SDH بكل الأحوال)
+            if (cleanSubs.length === 0) return res.json({ subtitles: [] });
+
+            // اختيار 5 ملفات إنجليزية مختلفة قدر الإمكان لضمان استقلالية كل رابط
+            const sub1 = cleanSubs[0];
+            const sub2 = cleanSubs.length > 1 ? cleanSubs[1] : sub1;
+            const sub3 = cleanSubs.length > 2 ? cleanSubs[2] : sub1;
+            const sub4 = cleanSubs.length > 3 ? cleanSubs[3] : sub1;
+            const sub5 = cleanSubs.length > 4 ? cleanSubs[4] : sub1;
 
             const url1 = encodeURIComponent(sub1.url);
             const url2 = encodeURIComponent(sub2.url);
             const url3 = encodeURIComponent(sub3.url);
+            const url4 = encodeURIComponent(sub4.url);
+            const url5 = encodeURIComponent(sub5.url);
             
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
-            // إضافة 5 روابط تشير إلى ملفات مختلفة ومفصولة
+            // إضافة الـ 5 روابط بحيث كل رابط يجلب ملف منفصل (يعمل بعالمه الخاص)
             const transSubs = [
-                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${url1}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Normal)' },
-                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${url2}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Alt Sync)' },
-                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${url3}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (SDH)' },
-                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${url1}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Normal)' },
-                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${url2}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Alt Sync)' }
+                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${url1}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Sync A)' },
+                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${url2}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Sync B)' },
+                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${url3}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (Sync C)' },
+                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${url4}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Sync D)' },
+                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${url5}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Sync E)' }
             ];
 
             return res.json({ subtitles: transSubs });
