@@ -127,12 +127,13 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         return null;
     }
 
-    // التنظيف الشامل للمفتاح واسم الموديل لمنع أخطاء Invalid URL
     const cleanKey = String(activeKey).trim();
     const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
     
-    // بناء الرابط بالضبط مثل إضافة SubMaker بدون إرفاق المفتاح بالرابط
-    const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+    // بناء الرابط بهذه الطريقة يمنع المتصفحات من تشويه الكود أو تحويله إلى رابط أزرق بالخطأ
+    const apiBase = "https://generativelanguage.googleapis.com";
+    const apiPath = "/v1beta/models/" + cleanModelName + ":generateContent";
+    const GEMINI_URL = apiBase + apiPath;
     
     const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
@@ -169,7 +170,6 @@ ${JSON.stringify(texts)}`;
             {
                 headers: { 
                     'Content-Type': 'application/json',
-                    // إرسال المفتاح من خلال الهيدرات تماماً كما تفعل إضافة SubMaker
                     'x-goog-api-key': cleanKey,
                     'x-goog-api-client': 'stremio-submaker/1.4.94'
                 },
@@ -191,6 +191,7 @@ ${JSON.stringify(texts)}`;
     
     return null;
 }
+
 
 async function fetchAndExtractSub(subUrl) {
     let response;
