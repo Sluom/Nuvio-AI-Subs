@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
+const axios = require('axios'); // نبقيها للذكاء الاصطناعي فقط
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 const app = express();
@@ -36,7 +36,7 @@ const globalTranslationQueue = new RequestQueue();
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '2.7.0',
+    version: '2.8.0',
     name: 'Nuvio AI Subs (Ultra Max)',
     description: 'Auto-translate from Official OpenSubtitles Legacy API. Strict SDH removal, up to 6 SRT & 4 true SSA tracks.',
     resources: ['subtitles'],
@@ -77,14 +77,13 @@ app.get(['/', '/configure'], (req, res) => {
         </style>
     </head>
     <body>
-        <h1>إعدادات المترجم الذكي (النسخة المستقرة)</h1>
+        <h1>إعدادات المترجم الذكي</h1>
         <div class="container">
             <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا.</p>
             <div id="keys-container">
                 <div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>
             </div>
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
-            
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
@@ -145,20 +144,27 @@ function matchEpisode(fileName, targetEpisode) {
     return patterns.some(p => p.test(name));
 }
 
-// دالة جلب البيانات مع إرجاع الهيدر الأصلي الخاص بك بحذافيره
+// الرجوع لكودك الأصلي العبقري واستخدام (fetch) بدل (axios) لتجنب حظر كلاودفلير
 async function fetchLegacyData(url) {
     try {
-        const response = await axios.get(url, { 
-            headers: { 
-                'User-Agent': 'VLSub 0.10.3',
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'VLSub 0.10.3', 
                 'X-User-Agent': 'VLSub 0.10.3',
                 'Accept': 'application/json'
-            }, 
-            timeout: 8000 
+            }
         });
-        if (!Array.isArray(response.data)) return [];
+
+        if (!response.ok) {
+            console.error(`[Legacy API Error]: Request failed with status ${response.status}`);
+            return [];
+        }
+
+        const data = await response.json();
+        if (!Array.isArray(data)) return [];
+
         const results = [];
-        response.data.forEach(entry => {
+        data.forEach(entry => {
             const downloadLink = entry.SubDownloadLink;
             if (!downloadLink) return;
             const format = (entry.SubFormat || '').toLowerCase();
@@ -168,8 +174,8 @@ async function fetchLegacyData(url) {
         });
         return results;
     } catch (e) {
-        console.error("[Legacy API Error]:", e.message);
-        return []; 
+        console.error("[Legacy API Exception]:", e.message);
+        return [];
     }
 }
 
@@ -177,6 +183,7 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
     let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
     if (season != null && episode != null) primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
+    
     let results = await fetchLegacyData(primaryUrl);
     if (season != null && episode != null) {
         if (!results.some(r => r.isAss)) {
@@ -191,8 +198,10 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
     const mediaType = (type === 'series' || type === 'anime' || !!season) ? 'series' : 'movie';
     const targetId = (mediaType === 'series' && season) ? `${imdbId}:${season}:${episode || 1}` : imdbId;
     try {
-        const res = await axios.get(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`, { timeout: 7000 });
-        return (res.data?.subtitles || []).filter(s => (s.lang || '').toLowerCase().startsWith('en') && s.url).map(s => {
+        const response = await fetch(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`);
+        if (!response.ok) return [];
+        const data = await response.json();
+        return (data.subtitles || []).filter(s => (s.lang || '').toLowerCase().startsWith('en') && s.url).map(s => {
             const rawName = (s.SubFileName || s.subtitleFileName || s.title || '').toLowerCase();
             const subFormat = (s.SubFormat || s.format || '').toLowerCase();
             const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawName.includes('.ass') || rawName.includes('.ssa');
