@@ -100,7 +100,8 @@ async function runConcurrentPool(tasks, limit = 1) {
             const current = index++;
             try {
                 results[current] = await tasks[current]();
-                await delay(1000); 
+                // تم تعديل التاخير الى 2000 لتخفيف الضغط
+                await delay(2000); 
             } catch (err) {
                 results[current] = null;
             }
@@ -120,22 +121,24 @@ function getNextApiKey(keysArray) {
 }
 
 async function translateChunkStrict(texts, keysArray, modelName) {
-    const activeKey = getNextApiKey(keysArray);
-    
-    if (!activeKey) {
-        console.error("[Fatal] No Gemini API Keys configured!");
-        return null;
-    }
+    // نظام المحاولات والانتظار الذكي مطابق لـ SubMaker
+    const MAX_RETRIES = 4;
+    let baseDelay = 3000;
 
-    const cleanKey = String(activeKey).trim();
-    const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-    
-    // بناء الرابط بهذه الطريقة يمنع المتصفحات من تشويه الكود أو تحويله إلى رابط أزرق بالخطأ
-    const apiBase = "https://generativelanguage.googleapis.com";
-    const apiPath = "/v1beta/models/" + cleanModelName + ":generateContent";
-    const GEMINI_URL = apiBase + apiPath;
-    
-    const prompt = `Translate the following subtitles while:
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const activeKey = getNextApiKey(keysArray);
+        
+        if (!activeKey) {
+            console.error("[Fatal] No Gemini API Keys configured!");
+            return null;
+        }
+
+        const cleanKey = String(activeKey).trim();
+        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
+        
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+        
+        const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
 3. Keeping the same number of lines and line breaks
@@ -151,47 +154,62 @@ Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 Content to translate:
 ${JSON.stringify(texts)}`;
 
-    try {
-        const r = await axios.post(
-            GEMINI_URL,
-            {
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: {
-                    temperature: 0.1,
-                    responseMimeType: "application/json"
+        try {
+            const r = await axios.post(
+                GEMINI_URL,
+                {
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        temperature: 0.1,
+                        responseMimeType: "application/json"
+                    },
+                    safetySettings: [
+                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                    ]
                 },
-                safetySettings: [
-                    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                ]
-            },
-            {
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': cleanKey,
-                    'x-goog-api-client': 'stremio-submaker/1.4.94'
-                },
-                timeout: 30000
+                {
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': cleanKey,
+                        'x-goog-api-client': 'stremio-submaker/1.4.94'
+                    },
+                    timeout: 30000
+                }
+            );
+            
+            if (r.status === 200) {
+                const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                const parsedArr = parseRobustJsonArray(responseText, texts.length);
+                if (parsedArr && parsedArr.length > 0) {
+                    console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
+                    return parsedArr;
+                }
             }
-        );
-        
-        if (r.status === 200) {
-            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            const parsedArr = parseRobustJsonArray(responseText, texts.length);
-            if (parsedArr && parsedArr.length > 0) {
-                console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
-                return parsedArr;
+            return null;
+
+        } catch (e) {
+            const status = e.response?.status;
+            const isRateLimit = status === 429;
+            const isServerError = status >= 500;
+            const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
+            
+            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
+                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
+                return null;
             }
+
+            const delayMs = baseDelay * Math.pow(2, attempt);
+            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
+            
+            await delay(delayMs);
         }
-    } catch (e) {
-        console.error(`[Gemini Error - ${cleanModelName} - Key ...${cleanKey.slice(-4)}]: ${e.response?.data?.error?.message || e.message}`);
     }
     
     return null;
 }
-
 
 async function fetchAndExtractSub(subUrl) {
     let response;
