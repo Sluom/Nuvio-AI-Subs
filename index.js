@@ -61,9 +61,9 @@ const globalTranslationQueue = new RequestQueue();
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.7.0',
+    version: '1.8.0',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using unlimited Gemini API keys with 5 distinct tracks and STRICT NO-SDH policy.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 3 SRT & 3 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -80,7 +80,6 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
-// مسار صفحة الإعدادات
 app.get(['/', '/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`
@@ -171,7 +170,6 @@ app.get(['/', '/configure'], (req, res) => {
     `);
 });
 
-// مسار المانيفست
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -179,7 +177,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
-        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية بـ 5 روابط مستقلة وبدون SDH.';
+        modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
     
@@ -187,7 +185,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات وفرز الملفات المستقلة واستبعاد SDH نهائياً
+// مسار جلب الترجمات (الفرز الصارم للـ ASS والـ SRT)
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -211,43 +209,59 @@ app.get([
         
         if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
             
-            // جلب كل الترجمات الإنجليزية المتوفرة
             const engSubs = r.data.subtitles.filter(s => (s.lang || '').toLowerCase().startsWith('en'));
             
-            // فلترة وحذف أي ترجمة تحتوي على SDH أو إعاقة سمعية بشكل نهائي ومطلق
+            // استبعاد SDH مطلقاً ونهائياً
             const cleanSubs = engSubs.filter(sub => {
                 const title = (sub.title || '').toLowerCase();
                 const idStr = (sub.id || '').toLowerCase();
                 return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired') || idStr.includes('sdh') || idStr.includes('hi'));
             });
 
-            // إذا ماكو أي ترجمة إنجليزية نظيفة، نرجع قائمة فارغة (استبعاد SDH بكل الأحوال)
             if (cleanSubs.length === 0) return res.json({ subtitles: [] });
 
-            // اختيار 5 ملفات إنجليزية مختلفة قدر الإمكان لضمان استقلالية كل رابط
-            const sub1 = cleanSubs[0];
-            const sub2 = cleanSubs.length > 1 ? cleanSubs[1] : sub1;
-            const sub3 = cleanSubs.length > 2 ? cleanSubs[2] : sub1;
-            const sub4 = cleanSubs.length > 3 ? cleanSubs[3] : sub1;
-            const sub5 = cleanSubs.length > 4 ? cleanSubs[4] : sub1;
+            // الفرز إلى SRT و ASS بناءً على الامتداد الحقيقي للملف
+            const assSubs = cleanSubs.filter(s => {
+                const fname = (s.subtitleFileName || '').toLowerCase();
+                const url = (s.url || '').toLowerCase();
+                return fname.endsWith('.ass') || fname.endsWith('.ssa') || url.includes('.ass') || url.includes('.ssa');
+            });
 
-            const url1 = encodeURIComponent(sub1.url);
-            const url2 = encodeURIComponent(sub2.url);
-            const url3 = encodeURIComponent(sub3.url);
-            const url4 = encodeURIComponent(sub4.url);
-            const url5 = encodeURIComponent(sub5.url);
-            
+            const srtSubs = cleanSubs.filter(s => {
+                const fname = (s.subtitleFileName || '').toLowerCase();
+                const url = (s.url || '').toLowerCase();
+                return !fname.endsWith('.ass') && !fname.endsWith('.ssa') && !url.includes('.ass') && !url.includes('.ssa');
+            });
+
+            const transSubs = [];
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
-            // إضافة الـ 5 روابط بحيث كل رابط يجلب ملف منفصل (يعمل بعالمه الخاص)
-            const transSubs = [
-                { id: 'nuvio-ai-srt-1', url: `${baseUrl}${streamPathSrt}?url=${url1}&track=1`, lang: 'ara', title: 'Nuvio AI SRT 1 (Sync A)' },
-                { id: 'nuvio-ai-srt-2', url: `${baseUrl}${streamPathSrt}?url=${url2}&track=2`, lang: 'ara', title: 'Nuvio AI SRT 2 (Sync B)' },
-                { id: 'nuvio-ai-srt-3', url: `${baseUrl}${streamPathSrt}?url=${url3}&track=3`, lang: 'ara', title: 'Nuvio AI SRT 3 (Sync C)' },
-                { id: 'nuvio-ai-ass-1', url: `${baseUrl}${streamPathAss}?url=${url4}&track=4`, lang: 'ara', title: 'Nuvio AI ASS 1 (Sync D)' },
-                { id: 'nuvio-ai-ass-2', url: `${baseUrl}${streamPathAss}?url=${url5}&track=5`, lang: 'ara', title: 'Nuvio AI ASS 2 (Sync E)' }
-            ];
+            // إضافة 3 روابط SRT (بملفات مستقلة)
+            if (srtSubs.length > 0) {
+                for (let i = 0; i < 3; i++) {
+                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 3
+                    transSubs.push({
+                        id: `nuvio-ai-srt-${i+1}`,
+                        url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
+                        lang: 'ara',
+                        title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                    });
+                }
+            }
+
+            // إضافة 3 روابط ASS (تظهر فقط إذا كان هناك ملفات ASS حقيقية متوفرة)
+            if (assSubs.length > 0) {
+                for (let i = 0; i < 3; i++) {
+                    const sub = assSubs[i] || assSubs[assSubs.length - 1];
+                    transSubs.push({
+                        id: `nuvio-ai-ass-${i+1}`,
+                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(sub.url)}&track=${i+4}`,
+                        lang: 'ara',
+                        title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                    });
+                }
+            }
 
             return res.json({ subtitles: transSubs });
         }
@@ -257,9 +271,6 @@ app.get([
     }
 });
 
-// ==========================================
-// مسار الترجمة (القلب النابض بالخلفية)
-// ==========================================
 app.all([
     '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
     '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
@@ -273,16 +284,13 @@ app.all([
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
     const cacheKey = `${isAss ? 'ASS' : 'SRT'}_${targetUrl}`;
     
-    // 1. إذا الترجمة جاهزة بالذاكرة (Cache)، دزها فوراً
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
-        console.log(`[Cache Hit] Delivering completed translation for track ${trackNum}`);
         res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
         res.setHeader('Access-Control-Allow-Origin', '*');
         return res.send(translationCache[cacheKey].content);
     }
 
-    // 2. استخراج المفاتيح
     let userKeys = [];
     let userModel = 'gemini-3.1-flash-lite'; 
     if (req.params.config) {
@@ -293,9 +301,7 @@ app.all([
         } catch (e) { }
     }
 
-    // 3. إذا أول مرة ينطلب، نبدأ الترجمة بالخلفية ونخزن الحالة كـ pending
     if (!translationCache[cacheKey]) {
-        console.log(`[Background Init] Starting background translation for track ${trackNum}...`);
         translationCache[cacheKey] = { status: 'pending' };
 
         globalTranslationQueue.add(async () => {
@@ -306,9 +312,7 @@ app.all([
                 } else {
                     finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
                 }
-                // خزن النتيجة بالذاكرة من تكمل
                 translationCache[cacheKey] = { status: 'done', content: finalContent };
-                console.log(`[Background Success] Translation completed and cached for track ${trackNum}!`);
             } catch (e) {
                 console.error(`[Background Error] Track ${trackNum}:`, e.message);
                 const errorSub = isAss 
@@ -319,8 +323,6 @@ app.all([
         });
     }
 
-    // 4. إرسال الترجمة الوهمية فوراً لمنع الـ Timeout (خداع المشغل)
-    console.log(`[Fake Sub Sent] Informing player that translation is in progress...`);
     const fakeSub = isAss 
         ? `[Script Info]
 ScriptType: v4.00+
