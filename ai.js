@@ -82,6 +82,7 @@ function parseRobustJsonArray(raw, expectedLength) {
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+        // تصحيح ظهور حرف الـ n بالسطر التالي
         if (Array.isArray(arr) && arr.length > 0) return arr.map(x => String(x || '').replace(/\\\\n/g, '\n').replace(/\\n/g, '\n').trim());
 
     } catch (e) {
@@ -142,12 +143,14 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const p4 = ":generateContent";
         const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
         
+        // التعليمات الشاملة لترجمة الأقواس لكل أنواع الترجمات
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
 3. Keeping the same number of lines and line breaks
 4. Preserving any formatting tags or special characters
 5. Ensuring translations are contextually accurate for film/TV dialogue
+6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
