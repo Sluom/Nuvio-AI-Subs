@@ -83,14 +83,12 @@ function parseRobustJsonArray(raw, expectedLength) {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
         
-        // ==========================================
-        // التنظيف الكاسح للرموز الغريبة ولحرف الـ N الكابتل والسمول
-        // ==========================================
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // 1. مسح الرموز الموسيقية والترميزات الغريبة نهائياً
-                txt = txt.replace(/[♪♫âTMه]/gi, '');
+                // 1. مسح الرموز الموسيقية فقط بدون المساس بالحروف العربية نهائياً
+                txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
+                
                 // 2. تحويل أي صيغة من صيغ النزول للسطر إلى نزول حقيقي
                 txt = txt.replace(/\\\\n/gi, '\n')
                          .replace(/\\\\N/g, '\n')
