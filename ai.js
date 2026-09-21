@@ -48,16 +48,8 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
-function extractCuesUniversal(text) {
-    const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
-    if (assLines.length > 0) {
-        const cues = [];
-        for (const line of assLines) {
-            const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
-            if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
-        }
-        if (cues.length) return cues;
-    }
+// دالة استخراج SRT (كما هي بكودك)
+function extractCuesSrt(text) {
     const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
     const cues = [];
     for (const block of blocks) {
@@ -66,19 +58,21 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        const text2 = lines.slice(idx + 1).join('\\N');
+        const text2 = lines.slice(idx + 1).join('\n'); // للـ SRT نستخدم نزول السطر الطبيعي
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
 }
 
-function parseRobustJsonArray(raw, expectedLength) {
+// دالة التنظيف (مضاف لها معالجة ذكية لنزول السطر بناءً على نوع الملف)
+function parseRobustJsonArray(raw, expectedLength, isAssFile) {
     if (!raw) return null;
     let clean = raw.trim();
     if (clean.startsWith('```json')) clean = clean.substring(7);
     else if (clean.startsWith('```')) clean = clean.substring(3);
     if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
     clean = clean.trim();
+    
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
@@ -86,17 +80,19 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                // إصلاح فواصل الأسطر
-                txt = txt.replace(/\\\\n/gi, '\n')
-                         .replace(/\\\\N/g, '\n')
-                         .replace(/\\n/gi, '\n')
-                         .replace(/\\N/g, '\n');
+                
+                if (isAssFile) {
+                    // في حالة الـ ASS، نحافظ على \N لضمان عدم تعطل الستايل
+                    txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
+                } else {
+                    // في حالة SRT، ننزل سطر طبيعي
+                    txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
+                }
+                
                 return txt.trim();
             });
         }
-
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         if (stringMatches.length >= expectedLength * 0.5) return stringMatches.filter(s => s !== 'translations' && s !== 'data');
@@ -133,7 +129,8 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName) {
+// دالة الترجمة مأخوذة من كودك نصاً (مع تمرير isAssFile للفلتر)
+async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
@@ -148,11 +145,7 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        const p1 = "https://";
-        const p2 = "generativelanguage.googleapis.com";
-        const p3 = "/v1beta/models/";
-        const p4 = ":generateContent";
-        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
         
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
@@ -199,14 +192,12 @@ ${JSON.stringify(texts)}`;
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length);
+                const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
                 if (parsedArr && parsedArr.length > 0) {
                     console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
                     return parsedArr;
                 }
             }
-            return null;
-
         } catch (e) {
             const status = e.response?.status;
             const isRateLimit = status === 429;
@@ -220,14 +211,13 @@ ${JSON.stringify(texts)}`;
 
             const delayMs = baseDelay * Math.pow(2, attempt);
             console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
-            
             await delay(delayMs);
         }
     }
-    
     return null;
 }
 
+// سحب واستخراج الملف (من كودك)
 async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
@@ -249,6 +239,7 @@ async function fetchAndExtractSub(subUrl) {
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
+        // نبحث عن الملف الأنسب بدون تعقيد
         const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
         if (subEntry) buffer = subEntry.getData();
     }
@@ -256,12 +247,13 @@ async function fetchAndExtractSub(subUrl) {
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
+// دالة معالجة الـ SRT
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
     let originalText = "";
     try { originalText = await fetchAndExtractSub(subUrl); } 
     catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
 
-    const cues = extractCuesUniversal(originalText);
+    const cues = extractCuesSrt(originalText);
     if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
     const CHUNK = 80;
@@ -270,8 +262,10 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, false); // إرسال false للـ SRT
+        
+        // إذا فشلت الترجمة، نرجع الإنجليزي الأصلي منعاً للشاشة السوداء
+        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1); 
@@ -291,13 +285,26 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     return srtOutput;
 }
 
+// دالة معالجة الـ ASS (تم التعديل للحفاظ على الستايلات الأصلية)
 async function handleTranslationAss(subUrl, keysArray, modelName) {
     let originalText = "";
     try { originalText = await fetchAndExtractSub(subUrl); } 
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
-    const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
+    // سحب الهيدر الأصلي الخاص بالأنمي بدلاً من فرض هيدر ثابت
+    let headerMatch = originalText.match(/([\s\S]*?)(?=^Dialogue:)/im);
+    let header = headerMatch ? headerMatch[1].trim() : ASS_DEFAULT_HEADER;
+
+    const assLines = originalText.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
+    if (assLines.length === 0) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] لا توجد نصوص.`;
+
+    const cues = [];
+    for (const line of assLines) {
+        // هذا السطر يفصل الستايل (الألوان والموقع) عن النص للحفاظ عليه
+        const m = line.match(/^(Dialogue:\s*[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,)(.*)$/i);
+        if (m) cues.push({ prefix: m[1], text: m[2] });
+        else cues.push({ prefix: "Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,", text: line });
+    }
 
     const CHUNK = 80;
     const chunks = [];
@@ -305,14 +312,19 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, true); // إرسال true للـ ASS
+        
+        // الفلتر الأمني لضمان عدم ظهور شاشة فارغة
+        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
-    return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+
+    // دمج الترجمة مع الستايل الأصلي
+    const finalAssLines = cues.map((c, idx) => `${c.prefix}${finalTranslations[idx]}`);
+
+    return header + '\n' + finalAssLines.join('\n') + '\n';
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss };
