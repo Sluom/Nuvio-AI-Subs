@@ -190,20 +190,22 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-// التحديث الفعلي: العودة لـ axios مع حماية VLSub وTimeout
+// التحديث الجذري: تحديد القناع المناسب بناءً على مصدر الرابط
 async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
     
+    // اكتشاف مصدر الرابط لاختيار القناع المناسب
+    const isLegacyOpenSub = decodedUrl.includes('opensubtitles.org');
+    const dynamicHeaders = isLegacyOpenSub 
+        ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' } 
+        : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': '*/*' };
+
     try {
         response = await axios.get(decodedUrl, {
             responseType: 'arraybuffer',
-            timeout: 15000, // الـ Timeout اللي ينقذنا من تعليق الطابور
-            headers: {
-                'User-Agent': 'VLSub 0.10.3', // القناع المضاد لحظر كلاودفلير
-                'X-User-Agent': 'VLSub 0.10.3',
-                'Accept': '*/*'
-            }
+            timeout: 15000,
+            headers: dynamicHeaders
         });
     } catch (err) {
         throw err;
