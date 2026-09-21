@@ -79,13 +79,11 @@ function parseRobustJsonArray(raw, expectedLength, isAssFile) {
             return arr.map(x => {
                 let txt = String(x || '');
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                
                 if (isAssFile) {
                     txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
                 } else {
                     txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
                 }
-                
                 return txt.trim();
             });
         }
@@ -131,11 +129,7 @@ async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         const activeKey = getNextApiKey(keysArray);
-        
-        if (!activeKey) {
-            console.error("[Fatal] No Gemini API Keys configured!");
-            return null;
-        }
+        if (!activeKey) return null;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
@@ -168,10 +162,7 @@ ${JSON.stringify(texts)}`;
                 GEMINI_URL,
                 {
                     contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json"
-                    },
+                    generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
                     safetySettings: [
                         { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
                         { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
@@ -179,65 +170,53 @@ ${JSON.stringify(texts)}`;
                         { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
                     ]
                 },
-                {
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'x-goog-api-key': cleanKey,
-                        'x-goog-api-client': 'stremio-submaker/1.4.94'
-                    },
-                    timeout: 30000
-                }
+                { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey }, timeout: 30000 }
             );
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
-                if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
-                    return parsedArr;
-                }
+                if (parsedArr && parsedArr.length > 0) return parsedArr;
             }
         } catch (e) {
             const status = e.response?.status;
             const isRateLimit = status === 429;
             const isServerError = status >= 500;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
-            
-            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
-                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
-                return null;
-            }
-
-            const delayMs = baseDelay * Math.pow(2, attempt);
-            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
-            await delay(delayMs);
+            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) return null;
+            await delay(baseDelay * Math.pow(2, attempt));
         }
     }
     return null;
 }
 
+// التحديث الجوهري: اختراق الحظر باستخدام fetch + تحديد أولوية الاستخراج
 async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
-    let response;
+    let buffer;
     const decodedUrl = decodeURIComponent(subUrl);
+    
     try {
-        response = await axios.get(decodedUrl, { 
-            responseType: 'arraybuffer', 
-            timeout: 15000,
+        const response = await fetch(decodedUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'User-Agent': 'VLSub 0.10.3',
+                'X-User-Agent': 'VLSub 0.10.3',
                 'Accept': '*/*'
             }
         });
+        
+        if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        buffer = Buffer.from(arrayBuffer);
     } catch (err) {
         throw err;
     }
 
-    let buffer = Buffer.from(response.data);
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
         let subEntry = null;
+        
         if (prioritizeAss) {
             subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
             if (!subEntry) subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
