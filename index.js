@@ -57,11 +57,105 @@ class RequestQueue {
 const globalTranslationQueue = new RequestQueue();
 
 // ==========================================
+// 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
+//    الطريقة 1: خدمة ARM   |   الطريقة 2 (احتياطية): إضافة Kitsu القديمة
+// ==========================================
+const armCache = new Map();
+const ARM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 ساعة
+
+// الطريقة 1: خدمة ARM (arm.haglund.dev)
+async function mapKitsuViaArm(kitsuId, kitsuEp) {
+    const cached = armCache.get(kitsuId);
+    let data;
+
+    if (cached && (Date.now() - cached.time) < ARM_CACHE_TTL) {
+        data = cached.data;
+    } else {
+        const armUrl = `https://arm.haglund.dev/api/v2/ids?source=kitsu&id=${encodeURIComponent(kitsuId)}`;
+        const r = await axios.get(armUrl, {
+            timeout: 8000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' }
+        });
+        data = r.data;
+        // نخزن فقط النتائج المفيدة (التي فيها رقم IMDb)
+        if (data && data.imdb) armCache.set(kitsuId, { time: Date.now(), data });
+    }
+
+    if (!data || !data.imdb) return null;
+
+    const imdbId = Array.isArray(data.imdb) ? data.imdb[0] : data.imdb;
+    if (!imdbId) return null;
+
+    // الموسم: إن لم تُرجع الخدمة موسماً (مثل ون بيس) نستخدم 1
+    let season = data['thetvdb-season'];
+    if (season === null || season === undefined) season = data['themoviedb-season'];
+    if (season === null || season === undefined) season = 1;
+
+    return `${imdbId}:${season}:${kitsuEp}`;
+}
+
+// الطريقة 2 (احتياطية): إضافة Kitsu القديمة
+async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
+    const kitsuMetaUrl = `https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`;
+    const metaRes = await axios.get(kitsuMetaUrl, {
+        timeout: 8000,
+        headers: { 'User-Agent': 'Stremio/4.4.16 (Windows)' }
+    });
+
+    const videos = metaRes.data && metaRes.data.meta && metaRes.data.meta.videos;
+    if (!videos) return null;
+
+    const epData = videos.find(v => v.id === targetId) || videos.find(v => v.episode === kitsuEp);
+    if (epData && epData.imdb_id) {
+        const s = epData.imdbSeason || epData.season || 1;
+        const e = epData.imdbEpisode || epData.episode || kitsuEp;
+        return `${epData.imdb_id}:${s}:${e}`;
+    }
+    return null;
+}
+
+// الدالة الرئيسية: تجرّب الطريقة 1 ثم 2، وترجع null إذا فشلتا
+async function mapKitsuToImdb(targetId) {
+    const parts = targetId.split(':');
+    if (parts.length !== 3) return null;
+
+    const kitsuId = parts[1];
+    const kitsuEp = parseInt(parts[2], 10);
+    if (!kitsuId || isNaN(kitsuEp)) return null;
+
+    console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep: ${kitsuEp}`);
+
+    try {
+        const viaArm = await mapKitsuViaArm(kitsuId, kitsuEp);
+        if (viaArm) {
+            console.log(`[Anime Mapper] ARM mapped ${targetId} -> ${viaArm}`);
+            return viaArm;
+        }
+        console.log(`[Anime Mapper] ARM returned no IMDb match for ${targetId}`);
+    } catch (err) {
+        console.error(`[Anime Mapper] ARM failed for ${targetId} - ${err.message}`);
+    }
+
+    try {
+        const viaKitsu = await mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp);
+        if (viaKitsu) {
+            console.log(`[Anime Mapper] Kitsu addon mapped ${targetId} -> ${viaKitsu}`);
+            return viaKitsu;
+        }
+        console.log(`[Anime Mapper] Kitsu addon returned no IMDb match for ${targetId}`);
+    } catch (err) {
+        console.error(`[Anime Mapper] Kitsu addon failed for ${targetId} - ${err.message}`);
+    }
+
+    return null;
+}
+
+// ==========================================
 // المانيفست الأساسي
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.0',
+    version: '1.9.1',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 6 SRT tracks.',
     resources: ['subtitles'],
@@ -208,38 +302,22 @@ app.get([
         let finalTargetId = targetId;
         let finalType = type;
 
-        // === التعديل الجذري لدعم الأنمي (تحويل Kitsu إلى IMDb) ===
+        // === دعم الأنمي: تحويل معرّف Kitsu إلى معرّف IMDb (ARM أولاً ثم الطريقة القديمة) ===
         if (targetId.startsWith('kitsu')) {
-            try {
-                const parts = targetId.split(':');
-                if (parts.length === 3) {
-                    const kitsuId = parts[1];
-                    const kitsuEp = parseInt(parts[2]);
-                    
-                    console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep: ${kitsuEp}`);
-                    const cinemetaUrl = `https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`;
-
-const metaRes = await axios.get(cinemetaUrl, { timeout: 8000, headers: { 'User-Agent': 'Stremio/4.4.16 (Windows)' } });
- 
-                    
-                    if (metaRes.data && metaRes.data.meta && metaRes.data.meta.videos) {
-                        const epData = metaRes.data.meta.videos.find(v => v.id === targetId || v.episode === kitsuEp);
-                        if (epData && epData.imdb_id) {
-                            const imdbId = epData.imdb_id;
-                            const s = epData.imdbSeason || epData.season || 1;
-                            const e = epData.imdbEpisode || epData.episode || kitsuEp;
-                            
-                            finalTargetId = `${imdbId}:${s}:${e}`;
-                            finalType = 'series';
-                            console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
-                        } else {
-                            console.log(`[Anime Mapper] Episode ${kitsuEp} mapping not found in Cinemeta.`);
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error(`[Anime Mapper Error] Failed to map ${targetId} - ${err.message}`);
+            const mapped = await mapKitsuToImdb(targetId);
+            if (mapped) {
+                finalTargetId = mapped;
+                finalType = 'series';
+                console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
+            } else {
+                console.log(`[Anime Mapper] No mapping found for ${targetId}, using it as-is.`);
             }
+        }
+
+        // === توحيد النوع: OpenSubtitles يعرف movie و series فقط ===
+        // إذا وصل معرّف tt بنوع anime أو other نحوّله للنوع الصحيح
+        if (/^tt\d+/.test(finalTargetId) && finalType !== 'movie' && finalType !== 'series') {
+            finalType = finalTargetId.includes(':') ? 'series' : 'movie';
         }
         // ==========================================================
 
@@ -249,6 +327,7 @@ const metaRes = await axios.get(cinemetaUrl, { timeout: 8000, headers: { 'User-A
         
         const r = await axios.get(osUrl, { timeout: 10000 });
         if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
+        console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
 
         if (subtitlesData.length > 0) {
             
@@ -267,7 +346,10 @@ const metaRes = await axios.get(cinemetaUrl, { timeout: 8000, headers: { 'User-A
                 return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired') || idStr.includes('sdh') || idStr.includes('hi'));
             });
 
-            if (cleanSubs.length === 0) return res.json({ subtitles: [] });
+            if (cleanSubs.length === 0) {
+                console.log(`[Fetch] No usable subtitles left after language/SDH filters for ${finalTargetId}`);
+                return res.json({ subtitles: [] });
+            }
 
             // الفرز لإبقاء SRT واستبعاد أي ملف ASS
             const srtSubs = cleanSubs.filter(s => {
@@ -296,6 +378,7 @@ const metaRes = await axios.get(cinemetaUrl, { timeout: 8000, headers: { 'User-A
         }
         return res.json({ subtitles: [] });
     } catch (err) {
+        console.error(`[Subtitles Error] ${targetId} - ${err.message}`);
         return res.json({ subtitles: [] });
     }
 });
