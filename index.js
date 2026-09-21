@@ -206,7 +206,7 @@ app.get([
     try {
         let subtitlesData = [];
         
-        // === التعديل المضمون لدعم الأنمي (Kitsu) والأفلام ===
+        // === التعديل المضمون لدعم الأنمي (Kitsu) مع نظام الفحص ===
         if (targetId.startsWith('kitsu')) {
             const kitsuUrls = [
                 `https://a-z-subs.strem.fun/subtitles/${type}/${targetId}.json`,
@@ -214,12 +214,18 @@ app.get([
             ];
             for (let url of kitsuUrls) {
                 try {
+                    console.log(`[Anime Test] Trying: ${url}`);
                     const r = await axios.get(url, { timeout: 8000 });
                     if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
+                        console.log(`[Anime Test] Success with ${url}, Found: ${r.data.subtitles.length} subs`);
                         subtitlesData = r.data.subtitles;
-                        break; // نجح الجلب، اخرج من اللوب
+                        break; 
+                    } else {
+                        console.log(`[Anime Test] No subtitles found at ${url}`);
                     }
-                } catch (e) { /* تجاهل الخطأ وجرب الرابط اللي بعده */ }
+                } catch (e) { 
+                    console.error(`[Anime Test Error] Failed at ${url} - Reason: ${e.message}`);
+                }
             }
         } else {
             // الأفلام والمسلسلات العادية (tt)
@@ -227,7 +233,7 @@ app.get([
             const r = await axios.get(osUrl, { timeout: 10000 });
             if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         }
-        // ===============================================
+        // ==========================================================
 
         if (subtitlesData.length > 0) {
             
