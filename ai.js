@@ -48,7 +48,16 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
-function extractCuesSrt(text) {
+function extractCuesUniversal(text) {
+    const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
+    if (assLines.length > 0) {
+        const cues = [];
+        for (const line of assLines) {
+            const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
+            if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
+        }
+        if (cues.length) return cues;
+    }
     const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
     const cues = [];
     for (const block of blocks) {
@@ -57,20 +66,19 @@ function extractCuesSrt(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        const text2 = lines.slice(idx + 1).join('\n'); 
+        const text2 = lines.slice(idx + 1).join('\\N');
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
 }
 
-function parseRobustJsonArray(raw, expectedLength, isAssFile) {
+function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
     if (clean.startsWith('```json')) clean = clean.substring(7);
     else if (clean.startsWith('```')) clean = clean.substring(3);
     if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
     clean = clean.trim();
-    
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
@@ -78,15 +86,17 @@ function parseRobustJsonArray(raw, expectedLength, isAssFile) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
+                // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                if (isAssFile) {
-                    txt = txt.replace(/\\\\n/gi, '\\N').replace(/\\\\N/g, '\\N').replace(/\\n/gi, '\\N').replace(/\n/g, '\\N');
-                } else {
-                    txt = txt.replace(/\\\\n/gi, '\n').replace(/\\\\N/g, '\n').replace(/\\n/gi, '\n').replace(/\\N/g, '\n');
-                }
+                // إصلاح فواصل الأسطر
+                txt = txt.replace(/\\\\n/gi, '\n')
+                         .replace(/\\\\N/g, '\n')
+                         .replace(/\\n/gi, '\n')
+                         .replace(/\\N/g, '\n');
                 return txt.trim();
             });
         }
+
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         if (stringMatches.length >= expectedLength * 0.5) return stringMatches.filter(s => s !== 'translations' && s !== 'data');
@@ -123,13 +133,17 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
+async function translateChunkStrict(texts, keysArray, modelName) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         const activeKey = getNextApiKey(keysArray);
-        if (!activeKey) return null;
+        
+        if (!activeKey) {
+            console.error("[Fatal] No Gemini API Keys configured!");
+            return null;
+        }
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
@@ -162,7 +176,10 @@ ${JSON.stringify(texts)}`;
                 GEMINI_URL,
                 {
                     contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
+                    generationConfig: {
+                        temperature: 0.1,
+                        responseMimeType: "application/json"
+                    },
                     safetySettings: [
                         { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
                         { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
@@ -170,62 +187,69 @@ ${JSON.stringify(texts)}`;
                         { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
                     ]
                 },
-                { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey }, timeout: 30000 }
+                {
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': cleanKey,
+                        'x-goog-api-client': 'stremio-submaker/1.4.94'
+                    },
+                    timeout: 30000
+                }
             );
             
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length, isAssFile);
-                if (parsedArr && parsedArr.length > 0) return parsedArr;
+                const parsedArr = parseRobustJsonArray(responseText, texts.length);
+                if (parsedArr && parsedArr.length > 0) {
+                    console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
+                    return parsedArr;
+                }
             }
+            return null;
+
         } catch (e) {
             const status = e.response?.status;
             const isRateLimit = status === 429;
             const isServerError = status >= 500;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
-            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) return null;
-            await delay(baseDelay * Math.pow(2, attempt));
+            
+            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
+                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
+                return null;
+            }
+
+            const delayMs = baseDelay * Math.pow(2, attempt);
+            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
+            
+            await delay(delayMs);
         }
     }
+    
     return null;
 }
 
-// التحديث الجذري: تحديد القناع المناسب بناءً على مصدر الرابط
-async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
+async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
-    
-    // اكتشاف مصدر الرابط لاختيار القناع المناسب
-    const isLegacyOpenSub = decodedUrl.includes('opensubtitles.org');
-    const dynamicHeaders = isLegacyOpenSub 
-        ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' } 
-        : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': '*/*' };
-
     try {
-        response = await axios.get(decodedUrl, {
-            responseType: 'arraybuffer',
+        response = await axios.get(decodedUrl, { 
+            responseType: 'arraybuffer', 
             timeout: 15000,
-            headers: dynamicHeaders
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept': '*/*'
+            }
         });
     } catch (err) {
         throw err;
     }
 
     let buffer = Buffer.from(response.data);
-
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
-        let subEntry = null;
-        
-        if (prioritizeAss) {
-            subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
-            if (!subEntry) subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
-        } else {
-            subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
-            if (!subEntry) subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
-        }
+        const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
         if (subEntry) buffer = subEntry.getData();
     }
     
@@ -234,10 +258,10 @@ async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
 
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl, false); } 
+    try { originalText = await fetchAndExtractSub(subUrl); } 
     catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
 
-    const cues = extractCuesSrt(originalText);
+    const cues = extractCuesUniversal(originalText);
     if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
     const CHUNK = 80;
@@ -246,8 +270,8 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, false);
-        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1); 
@@ -269,21 +293,11 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
 async function handleTranslationAss(subUrl, keysArray, modelName) {
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl, true); } 
+    try { originalText = await fetchAndExtractSub(subUrl); } 
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
-    let headerMatch = originalText.match(/([\s\S]*?)(?=^Dialogue:)/im);
-    let header = headerMatch ? headerMatch[1].trim() : ASS_DEFAULT_HEADER;
-
-    const assLines = originalText.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
-    if (assLines.length === 0) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] لا توجد نصوص.`;
-
-    const cues = [];
-    for (const line of assLines) {
-        const m = line.match(/^(Dialogue:\s*[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,)(.*)$/i);
-        if (m) cues.push({ prefix: m[1], text: m[2] });
-        else cues.push({ prefix: "Dialogue: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,", text: line });
-    }
+    const cues = extractCuesUniversal(originalText);
+    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
     const CHUNK = 80;
     const chunks = [];
@@ -291,16 +305,14 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, true);
-        return chunk.map((_, idx) => (translated && translated[idx] && translated[idx].trim() !== '') ? translated[idx] : chunk[idx].text);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
-
-    const finalAssLines = cues.map((c, idx) => `${c.prefix}${finalTranslations[idx]}`);
-
-    return header + '\n' + finalAssLines.join('\n') + '\n';
+    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
+    return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss };
