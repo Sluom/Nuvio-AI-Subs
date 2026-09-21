@@ -219,7 +219,8 @@ app.get([
                     console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep: ${kitsuEp}`);
                     const cinemetaUrl = `https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`;
 
-                    const metaRes = await axios.get(cinemetaUrl, { timeout: 8000 });
+const metaRes = await axios.get(cinemetaUrl, { timeout: 8000, headers: { 'User-Agent': 'Stremio/4.4.16 (Windows)' } });
+ 
                     
                     if (metaRes.data && metaRes.data.meta && metaRes.data.meta.videos) {
                         const epData = metaRes.data.meta.videos.find(v => v.id === targetId || v.episode === kitsuEp);
