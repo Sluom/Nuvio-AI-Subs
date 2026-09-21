@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 const app = express();
@@ -8,9 +7,10 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
+const USER_AGENT = 'NuvioSubtitles v1.0.0';
 
 // ==========================================
-// 1. ذاكرة السيرفر (Cache) لتخزين الترجمات الجاهزة
+// 1. ذاكرة السيرفر (Cache) لتخزين الترجمات
 // ==========================================
 const translationCache = {};
 
@@ -61,9 +61,9 @@ const globalTranslationQueue = new RequestQueue();
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.8.0',
+    version: '3.0.0',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 3 SRT & 3 true ASS tracks.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -78,118 +78,6 @@ function getBaseUrl(req) {
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = req.headers['x-forwarded-proto'] || 'https';
     return `${proto}://${host}`;
-}
-
-// ==========================================
-// دوال جلب الترجمات من OpenSubtitles.org (Legacy REST)
-// نفس أسلوب تخطي الحماية: User-Agent الخاص بـ VLSub
-// ==========================================
-const LEGACY_UA = 'VLSub 0.10.3';
-
-function matchEpisode(fileName, targetEpisode) {
-    if (!targetEpisode) return true; // فيلم مو مسلسل
-    const name = (fileName || '').toLowerCase();
-
-    if (name.includes('.zip') || name.includes('.rar')) return true;
-
-    const epStr = parseInt(targetEpisode, 10).toString();
-    const patterns = [
-        new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
-        new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
-        new RegExp(`\\[0*${epStr}\\]`, 'i'),
-        new RegExp(`\\(0*${epStr}\\)`, 'i'),
-        new RegExp(`\\b0*${epStr}\\b`, 'i')
-    ];
-    return patterns.some(p => p.test(name));
-}
-
-// جلب صفحة واحدة من rest.opensubtitles.org مع تسجيل مفصّل لكل خطوة
-async function fetchLegacyData(url) {
-    console.log(`[OS Debug] Requesting: ${url}`);
-    try {
-        const res = await axios.get(url, {
-            headers: {
-                'User-Agent': LEGACY_UA,
-                'X-User-Agent': LEGACY_UA,
-                'Accept': 'application/json'
-            },
-            timeout: 10000
-        });
-
-        console.log(`[OS Debug] Status: ${res.status} | Content-Type: ${res.headers['content-type']}`);
-
-        const data = res.data;
-        if (!Array.isArray(data)) {
-            console.log(`[OS Debug] Response is NOT an array. Type: ${typeof data} | Sample: ${JSON.stringify(data).slice(0, 300)}`);
-            return [];
-        }
-
-        console.log(`[OS Debug] Got ${data.length} raw entries from OpenSubtitles`);
-
-        return data
-            .filter(e => e.SubDownloadLink)
-            .map(e => {
-                const format = (e.SubFormat || '').toLowerCase();
-                const isHI = e.SubHearingImpaired === '1' || e.SubHearingImpaired === 1;
-                return {
-                    url: e.SubDownloadLink,
-                    subtitleFileName: e.SubFileName || e.MovieReleaseName || 'OpenSubtitles',
-                    format: format || 'srt',
-                    isHI
-                };
-            });
-    } catch (e) {
-        console.error(`[OS Debug] FAILED: ${url}`);
-        console.error(`[OS Debug] Error: ${e.message} | Status: ${e.response?.status} | Code: ${e.code}`);
-        if (e.response?.data) {
-            console.error(`[OS Debug] Response body sample: ${JSON.stringify(e.response.data).slice(0, 300)}`);
-        }
-        return [];
-    }
-}
-
-// جلب ترجمات إنجليزية (SRT + ASS الحقيقية) من OpenSubtitles.org حصراً
-async function fetchOpenSubtitlesEnglish(imdbId, season, episode) {
-    console.log(`[OS Debug] === Fetching for imdbId=${imdbId} season=${season} episode=${episode} ===`);
-    if (!imdbId || !imdbId.startsWith('tt')) {
-        console.log(`[OS Debug] Rejected: imdbId "${imdbId}" doesn't start with 'tt'`);
-        return [];
-    }
-    const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
-
-    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
-    if (season != null && episode != null) {
-        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
-    }
-
-    let results = await fetchLegacyData(primaryUrl);
-    console.log(`[OS Debug] Primary query returned ${results.length} usable subs`);
-
-    // لو محددين حلقة معينة وما لقينا ass بها، نبحث بكامل المسلسل ونفلتر برقم الحلقة
-    if (season != null && episode != null) {
-        const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
-        if (!hasAss) {
-            console.log(`[OS Debug] No ASS in primary result, trying fallback (full series)`);
-            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
-            const fallbackResults = await fetchLegacyData(fallbackUrl);
-            console.log(`[OS Debug] Fallback query returned ${fallbackResults.length} total subs`);
-            const filteredAss = fallbackResults.filter(r =>
-                (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.subtitleFileName, episode)
-            );
-            console.log(`[OS Debug] Fallback ASS matching episode ${episode}: ${filteredAss.length}`);
-            results = [...results, ...filteredAss];
-        }
-    }
-
-    // إزالة التكرار حسب رابط التحميل
-    const seen = new Set();
-    const final = results.filter(r => {
-        if (seen.has(r.url)) return false;
-        seen.add(r.url);
-        return true;
-    });
-    console.log(`[OS Debug] Final unique results: ${final.length}`);
-    return final;
 }
 
 app.get(['/', '/configure'], (req, res) => {
@@ -297,7 +185,171 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات (OpenSubtitles.org حصراً + الفرز الصارم للـ ASS والـ SRT)
+// دوال جلب الترجمات (من كود الإضافة الثانية)
+// ==========================================
+
+function matchEpisode(fileName, targetEpisode) {
+    if (!targetEpisode) return true;
+    const name = (fileName || '').toLowerCase();
+    
+    if (name.includes('.zip') || name.includes('.rar')) return true;
+
+    const epStr = parseInt(targetEpisode, 10).toString();
+    
+    const patterns = [
+        new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
+        new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
+        new RegExp(`\\[0*${epStr}\\]`, 'i'),
+        new RegExp(`\\(0*${epStr}\\)`, 'i'),
+        new RegExp(`\\b0*${epStr}\\b`, 'i')
+    ];
+
+    return patterns.some(p => p.test(name));
+}
+
+// السحب عبر ה- API القديم باستخدام fetch لتجنب 403
+async function fetchLegacyData(url) {
+    try {
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'VLSub 0.10.3', 
+                'X-User-Agent': 'VLSub 0.10.3',
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) return [];
+        const data = await response.json();
+        if (!Array.isArray(data)) return [];
+
+        const results = [];
+        data.forEach(entry => {
+            const downloadLink = entry.SubDownloadLink;
+            if (!downloadLink) return;
+
+            const format = (entry.SubFormat || '').toLowerCase();
+            const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
+            const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
+            const finalExt = isAss ? 'ass' : 'srt';
+
+            results.push({
+                url: downloadLink,
+                lang: 'eng',
+                format: finalExt,
+                ext: finalExt,
+                subFormat: isAss ? 'ssa' : 'srt',
+                fileName: rawName,
+                origName: rawName,
+                _source: 'opensubtitles',
+                _priority: isAss ? 0 : 2
+            });
+        });
+        return results;
+    } catch (e) {
+        return [];
+    }
+}
+
+// تعديل اللغة إلى الإنجليزية للبحث
+async function fetchLegacyApiEnglish(imdbId, season, episode) {
+    if (!imdbId || !imdbId.startsWith('tt')) return [];
+    const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
+    
+    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+    if (season != null && episode != null) {
+        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
+    }
+
+    let results = await fetchLegacyData(primaryUrl);
+
+    if (season != null && episode != null) {
+        const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
+        
+        if (!hasAss) {
+            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+            const fallbackResults = await fetchLegacyData(fallbackUrl);
+            
+            const filteredFallback = fallbackResults.filter(r => {
+                if (r.format !== 'ass' && r.format !== 'ssa') return false;
+                return matchEpisode(r.fileName, episode);
+            });
+            
+            results = [...results, ...filteredFallback];
+        }
+    }
+    return results;
+}
+
+// السحب الاحتياطي للإنجليزية
+async function fetchMirrorEnglish(imdbId, season, episode, type) {
+    if (!imdbId || !imdbId.startsWith('tt')) return [];
+
+    try {
+        const isSeries = type === 'series' || type === 'anime' || !!season;
+        const mediaType = isSeries ? 'series' : 'movie';
+        const targetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+
+        const url = `https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`;
+        const response = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
+        if (!response.ok) return [];
+        const data = await response.json();
+        const list = data.subtitles || [];
+
+        return list
+            .filter(s => {
+                const lang = (s.lang || '').toLowerCase();
+                return (lang === 'eng' || lang === 'en' || lang.startsWith('en')) && s.url;
+            })
+            .map(s => {
+                const rawUrl = (s.url || '').toLowerCase();
+                const rawName = (s.SubFileName || s.title || s.name || '').toLowerCase();
+                const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
+
+                const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
+                const format = isAss ? 'ass' : 'srt';
+
+                return {
+                    url: s.url,
+                    lang: 'eng',
+                    format: format,
+                    ext: format,
+                    subFormat: isAss ? 'ssa' : 'srt',
+                    fileName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
+                    origName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
+                    _source: 'opensubtitles',
+                    _priority: isAss ? 0 : 2
+                };
+            });
+    } catch (e) {
+        return [];
+    }
+}
+
+async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
+    const tasks = [];
+    tasks.push(fetchLegacyApiEnglish(imdbId, season, episode));
+    tasks.push(fetchMirrorEnglish(imdbId, season, episode, type));
+
+    const settled = await Promise.allSettled(tasks);
+    const allSubs = settled
+        .filter(r => r.status === 'fulfilled')
+        .flatMap(r => r.value)
+        .filter(s => s && s.url);
+
+    const uniqueSubs = [];
+    const seenUrls = new Set();
+
+    for (const sub of allSubs) {
+        const cleanUrl = sub.url.split('?')[0];
+        if (seenUrls.has(cleanUrl)) continue;
+        seenUrls.add(cleanUrl);
+        uniqueSubs.push(sub);
+    }
+    return uniqueSubs;
+}
+
+// ==========================================
+// مسار جلب الترجمات (الفرز الصارم وتحديد العدد)
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -314,77 +366,67 @@ app.get([
 
     const type = req.params.type;
     const baseUrl = getBaseUrl(req);
-
-    // فك تفكيك معرف Stremio: tt1234567 أو tt1234567:season:episode
-    const idParts = targetId.split(':');
-    const imdbId = idParts[0];
-    const season = idParts.length > 1 ? idParts[1] : null;
-    const episode = idParts.length > 2 ? idParts[2] : null;
+    
+    let imdbId = targetId, season = null, episode = null;
+    if (targetId.includes(':')) {
+        const parts = targetId.split(':');
+        imdbId = parts[0]; season = parts[1]; episode = parts[2];
+    }
 
     try {
-        const rawSubs = await fetchOpenSubtitlesEnglish(imdbId, season, episode);
-        console.log(`[Route Debug] rawSubs: ${rawSubs.length} for targetId=${targetId} type=${type}`);
+        const engSubs = await getOpenSubtitlesEnglish({ imdbId, season, episode, type });
+        
+        // استبعاد SDH مطلقاً ونهائياً
+        const cleanSubs = engSubs.filter(sub => {
+            const title = (sub.fileName || sub.origName || '').toLowerCase();
+            return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired'));
+        });
 
-        if (rawSubs.length > 0) {
+        if (cleanSubs.length === 0) return res.json({ subtitles: [] });
 
-            // استبعاد SDH مطلقاً ونهائياً (بالحقل الرسمي + الاسم احتياطاً)
-            const cleanSubs = rawSubs.filter(sub => {
-                if (sub.isHI) return false;
-                const name = (sub.subtitleFileName || '').toLowerCase();
-                return !(name.includes('sdh') || name.includes('hi ') || name.includes('hearing impaired'));
-            });
+        // الفرز إلى SRT و ASS بناءً على الامتداد الحقيقي
+        const assSubs = cleanSubs.filter(s => s.format === 'ass' || s.format === 'ssa');
+        const srtSubs = cleanSubs.filter(s => s.format !== 'ass' && s.format !== 'ssa');
 
-            console.log(`[Route Debug] cleanSubs after SDH filter: ${cleanSubs.length}`);
-
-            if (cleanSubs.length === 0) return res.json({ subtitles: [] });
-
-            // الفرز إلى SRT و ASS بناءً على حقل SubFormat الحقيقي القادم من OpenSubtitles
-            const assSubs = cleanSubs.filter(s => s.format === 'ass' || s.format === 'ssa');
-            const srtSubs = cleanSubs.filter(s => s.format !== 'ass' && s.format !== 'ssa');
-
-            console.log(`[Route Debug] assSubs: ${assSubs.length} | srtSubs: ${srtSubs.length}`);
-
-            const transSubs = [];
-            const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
-            const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
-            
-            // إضافة 3 روابط SRT (بملفات مستقلة)
-            if (srtSubs.length > 0) {
-                for (let i = 0; i < 3; i++) {
-                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 3
-                    transSubs.push({
-                        id: `nuvio-ai-srt-${i+1}`,
-                        url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
-                        lang: 'ara',
-                        title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
-                    });
-                }
+        const transSubs = [];
+        const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
+        const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
+        
+        // إضافة 6 روابط SRT
+        if (srtSubs.length > 0) {
+            const maxSrt = Math.min(6, srtSubs.length);
+            for (let i = 0; i < maxSrt; i++) {
+                transSubs.push({
+                    id: `nuvio-ai-srt-${i+1}`,
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(srtSubs[i].url)}&track=${i+1}`,
+                    lang: 'ara',
+                    title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                });
             }
-
-            // إضافة 3 روابط ASS (تظهر فقط إذا كان هناك ملفات ASS حقيقية متوفرة فعلاً)
-            if (assSubs.length > 0) {
-                for (let i = 0; i < 3; i++) {
-                    const sub = assSubs[i] || assSubs[assSubs.length - 1];
-                    transSubs.push({
-                        id: `nuvio-ai-ass-${i+1}`,
-                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(sub.url)}&track=${i+4}`,
-                        lang: 'ara',
-                        title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
-                    });
-                }
-            }
-
-            console.log(`[Route Debug] Final transSubs count: ${transSubs.length}`);
-            return res.json({ subtitles: transSubs });
         }
-        console.log(`[Route Debug] rawSubs was empty, returning []`);
-        return res.json({ subtitles: [] });
+
+        // إضافة 4 روابط ASS 
+        if (assSubs.length > 0) {
+            const maxAss = Math.min(4, assSubs.length);
+            for (let i = 0; i < maxAss; i++) {
+                transSubs.push({
+                    id: `nuvio-ai-ass-${i+1}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assSubs[i].url)}&track=${i+7}`,
+                    lang: 'ara',
+                    title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                });
+            }
+        }
+
+        return res.json({ subtitles: transSubs });
     } catch (err) {
-        console.error(`[Route Debug] EXCEPTION: ${err.message}`);
         return res.json({ subtitles: [] });
     }
 });
 
+// ==========================================
+// مسار البث والترجمة 
+// ==========================================
 app.all([
     '/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa',
     '/:config/stream-ai.srt', '/:config/stream-ai.ass', '/:config/stream-ai.ssa'
