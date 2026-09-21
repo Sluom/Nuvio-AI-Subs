@@ -200,40 +200,53 @@ app.get([
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
 
-    const type = req.params.type;
+    let type = req.params.type;
     const baseUrl = getBaseUrl(req);
 
     try {
         let subtitlesData = [];
-        
-        // === التعديل المضمون لدعم الأنمي (Kitsu) مع نظام الفحص ===
+        let finalTargetId = targetId;
+        let finalType = type;
+
+        // === التعديل الجذري لدعم الأنمي (تحويل Kitsu إلى IMDb) ===
         if (targetId.startsWith('kitsu')) {
-            const kitsuUrls = [
-                `https://a-z-subs.strem.fun/subtitles/${type}/${targetId}.json`,
-                `https://opensubtitles.strem.io/subtitles/${type}/${targetId}.json`
-            ];
-            for (let url of kitsuUrls) {
-                try {
-                    console.log(`[Anime Test] Trying: ${url}`);
-                    const r = await axios.get(url, { timeout: 8000 });
-                    if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
-                        console.log(`[Anime Test] Success with ${url}, Found: ${r.data.subtitles.length} subs`);
-                        subtitlesData = r.data.subtitles;
-                        break; 
-                    } else {
-                        console.log(`[Anime Test] No subtitles found at ${url}`);
+            try {
+                const parts = targetId.split(':');
+                if (parts.length === 3) {
+                    const kitsuId = parts[1];
+                    const kitsuEp = parseInt(parts[2]);
+                    
+                    console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep: ${kitsuEp}`);
+                    const cinemetaUrl = `https://v3-cinemeta.strem.io/meta/anime/kitsu:${kitsuId}.json`;
+                    const metaRes = await axios.get(cinemetaUrl, { timeout: 8000 });
+                    
+                    if (metaRes.data && metaRes.data.meta && metaRes.data.meta.videos) {
+                        const epData = metaRes.data.meta.videos.find(v => v.id === targetId || v.episode === kitsuEp);
+                        if (epData && epData.imdb_id) {
+                            const imdbId = epData.imdb_id;
+                            const s = epData.imdbSeason || epData.season || 1;
+                            const e = epData.imdbEpisode || epData.episode || kitsuEp;
+                            
+                            finalTargetId = `${imdbId}:${s}:${e}`;
+                            finalType = 'series';
+                            console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
+                        } else {
+                            console.log(`[Anime Mapper] Episode ${kitsuEp} mapping not found in Cinemeta.`);
+                        }
                     }
-                } catch (e) { 
-                    console.error(`[Anime Test Error] Failed at ${url} - Reason: ${e.message}`);
                 }
+            } catch (err) {
+                console.error(`[Anime Mapper Error] Failed to map ${targetId} - ${err.message}`);
             }
-        } else {
-            // الأفلام والمسلسلات العادية (tt)
-            const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
-            const r = await axios.get(osUrl, { timeout: 10000 });
-            if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         }
         // ==========================================================
+
+        // جلب الترجمة من المحرك الأساسي والموثوق
+        const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
+        console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
+        
+        const r = await axios.get(osUrl, { timeout: 10000 });
+        if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
 
         if (subtitlesData.length > 0) {
             
