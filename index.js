@@ -61,7 +61,7 @@ const globalTranslationQueue = new RequestQueue();
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '3.0.0',
+    version: '3.1.0',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
@@ -185,7 +185,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// دوال جلب الترجمات (من كود الإضافة الثانية)
+// دوال جلب الترجمات
 // ==========================================
 
 function matchEpisode(fileName, targetEpisode) {
@@ -207,7 +207,6 @@ function matchEpisode(fileName, targetEpisode) {
     return patterns.some(p => p.test(name));
 }
 
-// السحب عبر ה- API القديم باستخدام fetch لتجنب 403
 async function fetchLegacyData(url) {
     try {
         const response = await fetch(url, {
@@ -250,7 +249,6 @@ async function fetchLegacyData(url) {
     }
 }
 
-// تعديل اللغة إلى الإنجليزية للبحث
 async function fetchLegacyApiEnglish(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -280,7 +278,6 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
     return results;
 }
 
-// السحب الاحتياطي للإنجليزية
 async function fetchMirrorEnglish(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -349,7 +346,7 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
 }
 
 // ==========================================
-// مسار جلب الترجمات (الفرز الصارم وتحديد العدد)
+// مسار جلب الترجمات
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -376,7 +373,6 @@ app.get([
     try {
         const engSubs = await getOpenSubtitlesEnglish({ imdbId, season, episode, type });
         
-        // استبعاد SDH مطلقاً ونهائياً
         const cleanSubs = engSubs.filter(sub => {
             const title = (sub.fileName || sub.origName || '').toLowerCase();
             return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired'));
@@ -384,7 +380,6 @@ app.get([
 
         if (cleanSubs.length === 0) return res.json({ subtitles: [] });
 
-        // الفرز إلى SRT و ASS بناءً على الامتداد الحقيقي
         const assSubs = cleanSubs.filter(s => s.format === 'ass' || s.format === 'ssa');
         const srtSubs = cleanSubs.filter(s => s.format !== 'ass' && s.format !== 'ssa');
 
@@ -392,7 +387,6 @@ app.get([
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
         
-        // إضافة 6 روابط SRT
         if (srtSubs.length > 0) {
             const maxSrt = Math.min(6, srtSubs.length);
             for (let i = 0; i < maxSrt; i++) {
@@ -405,7 +399,6 @@ app.get([
             }
         }
 
-        // إضافة 4 روابط ASS 
         if (assSubs.length > 0) {
             const maxAss = Math.min(4, assSubs.length);
             for (let i = 0; i < maxAss; i++) {
@@ -440,6 +433,12 @@ app.all([
     const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
     const cacheKey = `${isAss ? 'ASS' : 'SRT'}_${targetUrl}`;
     
+    // أوامر لمنع تخزين المشغل (Cache) وإجباره على التحديث
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
         res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-${isAss ? 'ASS.ssa' : 'SRT.srt'}"`);
@@ -472,13 +471,14 @@ app.all([
             } catch (e) {
                 console.error(`[Background Error] Track ${trackNum}:`, e.message);
                 const errorSub = isAss 
-                    ? `[Script Info]\nScriptType: v4.00+\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`
+                    ? `[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`
                     : `1\n00:00:01,000 --> 01:00:00,000\nفشل الترجمة النهائي. حاول مجدداً.\n\n`;
                 translationCache[cacheKey] = { status: 'done', content: errorSub };
             }
         });
     }
 
+    // إضافة أسطر فارغة لملف الانتظار الوهمي حتى يقبله ExoPlayer
     const fakeSub = isAss 
         ? `[Script Info]\nScriptType: v4.00+\nCollisions: Normal\nPlayDepth: 0\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳\\Nانقر لإعادة التحميل بمجرد جاهزيتها.`
         : `1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n`;
