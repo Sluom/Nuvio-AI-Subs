@@ -190,26 +190,26 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-// التحديث الجوهري: اختراق الحظر باستخدام fetch + تحديد أولوية الاستخراج
+// التحديث الفعلي: العودة لـ axios مع حماية VLSub وTimeout
 async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
-    let buffer;
+    let response;
     const decodedUrl = decodeURIComponent(subUrl);
     
     try {
-        const response = await fetch(decodedUrl, {
+        response = await axios.get(decodedUrl, {
+            responseType: 'arraybuffer',
+            timeout: 15000, // الـ Timeout اللي ينقذنا من تعليق الطابور
             headers: {
-                'User-Agent': 'VLSub 0.10.3',
+                'User-Agent': 'VLSub 0.10.3', // القناع المضاد لحظر كلاودفلير
                 'X-User-Agent': 'VLSub 0.10.3',
                 'Accept': '*/*'
             }
         });
-        
-        if (!response.ok) throw new Error(`Download failed: ${response.status}`);
-        const arrayBuffer = await response.arrayBuffer();
-        buffer = Buffer.from(arrayBuffer);
     } catch (err) {
         throw err;
     }
+
+    let buffer = Buffer.from(response.data);
 
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
