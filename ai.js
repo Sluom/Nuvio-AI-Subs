@@ -140,7 +140,6 @@ async function translateChunkStrict(texts, keysArray, modelName, isAssFile) {
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        // استخدام طريقتك الأصلية لبناء الرابط لتفادي خطأ (Invalid URL)
         const p1 = "https://";
         const p2 = "generativelanguage.googleapis.com";
         const p3 = "/v1beta/models/";
@@ -217,7 +216,7 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-async function fetchAndExtractSub(subUrl) {
+async function fetchAndExtractSub(subUrl, prioritizeAss = false) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
     try {
@@ -238,7 +237,14 @@ async function fetchAndExtractSub(subUrl) {
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
         const zip = new AdmZip(buffer);
         const entries = zip.getEntries();
-        const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+        let subEntry = null;
+        if (prioritizeAss) {
+            subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+            if (!subEntry) subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
+        } else {
+            subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
+            if (!subEntry) subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+        }
         if (subEntry) buffer = subEntry.getData();
     }
     
@@ -247,7 +253,7 @@ async function fetchAndExtractSub(subUrl) {
 
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
+    try { originalText = await fetchAndExtractSub(subUrl, false); } 
     catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
 
     const cues = extractCuesSrt(originalText);
@@ -282,7 +288,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
 async function handleTranslationAss(subUrl, keysArray, modelName) {
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
+    try { originalText = await fetchAndExtractSub(subUrl, true); } 
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
     let headerMatch = originalText.match(/([\s\S]*?)(?=^Dialogue:)/im);
