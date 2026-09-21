@@ -204,15 +204,37 @@ app.get([
     const baseUrl = getBaseUrl(req);
 
     try {
-        const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
-        const r = await axios.get(osUrl, { timeout: 10000 });
+        let subtitlesData = [];
         
-        if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
+        // === التعديل المضمون لدعم الأنمي (Kitsu) والأفلام ===
+        if (targetId.startsWith('kitsu')) {
+            const kitsuUrls = [
+                `https://a-z-subs.strem.fun/subtitles/${type}/${targetId}.json`,
+                `https://opensubtitles.strem.io/subtitles/${type}/${targetId}.json`
+            ];
+            for (let url of kitsuUrls) {
+                try {
+                    const r = await axios.get(url, { timeout: 8000 });
+                    if (r.data && r.data.subtitles && r.data.subtitles.length > 0) {
+                        subtitlesData = r.data.subtitles;
+                        break; // نجح الجلب، اخرج من اللوب
+                    }
+                } catch (e) { /* تجاهل الخطأ وجرب الرابط اللي بعده */ }
+            }
+        } else {
+            // الأفلام والمسلسلات العادية (tt)
+            const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`;
+            const r = await axios.get(osUrl, { timeout: 10000 });
+            if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
+        }
+        // ===============================================
+
+        if (subtitlesData.length > 0) {
             
             // إضافة اللغات المطلوبة: انجليزي، ياباني، تركي، فارسي، روسي، كوري، فرنسي، اسباني
             const targetLangs = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa'];
             
-            const validSubs = r.data.subtitles.filter(s => {
+            const validSubs = subtitlesData.filter(s => {
                 const lang = (s.lang || '').toLowerCase();
                 return targetLangs.some(l => lang === l || lang.startsWith(l));
             });
