@@ -50,6 +50,22 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
+// ==========================================
+// تطبيع فواصل الأسطر: أي تمثيل نصي لفاصل سطر (سواء \n أو \N مكتوبة كحروف،
+// بمفردها أو مسبوقة بباك سلاش إضافي بسبب تهريب JSON) يتحول لسطر جديد حقيقي.
+// دالة واحدة مشتركة تُستخدم في كل نقطة قد يظهر فيها هذا الشكل: مسار التحليل
+// الناجح لـ JSON، مسار الاستخراج الاحتياطي عند فشل التحليل، وأخيرًا كطبقة
+// حماية نهائية على الناتج المجمّع بالكامل قبل إرساله، أيًا كان مصدر المشكلة.
+// ==========================================
+function normalizeLineBreakArtifacts(txt) {
+    if (!txt) return txt;
+    return String(txt)
+        .replace(/\\\\n/gi, '\n')
+        .replace(/\\\\N/g, '\n')
+        .replace(/\\n/gi, '\n')
+        .replace(/\\N/g, '\n');
+}
+
 // تنظيف موحّد لنص أي "cue" قبل إرساله للترجمة:
 // 1) تحويل أي صيغة \N (تاج فواصل الأسطر في ملفات ASS) إلى سطر جديد حقيقي حتى تكون طريقة تمثيل الأسطر المتعددة موحّدة وواضحة لموديل الترجمة (بدل نص وهمي قد يلخبطه).
 // 2) حذف رموز الموسيقى ♪ ♫ من الأصل نفسه بدل الاعتماد فقط على تنظيفها من ناتج الترجمة، لأن الموديل مش محتاج أصلاً يتعامل معها أو "يحافظ عليها".
@@ -108,17 +124,21 @@ function parseRobustJsonArray(raw, expectedLength) {
                 // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
                 // إصلاح فواصل الأسطر (شبكة أمان لو الموديل رجّع \n أو \N نصياً بدل سطر حقيقي)
-                txt = txt.replace(/\\\\n/gi, '\n')
-                         .replace(/\\\\N/g, '\n')
-                         .replace(/\\n/gi, '\n')
-                         .replace(/\\N/g, '\n');
+                txt = normalizeLineBreakArtifacts(txt);
                 return txt.trim();
             });
         }
 
     } catch (e) {
+        // المسار الاحتياطي: استخراج النصوص بالـ regex مباشرة من الرد الخام لما فشل تحليله كـ JSON سليم.
+        // نفس مشكلة فواصل الأسطر النصية ممكن تحصل هنا بالظبط زي المسار الناجح، فلازم نطبّق
+        // نفس التطبيع بدل ما نرجّع النص الخام كما هو.
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-        if (stringMatches.length >= expectedLength * 0.5) return stringMatches.filter(s => s !== 'translations' && s !== 'data');
+        if (stringMatches.length >= expectedLength * 0.5) {
+            return stringMatches
+                .filter(s => s !== 'translations' && s !== 'data')
+                .map(s => normalizeLineBreakArtifacts(s).trim());
+        }
     }
     return null;
 }
@@ -181,7 +201,7 @@ async function translateChunkStrict(texts, keysArray, modelName, keyState) {
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
-3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only. Never represent a line break with digits, letters, or backslash codes (e.g. never output things like "N", "\\N", or a number as a substitute for a line break) — use an actual newline character only.
+3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, and the lines must be separated by an actual newline character within the JSON string value — the same kind of real line break the source used, and nothing else standing in its place.
 4. If the text contains styling override codes wrapped in curly braces, such as {\\i1} or {\\b1}, keep them exactly as given, character-for-character, in the same position relative to the translated words — do not translate, remove, or alter them.
 5. Ensuring translations are contextually accurate for film/TV dialogue
 6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
@@ -306,7 +326,10 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1); 
-    const finalTranslations = chunkResults.flat();
+    // طبقة حماية أخيرة: مهما كان مصدر الترجمة (نجاح مباشر، أو استخراج احتياطي، أو حتى
+    // النص الأصلي غير المترجم عند فشل الاثنين)، أي رمز \n أو \N نصي متبقٍ بالغلط
+    // يتحول هنا لسطر جديد حقيقي قبل إرسال الملف للمستخدم مباشرة.
+    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
     let srtOutput = '';
     cues.forEach((c, idx) => {
@@ -344,7 +367,9 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
-    const finalTranslations = chunkResults.flat();
+    // نفس طبقة الحماية الأخيرة المطبّقة في مسار SRT، قبل تحويل الأسطر الحقيقية إلى \N
+    // (تاج ASS الرسمي لفاصل الأسطر داخل حقل Dialogue الواحد).
+    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
     // في ملفات ASS، السطر Dialogue لازم يبقى سطر واحد فعليًا بالملف،
     // فأي سطر جديد حقيقي في الترجمة لازم يتحول لتاج \N بدل ما يكسر بنية الملف.
     const assLines = cues.map((c, idx) => {
@@ -354,4 +379,4 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
-module.exports = { handleTranslationSrt, handleTranslationAss };
+module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
