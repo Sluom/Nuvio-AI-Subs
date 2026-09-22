@@ -28,9 +28,11 @@ function fixArabicEncoding(buffer) {
         try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) { }
     }
     const utf8Text = buffer.toString('utf-8');
-    // لو الملف أصلاً UTF-8 سليم (سواء فيه عربي أو لأ) نرجعه زي ما هو
-    // ده بيمنع رموز زي ♪ من التلف عن طريق الخطأ لما يتفكوا بترميز خاطئ
+    // [إصلاح حرف الهاء] لو الملف أصلاً UTF-8 سليم (سواء فيه عربي أو لأ) نرجعه زي ما هو فورًا.
+    // ده بيمنع رموز زي ♪ من التلف عن طريق الخطأ لما يتفكوا بترميز windows-1256 غلط،
+    // لأن أول بايت من رمز ♪ (0xE2) كان بيتفك كحرف عربي وحيد فيخدع الشرط القديم.
     if (!utf8Text.includes('\uFFFD')) return buffer;
+    if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
     try {
         const decodedWin = iconv.decode(buffer, 'windows-1256');
         if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
@@ -50,58 +52,13 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
-// ==========================================
-// تطبيع فواصل الأسطر: أي تمثيل نصي لفاصل سطر (سواء \n أو \N مكتوبة كحروف،
-// بمفردها أو مسبوقة بباك سلاش إضافي بسبب تهريب JSON) يتحول لسطر جديد حقيقي.
-// دالة واحدة مشتركة تُستخدم في كل نقطة قد يظهر فيها هذا الشكل: مسار التحليل
-// الناجح لـ JSON، مسار الاستخراج الاحتياطي عند فشل التحليل، وأخيرًا كطبقة
-// حماية نهائية على الناتج المجمّع بالكامل قبل إرساله، أيًا كان مصدر المشكلة.
-// ==========================================
-function normalizeLineBreakArtifacts(txt) {
-    if (!txt) return txt;
-    return String(txt)
-        .replace(/\\\\n/gi, '\n')
-        .replace(/\\\\N/g, '\n')
-        .replace(/\\n/gi, '\n')
-        .replace(/\\N/g, '\n');
-}
-
-// إزالة أي سطر أصبح فارغًا تمامًا بعد التنظيف (مثلاً سطر كان يحتوي فقط على رمز
-// موسيقى ♪ تم حذفه) بدل أن يُترك كسطر فارغ يُربك موديل الترجمة أو يظهر كعلامة
-// تنصيص معزولة في الناتج النهائي. تُستخدم قبل الترجمة (داخل cleanCueText) وبعدها
-// (كطبقة حماية أخيرة على الناتج المُترجَم)، فهي مشكلة واحدة قد تظهر في أي الجهتين.
-function stripEmptyLines(text) {
-    if (!text) return text;
-    return String(text)
-        .split('\n')
-        .map(line => line.replace(/[ \t]+/g, ' ').trim())
-        .filter(line => line.length > 0)
-        .join('\n');
-}
-
-// تنظيف موحّد لنص أي "cue" قبل إرساله للترجمة:
-// 1) تحويل أي صيغة \N (تاج فواصل الأسطر في ملفات ASS) إلى سطر جديد حقيقي حتى تكون طريقة تمثيل الأسطر المتعددة موحّدة وواضحة لموديل الترجمة (بدل نص وهمي قد يلخبطه).
-// 2) حذف رموز الموسيقى ♪ ♫ من الأصل نفسه بدل الاعتماد فقط على تنظيفها من ناتج الترجمة، لأن الموديل مش محتاج أصلاً يتعامل معها أو "يحافظ عليها".
-// 3) حذف أي سطر أصبح فارغًا تمامًا بعد إزالة الرمز الموسيقي (بدل تركه فارغًا)، ثم تنظيف الفراغات الزائدة مع الحفاظ على فواصل الأسطر الحقيقية المتبقية.
-function cleanCueText(rawText) {
-    if (!rawText) return '';
-    let t = String(rawText);
-    t = t.replace(/\\N/g, '\n');
-    t = t.replace(/[♪♫]/g, '');
-    t = stripEmptyLines(t);
-    return t;
-}
-
 function extractCuesUniversal(text) {
     const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
     if (assLines.length > 0) {
         const cues = [];
         for (const line of assLines) {
             const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
-            if (m) {
-                const cleaned = cleanCueText(m[3]);
-                if (cleaned) cues.push({ start: m[1].trim(), end: m[2].trim(), text: cleaned });
-            }
+            if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
         }
         if (cues.length) return cues;
     }
@@ -113,11 +70,23 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        const text2 = lines.slice(idx + 1).join('\n');
-        const cleaned = cleanCueText(text2);
-        if (cleaned) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: cleaned });
+        const text2 = lines.slice(idx + 1).join('\\N');
+        if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
+}
+
+// [إصلاح حرف N] نفس سلسلة التطبيع اللي كانت موجودة أصلاً في مسار النجاح بس،
+// اتحولت لدالة واحدة مشتركة عشان نقدر نطبّقها في المسار الاحتياطي (catch) كمان،
+// اللي كان العيب الحقيقي فيه: كان بيرجّع النص الخام زي ما هو من غير أي تطبيع،
+// فحرف N كان بيهرب بالظبط من هنا. لا علاقة لها بمعالجة رمز الموسيقى إطلاقًا.
+function normalizeLineBreakArtifacts(txt) {
+    if (!txt) return txt;
+    return String(txt)
+        .replace(/\\\\n/gi, '\n')
+        .replace(/\\\\N/g, '\n')
+        .replace(/\\n/gi, '\n')
+        .replace(/\\N/g, '\n');
 }
 
 function parseRobustJsonArray(raw, expectedLength) {
@@ -136,16 +105,15 @@ function parseRobustJsonArray(raw, expectedLength) {
                 let txt = String(x || '');
                 // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                // إصلاح فواصل الأسطر (شبكة أمان لو الموديل رجّع \n أو \N نصياً بدل سطر حقيقي)
+                // إصلاح فواصل الأسطر
                 txt = normalizeLineBreakArtifacts(txt);
                 return txt.trim();
             });
         }
 
     } catch (e) {
-        // المسار الاحتياطي: استخراج النصوص بالـ regex مباشرة من الرد الخام لما فشل تحليله كـ JSON سليم.
-        // نفس مشكلة فواصل الأسطر النصية ممكن تحصل هنا بالظبط زي المسار الناجح، فلازم نطبّق
-        // نفس التطبيع بدل ما نرجّع النص الخام كما هو.
+        // [إصلاح حرف N] المسار الاحتياطي: هنا بالظبط كان حرف N بيهرب من غير معالجة في
+        // الكود القديم. بنطبّق نفس تطبيع فواصل الأسطر اللي بيتطبق في مسار النجاح فوق.
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         if (stringMatches.length >= expectedLength * 0.5) {
             return stringMatches
@@ -177,25 +145,20 @@ async function runConcurrentPool(tasks, limit = 1) {
     return results;
 }
 
-// ملاحظة مهمة: العدّاد ده لازم يبقى خاص بكل "مهمة ترجمة" (كل طلب/ملف لوحده) وليس متغيّر
-// عالمي مشترك بين كل مستخدمي السيرفر. لو كان عالمي، مستخدم عنده مفتاحين ومستخدم تاني
-// عنده 5 مفاتيح هيتصادموا على نفس العدّاد، وممكن ياخد مستخدم index برة حدود مصفوفته
-// (keysArray[index] = undefined) فيترسل مفتاح فاسد لـ Gemini وتفشل ترجمته بدون أي سبب
-// من عنده. الحل: كل استدعاء لـ handleTranslationSrt/Ass بيعمل keyState خاص بيه،
-// وبيتمرر لكل chunks الملف ده بس، وميتشاركش مع أي طلب تاني.
-function getNextApiKey(keysArray, keyState) {
+let currentKeyIndex = 0;
+function getNextApiKey(keysArray) {
     if (!keysArray || keysArray.length === 0) return null;
-    const key = keysArray[keyState.index % keysArray.length];
-    keyState.index++;
+    const key = keysArray[currentKeyIndex];
+    currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName, keyState) {
+async function translateChunkStrict(texts, keysArray, modelName) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = getNextApiKey(keysArray, keyState);
+        const activeKey = getNextApiKey(keysArray);
         
         if (!activeKey) {
             console.error("[Fatal] No Gemini API Keys configured!");
@@ -214,8 +177,8 @@ async function translateChunkStrict(texts, keysArray, modelName, keyState) {
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
-3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, and the lines must be separated by an actual newline character within the JSON string value — the same kind of real line break the source used, and nothing else standing in its place.
-4. If the text contains styling override codes wrapped in curly braces, such as {\\i1} or {\\b1}, keep them exactly as given, character-for-character, in the same position relative to the translated words — do not translate, remove, or alter them.
+3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
+4. Preserving any formatting tags or special characters
 5. Ensuring translations are contextually accurate for film/TV dialogue
 6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
 7. Apply professional Arabic subtitling conventions for punctuation as follows:
@@ -331,19 +294,16 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
-    const keyState = { index: 0 }; // عدّاد مفاتيح خاص بهذا الملف/الطلب فقط
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, keyState);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1); 
-    // طبقة حماية أخيرة: مهما كان مصدر الترجمة (نجاح مباشر، أو استخراج احتياطي، أو حتى
-    // النص الأصلي غير المترجم عند فشل الاثنين)، أي رمز \n أو \N نصي متبقٍ بالغلط
-    // يتحول هنا لسطر جديد حقيقي، وأي سطر فارغ ناتج عن ذلك (أو عن أي سبب آخر) يُحذف،
-    // قبل إرسال الملف للمستخدم مباشرة.
-    const finalTranslations = chunkResults.flat().map(t => stripEmptyLines(normalizeLineBreakArtifacts(t)));
+    // [إصلاح حرف N] طبقة حماية أخيرة: أي \n أو \N نصي متبقٍ بالغلط (من أي مسار)
+    // يتحول هنا لسطر جديد حقيقي قبل إرسال الملف للمستخدم مباشرة.
+    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
     let srtOutput = '';
     cues.forEach((c, idx) => {
@@ -353,8 +313,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
-        // ملاحظة: finalTranslations[idx] ممكن يحتوي على سطر جديد حقيقي لو كان الحوار الأصلي أكثر من سطر،
-        // وده صحيح 100% في ملفات SRT (تنسيق السطور المتعددة الطبيعي هناك).
         srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
     });
     
@@ -373,24 +331,17 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
-    const keyState = { index: 0 }; // عدّاد مفاتيح خاص بهذا الملف/الطلب فقط
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName, keyState);
+        const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
     const chunkResults = await runConcurrentPool(tasks, 1);
-    // نفس طبقة الحماية الأخيرة المطبّقة في مسار SRT، قبل تحويل الأسطر الحقيقية إلى \N
-    // (تاج ASS الرسمي لفاصل الأسطر داخل حقل Dialogue الواحد).
-    const finalTranslations = chunkResults.flat().map(t => stripEmptyLines(normalizeLineBreakArtifacts(t)));
-    // في ملفات ASS، السطر Dialogue لازم يبقى سطر واحد فعليًا بالملف،
-    // فأي سطر جديد حقيقي في الترجمة لازم يتحول لتاج \N بدل ما يكسر بنية الملف.
-    const assLines = cues.map((c, idx) => {
-        const safeText = String(finalTranslations[idx] || '').replace(/\r?\n/g, '\\N');
-        return `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`;
-    });
+    // [إصلاح حرف N] نفس طبقة الحماية الأخيرة المطبّقة في مسار SRT.
+    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
-module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray, stripEmptyLines, cleanCueText };
+module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
