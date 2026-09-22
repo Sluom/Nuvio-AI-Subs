@@ -28,7 +28,9 @@ function fixArabicEncoding(buffer) {
         try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) { }
     }
     const utf8Text = buffer.toString('utf-8');
-    if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
+    // لو الملف أصلاً UTF-8 سليم (سواء فيه عربي أو لأ) نرجعه زي ما هو
+    // ده بيمنع رموز زي ♪ من التلف عن طريق الخطأ لما يتفكوا بترميز خاطئ
+    if (!utf8Text.includes('\uFFFD')) return buffer;
     try {
         const decodedWin = iconv.decode(buffer, 'windows-1256');
         if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
@@ -161,6 +163,12 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 4. Preserving any formatting tags or special characters
 5. Ensuring translations are contextually accurate for film/TV dialogue
 6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
+7. Apply professional Arabic subtitling conventions for punctuation as follows:
+   a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
+   b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
+   c. When an entire line is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE line in quotation marks from its first word to its last word, e.g. "كل الجملة هنا".
+   d. Do not double-wrap: if a full line is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
+   e. Never use quotation marks for places/objects and never use parentheses for person names.
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
