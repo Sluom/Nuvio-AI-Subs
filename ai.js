@@ -144,20 +144,25 @@ async function runConcurrentPool(tasks, limit = 1) {
     return results;
 }
 
-let currentKeyIndex = 0;
-function getNextApiKey(keysArray) {
+// ملاحظة مهمة: العدّاد ده لازم يبقى خاص بكل "مهمة ترجمة" (كل طلب/ملف لوحده) وليس متغيّر
+// عالمي مشترك بين كل مستخدمي السيرفر. لو كان عالمي، مستخدم عنده مفتاحين ومستخدم تاني
+// عنده 5 مفاتيح هيتصادموا على نفس العدّاد، وممكن ياخد مستخدم index برة حدود مصفوفته
+// (keysArray[index] = undefined) فيترسل مفتاح فاسد لـ Gemini وتفشل ترجمته بدون أي سبب
+// من عنده. الحل: كل استدعاء لـ handleTranslationSrt/Ass بيعمل keyState خاص بيه،
+// وبيتمرر لكل chunks الملف ده بس، وميتشاركش مع أي طلب تاني.
+function getNextApiKey(keysArray, keyState) {
     if (!keysArray || keysArray.length === 0) return null;
-    const key = keysArray[currentKeyIndex];
-    currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
+    const key = keysArray[keyState.index % keysArray.length];
+    keyState.index++;
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName) {
+async function translateChunkStrict(texts, keysArray, modelName, keyState) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = getNextApiKey(keysArray);
+        const activeKey = getNextApiKey(keysArray, keyState);
         
         if (!activeKey) {
             console.error("[Fatal] No Gemini API Keys configured!");
@@ -177,9 +182,10 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
 3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only. Never represent a line break with digits, letters, or backslash codes (e.g. never output things like "N", "\\N", or a number as a substitute for a line break) — use an actual newline character only.
-4. Ensuring translations are contextually accurate for film/TV dialogue
-5. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-6. Apply professional Arabic subtitling conventions for punctuation as follows:
+4. If the text contains styling override codes wrapped in curly braces, such as {\\i1} or {\\b1}, keep them exactly as given, character-for-character, in the same position relative to the translated words — do not translate, remove, or alter them.
+5. Ensuring translations are contextually accurate for film/TV dialogue
+6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
+7. Apply professional Arabic subtitling conventions for punctuation as follows:
    a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
    b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
    c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
@@ -292,9 +298,10 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
+    const keyState = { index: 0 }; // عدّاد مفاتيح خاص بهذا الملف/الطلب فقط
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, keyState);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
@@ -329,9 +336,10 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
+    const keyState = { index: 0 }; // عدّاد مفاتيح خاص بهذا الملف/الطلب فقط
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => c.text);
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        const translated = await translateChunkStrict(texts, keysArray, modelName, keyState);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
