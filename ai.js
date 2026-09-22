@@ -50,13 +50,29 @@ function srtTimeToAss(t) {
     return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
+// تنظيف موحّد لنص أي "cue" قبل إرساله للترجمة:
+// 1) تحويل أي صيغة \N (تاج فواصل الأسطر في ملفات ASS) إلى سطر جديد حقيقي حتى تكون طريقة تمثيل الأسطر المتعددة موحّدة وواضحة لموديل الترجمة (بدل نص وهمي قد يلخبطه).
+// 2) حذف رموز الموسيقى ♪ ♫ من الأصل نفسه بدل الاعتماد فقط على تنظيفها من ناتج الترجمة، لأن الموديل مش محتاج أصلاً يتعامل معها أو "يحافظ عليها".
+// 3) تنظيف الفراغات الزائدة مع الحفاظ على فواصل الأسطر الحقيقية.
+function cleanCueText(rawText) {
+    if (!rawText) return '';
+    let t = String(rawText);
+    t = t.replace(/\\N/g, '\n');
+    t = t.replace(/[♪♫]/g, '');
+    t = t.split('\n').map(line => line.replace(/[ \t]+/g, ' ').trim()).join('\n').trim();
+    return t;
+}
+
 function extractCuesUniversal(text) {
     const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
     if (assLines.length > 0) {
         const cues = [];
         for (const line of assLines) {
             const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
-            if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
+            if (m) {
+                const cleaned = cleanCueText(m[3]);
+                if (cleaned) cues.push({ start: m[1].trim(), end: m[2].trim(), text: cleaned });
+            }
         }
         if (cues.length) return cues;
     }
@@ -68,8 +84,9 @@ function extractCuesUniversal(text) {
         let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
         const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
         if (!tm) continue;
-        const text2 = lines.slice(idx + 1).join('\\N');
-        if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
+        const text2 = lines.slice(idx + 1).join('\n');
+        const cleaned = cleanCueText(text2);
+        if (cleaned) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: cleaned });
     }
     return cues;
 }
@@ -90,7 +107,7 @@ function parseRobustJsonArray(raw, expectedLength) {
                 let txt = String(x || '');
                 // تنظيف الرموز الغريبة دون المساس بالحروف العربية
                 txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                // إصلاح فواصل الأسطر
+                // إصلاح فواصل الأسطر (شبكة أمان لو الموديل رجّع \n أو \N نصياً بدل سطر حقيقي)
                 txt = txt.replace(/\\\\n/gi, '\n')
                          .replace(/\\\\N/g, '\n')
                          .replace(/\\n/gi, '\n')
@@ -159,15 +176,14 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
-3. Keeping the same number of lines and line breaks
-4. Preserving any formatting tags or special characters
-5. Ensuring translations are contextually accurate for film/TV dialogue
-6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-7. Apply professional Arabic subtitling conventions for punctuation as follows:
+3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only. Never represent a line break with digits, letters, or backslash codes (e.g. never output things like "N", "\\N", or a number as a substitute for a line break) — use an actual newline character only.
+4. Ensuring translations are contextually accurate for film/TV dialogue
+5. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
+6. Apply professional Arabic subtitling conventions for punctuation as follows:
    a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
    b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
-   c. When an entire line is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE line in quotation marks from its first word to its last word, e.g. "كل الجملة هنا".
-   d. Do not double-wrap: if a full line is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
+   c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
+   d. Do not double-wrap: if a full entry is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
    e. Never use quotation marks for places/objects and never use parentheses for person names.
 
 Translate to Arabic.
@@ -293,6 +309,8 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
+        // ملاحظة: finalTranslations[idx] ممكن يحتوي على سطر جديد حقيقي لو كان الحوار الأصلي أكثر من سطر،
+        // وده صحيح 100% في ملفات SRT (تنسيق السطور المتعددة الطبيعي هناك).
         srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
     });
     
@@ -319,7 +337,12 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat();
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
+    // في ملفات ASS، السطر Dialogue لازم يبقى سطر واحد فعليًا بالملف،
+    // فأي سطر جديد حقيقي في الترجمة لازم يتحول لتاج \N بدل ما يكسر بنية الملف.
+    const assLines = cues.map((c, idx) => {
+        const safeText = String(finalTranslations[idx] || '').replace(/\r?\n/g, '\\N');
+        return `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`;
+    });
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
