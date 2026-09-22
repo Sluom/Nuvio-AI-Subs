@@ -66,16 +66,29 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\N/g, '\n');
 }
 
+// إزالة أي سطر أصبح فارغًا تمامًا بعد التنظيف (مثلاً سطر كان يحتوي فقط على رمز
+// موسيقى ♪ تم حذفه) بدل أن يُترك كسطر فارغ يُربك موديل الترجمة أو يظهر كعلامة
+// تنصيص معزولة في الناتج النهائي. تُستخدم قبل الترجمة (داخل cleanCueText) وبعدها
+// (كطبقة حماية أخيرة على الناتج المُترجَم)، فهي مشكلة واحدة قد تظهر في أي الجهتين.
+function stripEmptyLines(text) {
+    if (!text) return text;
+    return String(text)
+        .split('\n')
+        .map(line => line.replace(/[ \t]+/g, ' ').trim())
+        .filter(line => line.length > 0)
+        .join('\n');
+}
+
 // تنظيف موحّد لنص أي "cue" قبل إرساله للترجمة:
 // 1) تحويل أي صيغة \N (تاج فواصل الأسطر في ملفات ASS) إلى سطر جديد حقيقي حتى تكون طريقة تمثيل الأسطر المتعددة موحّدة وواضحة لموديل الترجمة (بدل نص وهمي قد يلخبطه).
 // 2) حذف رموز الموسيقى ♪ ♫ من الأصل نفسه بدل الاعتماد فقط على تنظيفها من ناتج الترجمة، لأن الموديل مش محتاج أصلاً يتعامل معها أو "يحافظ عليها".
-// 3) تنظيف الفراغات الزائدة مع الحفاظ على فواصل الأسطر الحقيقية.
+// 3) حذف أي سطر أصبح فارغًا تمامًا بعد إزالة الرمز الموسيقي (بدل تركه فارغًا)، ثم تنظيف الفراغات الزائدة مع الحفاظ على فواصل الأسطر الحقيقية المتبقية.
 function cleanCueText(rawText) {
     if (!rawText) return '';
     let t = String(rawText);
     t = t.replace(/\\N/g, '\n');
     t = t.replace(/[♪♫]/g, '');
-    t = t.split('\n').map(line => line.replace(/[ \t]+/g, ' ').trim()).join('\n').trim();
+    t = stripEmptyLines(t);
     return t;
 }
 
@@ -328,8 +341,9 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     const chunkResults = await runConcurrentPool(tasks, 1); 
     // طبقة حماية أخيرة: مهما كان مصدر الترجمة (نجاح مباشر، أو استخراج احتياطي، أو حتى
     // النص الأصلي غير المترجم عند فشل الاثنين)، أي رمز \n أو \N نصي متبقٍ بالغلط
-    // يتحول هنا لسطر جديد حقيقي قبل إرسال الملف للمستخدم مباشرة.
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+    // يتحول هنا لسطر جديد حقيقي، وأي سطر فارغ ناتج عن ذلك (أو عن أي سبب آخر) يُحذف،
+    // قبل إرسال الملف للمستخدم مباشرة.
+    const finalTranslations = chunkResults.flat().map(t => stripEmptyLines(normalizeLineBreakArtifacts(t)));
 
     let srtOutput = '';
     cues.forEach((c, idx) => {
@@ -369,7 +383,7 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     const chunkResults = await runConcurrentPool(tasks, 1);
     // نفس طبقة الحماية الأخيرة المطبّقة في مسار SRT، قبل تحويل الأسطر الحقيقية إلى \N
     // (تاج ASS الرسمي لفاصل الأسطر داخل حقل Dialogue الواحد).
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+    const finalTranslations = chunkResults.flat().map(t => stripEmptyLines(normalizeLineBreakArtifacts(t)));
     // في ملفات ASS، السطر Dialogue لازم يبقى سطر واحد فعليًا بالملف،
     // فأي سطر جديد حقيقي في الترجمة لازم يتحول لتاج \N بدل ما يكسر بنية الملف.
     const assLines = cues.map((c, idx) => {
@@ -379,4 +393,4 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
-module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
+module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray, stripEmptyLines, cleanCueText };
