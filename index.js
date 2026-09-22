@@ -15,12 +15,13 @@ const PORT = process.env.PORT || 7000;
 const translationCache = {};
 
 // ==========================================
-// 2. الطابور الذكي (Global Queue) للعمل بالخلفية
+// 2. الطابور الذكي (Global Queue) للعمل بالخلفية - يدعم تنفيذ متوازي (concurrency)
 // ==========================================
 class RequestQueue {
-    constructor() {
+    constructor(concurrency = 2) {
         this.queue = [];
-        this.isProcessing = false;
+        this.activeCount = 0;
+        this.concurrency = concurrency;
     }
 
     async add(task) {
@@ -33,28 +34,27 @@ class RequestQueue {
                     reject(e);
                 }
             });
-            if (!this.isProcessing) {
-                this.processNext();
-            }
+            this.processNext();
         });
     }
 
-    async processNext() {
-        if (this.queue.length === 0) {
-            this.isProcessing = false;
-            return;
+    processNext() {
+        // يشغّل مهام جديدة طالما فيه سعة فاضية (حتى عدد الـ concurrency) ومهام في الطابور
+        while (this.activeCount < this.concurrency && this.queue.length > 0) {
+            const task = this.queue.shift();
+            this.activeCount++;
+            Promise.resolve()
+                .then(() => task())
+                .catch(e => console.error("[Queue Error]", e.message))
+                .finally(() => {
+                    this.activeCount--;
+                    this.processNext();
+                });
         }
-        this.isProcessing = true;
-        const task = this.queue.shift();
-        try {
-            await task();
-        } catch (e) {
-            console.error("[Queue Error]", e.message);
-        }
-        this.processNext();
     }
 }
-const globalTranslationQueue = new RequestQueue();
+// طلبين ترجمة يعملوا بالتوازي في نفس الوقت بدل التسلسل الواحد تلو الآخر
+const globalTranslationQueue = new RequestQueue(2);
 
 // ==========================================
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
@@ -386,6 +386,12 @@ app.get(['/', '/configure'], (req, res) => {
             </div>
 
             <button class="btn" onclick="generateInstallLink()">تثبيت الإضافة في Nuvio 🚀</button>
+
+            <div id="test-link-box" style="display:none; margin-top: 20px; padding: 12px; background: #0f172a; border-radius: 8px; border: 1px solid #334155;">
+                <label style="margin-bottom: 8px;">رابط اختبار (JSON) - انسخه للفحص اليدوي بالمفاتيح:</label>
+                <input type="text" id="test-link-input" readonly style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #38bdf8; font-size: 12px; box-sizing: border-box;" onclick="this.select()">
+                <button type="button" class="btn btn-secondary" style="margin-top: 8px; margin-bottom: 0;" onclick="copyTestLink()">نسخ الرابط</button>
+            </div>
         </div>
 
         <script>
@@ -400,7 +406,7 @@ app.get(['/', '/configure'], (req, res) => {
                 container.appendChild(row);
             }
 
-            function generateInstallLink() {
+            function buildConfigStr() {
                 const inputs = document.querySelectorAll('.api-key');
                 let keys = [];
                 inputs.forEach(input => {
@@ -410,16 +416,40 @@ app.get(['/', '/configure'], (req, res) => {
 
                 if(keys.length === 0) {
                     alert('الرجاء إدخال مفتاح API واحد على الأقل!');
-                    return;
+                    return null;
                 }
 
                 const model = document.getElementById('model-select').value;
                 const config = { keys: keys, model: model };
-                const configStr = encodeURIComponent(JSON.stringify(config));
+                return encodeURIComponent(JSON.stringify(config));
+            }
+
+            function generateInstallLink() {
+                const configStr = buildConfigStr();
+                if (!configStr) return;
                 const host = window.location.host;
+
+                // رابط التثبيت المباشر في نوفيو (زي ما كان بالظبط)
                 const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
-                
+
+                // رابط https عادي لنفس الـ config، لعرضه ونسخه يدويًا للفحص (مش بيتنقل ليه تلقائي)
+                const testUrl = window.location.origin + '/' + configStr + '/manifest.json';
+                document.getElementById('test-link-input').value = testUrl;
+                document.getElementById('test-link-box').style.display = 'block';
+
                 window.location.href = installUrl;
+            }
+
+            function copyTestLink() {
+                const input = document.getElementById('test-link-input');
+                if (!input.value) return;
+                input.select();
+                input.setSelectionRange(0, 99999);
+                try {
+                    navigator.clipboard.writeText(input.value);
+                } catch (e) {
+                    document.execCommand('copy');
+                }
             }
         </script>
     </body>
