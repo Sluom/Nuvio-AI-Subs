@@ -151,24 +151,19 @@ async function mapKitsuToImdb(targetId) {
 }
 
 // ==========================================
-// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org (القديم عبر rest.opensubtitles.org)
-//    هذا مصدر منفصل تماماً عن opensubtitles-v3.strem.io المستخدم في SRT،
-//    لأن الأخير بيحول كل شيء لـ SRT تلقائياً قبل ما يوصلنا (proxySrtOrVtt)
-//    وبالتالي مفيش ASS خام هيوصل منه أبداً. rest.opensubtitles.org بيرجع
-//    SubDownloadLink مباشر للملف الأصلي كما هو (srt أو ass أو ssa).
+// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org (القديم)
+//    منقول حرفياً من نسخة سابقة من نفس الإضافة كانت تنجح فعلياً في جلب ASS.
+//    نفس الآلية بالضبط (fetch العادي، sublanguageid=eng فقط، نفس الـ headers)
+//    بدون أي إضافة أو تخمين، وتعمل بالتوازي مع طلب SRT الرئيسي.
 // ==========================================
-function isLegacyAssEntry(entry) {
-    const format = (entry.SubFormat || '').toLowerCase();
-    const fname = (entry.SubFileName || entry.MovieReleaseName || '').toLowerCase();
-    return format === 'ass' || format === 'ssa' || fname.endsWith('.ass') || fname.endsWith('.ssa');
-}
-
-// نفس منطق المطابقة الذكية لرقم الحلقة (لحالة حزم المواسم الكاملة)
-function matchesEpisodeNumber(fileName, targetEpisode) {
+function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
     const name = (fileName || '').toLowerCase();
+
     if (name.includes('.zip') || name.includes('.rar')) return true;
+
     const epStr = parseInt(targetEpisode, 10).toString();
+
     const patterns = [
         new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
         new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
@@ -176,56 +171,146 @@ function matchesEpisodeNumber(fileName, targetEpisode) {
         new RegExp(`\\(0*${epStr}\\)`, 'i'),
         new RegExp(`\\b0*${epStr}\\b`, 'i')
     ];
+
     return patterns.some(p => p.test(name));
 }
 
-async function fetchLegacyAssList(url) {
+async function fetchLegacyData(url) {
     try {
-        const res = await axios.get(url, {
-            timeout: 10000,
+        const response = await fetch(url, {
             headers: {
                 'User-Agent': 'VLSub 0.10.3',
                 'X-User-Agent': 'VLSub 0.10.3',
                 'Accept': 'application/json'
             }
         });
-        const data = res.data;
+
+        if (!response.ok) return [];
+        const data = await response.json();
         if (!Array.isArray(data)) return [];
-        return data
-            .filter(isLegacyAssEntry)
-            .map(entry => ({
-                url: entry.SubDownloadLink,
-                fileName: entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles-ASS'
-            }))
-            .filter(s => !!s.url);
+
+        const results = [];
+        data.forEach(entry => {
+            const downloadLink = entry.SubDownloadLink;
+            if (!downloadLink) return;
+
+            const format = (entry.SubFormat || '').toLowerCase();
+            const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
+            const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
+            const finalExt = isAss ? 'ass' : 'srt';
+
+            results.push({
+                url: downloadLink,
+                lang: 'eng',
+                format: finalExt,
+                ext: finalExt,
+                subFormat: isAss ? 'ssa' : 'srt',
+                fileName: rawName,
+                origName: rawName,
+                _source: 'opensubtitles',
+                _priority: isAss ? 0 : 2
+            });
+        });
+        return results;
     } catch (e) {
-        console.error(`[Legacy ASS Fetch Error] ${e.message}`);
         return [];
     }
 }
 
-// يرجع مصفوفة ملفات ASS/SSA خام (بدون أي تحويل) بلغات المصدر المطلوبة
-async function fetchOriginalAssSubs(imdbId, season, episode) {
+async function fetchLegacyApiEnglish(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
-    // نفس اللغات المصدر المستخدمة في مسار SRT: انجليزي، ياباني، تركي، فارسي، روسي، كوري، فرنسي، اسباني
-    const srcLangs = 'eng,jpn,tur,per,rus,kor,fre,spa';
 
-    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-${srcLangs}`;
-    if (season != null && episode != null && !isNaN(season) && !isNaN(episode)) {
-        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-${srcLangs}`;
+    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+    if (season != null && episode != null) {
+        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
     }
 
-    let results = await fetchLegacyAssList(primaryUrl);
+    let results = await fetchLegacyData(primaryUrl);
 
-    // لو مفيش ASS للحلقة بالضبط، جرب حزمة الموسم الكاملة وفلتر برقم الحلقة (نفس فكرة matchEpisode)
-    if (results.length === 0 && season != null && episode != null && !isNaN(season) && !isNaN(episode)) {
-        const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-${srcLangs}`;
-        const fallbackResults = await fetchLegacyAssList(fallbackUrl);
-        results = fallbackResults.filter(r => matchesEpisodeNumber(r.fileName, episode));
+    if (season != null && episode != null) {
+        const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
+
+        if (!hasAss) {
+            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+            const fallbackResults = await fetchLegacyData(fallbackUrl);
+
+            const filteredFallback = fallbackResults.filter(r => {
+                if (r.format !== 'ass' && r.format !== 'ssa') return false;
+                return matchEpisode(r.fileName, episode);
+            });
+
+            results = [...results, ...filteredFallback];
+        }
     }
-
     return results;
+}
+
+async function fetchMirrorEnglish(imdbId, season, episode, type) {
+    if (!imdbId || !imdbId.startsWith('tt')) return [];
+
+    try {
+        const isSeries = type === 'series' || type === 'anime' || !!season;
+        const mediaType = isSeries ? 'series' : 'movie';
+        const mTargetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+
+        const url = `https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${mTargetId}.json`;
+        const response = await fetch(url, { headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' } });
+        if (!response.ok) return [];
+        const data = await response.json();
+        const list = data.subtitles || [];
+
+        return list
+            .filter(s => {
+                const lang = (s.lang || '').toLowerCase();
+                return (lang === 'eng' || lang === 'en' || lang.startsWith('en')) && s.url;
+            })
+            .map(s => {
+                const rawUrl = (s.url || '').toLowerCase();
+                const rawName = (s.SubFileName || s.title || s.name || '').toLowerCase();
+                const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
+
+                const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
+                const format = isAss ? 'ass' : 'srt';
+
+                return {
+                    url: s.url,
+                    lang: 'eng',
+                    format: format,
+                    ext: format,
+                    subFormat: isAss ? 'ssa' : 'srt',
+                    fileName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
+                    origName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
+                    _source: 'opensubtitles',
+                    _priority: isAss ? 0 : 2
+                };
+            });
+    } catch (e) {
+        return [];
+    }
+}
+
+async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
+    const tasks = [];
+    tasks.push(fetchLegacyApiEnglish(imdbId, season, episode));
+    tasks.push(fetchMirrorEnglish(imdbId, season, episode, type));
+
+    const settled = await Promise.allSettled(tasks);
+    const allSubs = settled
+        .filter(r => r.status === 'fulfilled')
+        .flatMap(r => r.value)
+        .filter(s => s && s.url);
+
+    const uniqueSubs = [];
+    const seenUrls = new Set();
+
+    for (const sub of allSubs) {
+        const cleanUrl = sub.url.split('?')[0];
+        if (seenUrls.has(cleanUrl)) continue;
+        seenUrls.add(cleanUrl);
+        uniqueSubs.push(sub);
+    }
+    return uniqueSubs;
 }
 
 // ==========================================
@@ -235,7 +320,7 @@ const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
     version: '1.9.1',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 6 SRT tracks + 3 ASS tracks.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -399,13 +484,33 @@ app.get([
         }
         // ==========================================================
 
-        // جلب الترجمة من المحرك الأساسي والموثوق
+        // === تجهيز imdbId/season/episode لاستخدامها في جلب ASS بالتوازي مع طلب SRT ===
+        let assImdbId = null, assSeason = null, assEpisode = null;
+        const idParts = finalTargetId.split(':');
+        if (idParts[0] && idParts[0].startsWith('tt')) {
+            assImdbId = idParts[0];
+            if (idParts.length >= 3) {
+                assSeason = idParts[1];
+                assEpisode = idParts[2];
+            }
+        }
+
+        // جلب الترجمة من المحرك الأساسي والموثوق (SRT) وجلب ASS الأصلي من OpenSubtitles.org
+        // القديم - الاثنان بالتوازي في نفس الوقت (Promise.all) لتقليل زمن الاستجابة
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
-        
-        const r = await axios.get(osUrl, { timeout: 10000 });
+
+        const [r, assResults] = await Promise.all([
+            axios.get(osUrl, { timeout: 10000 }),
+            getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType })
+                .catch(() => [])
+        ]);
+
         if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
+
+        const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
+        console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId}`);
 
         if (subtitlesData.length > 0) {
             
@@ -453,33 +558,20 @@ app.get([
                 }
             }
 
-            // === جديد: جلب ASS/SSA الأصلي حصراً من rest.opensubtitles.org (مصدر خام حقيقي)
-            //     وليس من opensubtitles-v3.strem.io لأنه بيحول كل شيء لـ SRT دايماً ===
-            let assImdbId = null, assSeason = null, assEpisode = null;
-            const idParts = finalTargetId.split(':');
-            if (idParts[0] && idParts[0].startsWith('tt')) {
-                assImdbId = idParts[0];
-                if (idParts.length >= 3) {
-                    assSeason = parseInt(idParts[1], 10);
-                    assEpisode = parseInt(idParts[2], 10);
-                }
-            }
-
-            const assResults = await fetchOriginalAssSubs(assImdbId, assSeason, assEpisode);
-
-            if (assResults.length > 0) {
-                for (let i = 0; i < 3; i++) {
-                    const sub = assResults[i] || assResults[assResults.length - 1]; // تكرار الأخير إذا العدد أقل من 3
+            // إضافة روابط ASS (حتى 4) من نتيجة OpenSubtitles.org القديم اللي جُلبت بالتوازي فوق
+            if (assOnly.length > 0) {
+                const maxAss = Math.min(4, assOnly.length);
+                for (let i = 0; i < maxAss; i++) {
                     transSubs.push({
                         id: `nuvio-ai-ass-${i+1}`,
-                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
+                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}`,
                         lang: 'ara',
                         title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                     });
                 }
-                console.log(`[Fetch] Added 3 ASS track(s) from ${assResults.length} original ASS source(s) via rest.opensubtitles.org for ${finalTargetId}`);
+                console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
             } else {
-                console.log(`[Fetch] No original ASS/SSA found via rest.opensubtitles.org for ${finalTargetId} - skipping ASS tracks`);
+                console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
             }
 
             return res.json({ subtitles: transSubs });
