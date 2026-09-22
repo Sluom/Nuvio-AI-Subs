@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrt } = require('./ai');
+const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 const app = express();
 app.use(cors());
@@ -157,7 +157,7 @@ const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
     version: '1.9.1',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 6 SRT tracks.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, 6 SRT tracks + 3 ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -279,7 +279,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات (SRT حصراً مع دعم لغات متعددة)
+// مسار جلب الترجمات (SRT + ASS مع دعم لغات متعددة)
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -351,17 +351,25 @@ app.get([
                 return res.json({ subtitles: [] });
             }
 
-            // الفرز لإبقاء SRT واستبعاد أي ملف ASS
+            // الفرز لإبقاء SRT واستبعاد أي ملف ASS (هذا الفرع يبقى كما هو تماماً - لا تعديل)
             const srtSubs = cleanSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
                 return !fname.endsWith('.ass') && !fname.endsWith('.ssa') && !url.includes('.ass') && !url.includes('.ssa');
             });
 
+            // === جديد: فرز مستقل لالتقاط ملفات ASS/SSA الأصلية (بدون أي تحويل) ===
+            const assSubs = cleanSubs.filter(s => {
+                const fname = (s.subtitleFileName || '').toLowerCase();
+                const url = (s.url || '').toLowerCase();
+                return fname.endsWith('.ass') || fname.endsWith('.ssa') || url.includes('.ass') || url.includes('.ssa');
+            });
+
             const transSubs = [];
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
+            const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
-            // إضافة 6 روابط SRT
+            // إضافة 6 روابط SRT (بدون أي تغيير)
             if (srtSubs.length > 0) {
                 for (let i = 0; i < 6; i++) {
                     const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
@@ -372,6 +380,22 @@ app.get([
                         title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
                     });
                 }
+            }
+
+            // === جديد: إضافة 3 روابط ASS فقط إذا وُجد مصدر ASS أصلي - بدون أي fallback من SRT ===
+            if (assSubs.length > 0) {
+                for (let i = 0; i < 3; i++) {
+                    const sub = assSubs[i] || assSubs[assSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 3
+                    transSubs.push({
+                        id: `nuvio-ai-ass-${i+1}`,
+                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
+                        lang: 'ara',
+                        title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                    });
+                }
+                console.log(`[Fetch] Added 3 ASS track(s) from ${assSubs.length} original ASS source(s) for ${finalTargetId}`);
+            } else {
+                console.log(`[Fetch] No original ASS/SSA source found for ${finalTargetId} - skipping ASS tracks (no SRT->ASS conversion)`);
             }
 
             return res.json({ subtitles: transSubs });
@@ -430,6 +454,59 @@ app.all([
 
     res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
     res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-SRT.srt"`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(fakeSub);
+});
+
+// === جديد: مسار بث ترجمات ASS مترجمة - نفس منطق SRT تماماً لكن بدون أي تحويل نوع ===
+app.all([
+    '/stream-ai.ass', '/:config/stream-ai.ass'
+], async (req, res) => {
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+
+    const targetUrl = req.query.url;
+    const trackNum = req.query.track || '1';
+    if (!targetUrl) return res.status(400).send('Missing URL');
+
+    // مفتاح كاش منفصل تماماً عن SRT حتى لو كان نفس الرابط الأصلي بالمصادفة
+    const cacheKey = `ASS_${targetUrl}`;
+
+    if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
+        res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+        res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-ASS.ass"`);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return res.send(translationCache[cacheKey].content);
+    }
+
+    let userKeys = [];
+    let userModel = 'gemini-3.1-flash-lite';
+    if (req.params.config) {
+        try {
+            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
+            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
+            if (decodedConfig.model) userModel = decodedConfig.model;
+        } catch (e) { }
+    }
+
+    if (!translationCache[cacheKey]) {
+        translationCache[cacheKey] = { status: 'pending' };
+
+        globalTranslationQueue.add(async () => {
+            try {
+                const finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
+                translationCache[cacheKey] = { status: 'done', content: finalContent };
+            } catch (e) {
+                console.error(`[Background Error - ASS] Track ${trackNum}:`, e.message);
+                const errorSub = `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`;
+                translationCache[cacheKey] = { status: 'done', content: errorSub };
+            }
+        });
+    }
+
+    const fakeSub = `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.`;
+
+    res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+    res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-ASS.ass"`);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(fakeSub);
 });
