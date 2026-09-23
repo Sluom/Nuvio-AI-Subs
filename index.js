@@ -1,4 +1,4 @@
-const express = require('express');
+Const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 7000;
 const translationCache = {};
 
 // ==========================================
-// 2. الطابور الذكي (Global Queue) للعمل بالخلفية
+// 2. الطابور الذكي (Global Queue) للعمل بالخلفية - يدعم تنفيذ متوازي (concurrency)
 // ==========================================
 class RequestQueue {
     constructor(concurrency = 2) {
@@ -39,6 +39,7 @@ class RequestQueue {
     }
 
     processNext() {
+        // يشغّل مهام جديدة طالما فيه سعة فاضية (حتى عدد الـ concurrency) ومهام في الطابور
         while (this.activeCount < this.concurrency && this.queue.length > 0) {
             const task = this.queue.shift();
             this.activeCount++;
@@ -52,14 +53,19 @@ class RequestQueue {
         }
     }
 }
+// طابور الملفات: ملف واحد بيشتغل عليه كل المفاتيح مع بعض بالتوازي (جوه ai.js)
+// لحد ما يخلص، وبعدين يجيله اللي بعده فورًا - ده أسرع من تقسيم المفاتيح
+// المحدودة على أكتر من ملف في نفس الوقت
 const globalTranslationQueue = new RequestQueue(1);
 
 // ==========================================
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
+//    الطريقة 1: خدمة ARM   |   الطريقة 2 (احتياطية): إضافة Kitsu القديمة
 // ==========================================
 const armCache = new Map();
-const ARM_CACHE_TTL = 24 * 60 * 60 * 1000;
+const ARM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 ساعة
 
+// الطريقة 1: خدمة ARM (arm.haglund.dev)
 async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const cached = armCache.get(kitsuId);
     let data;
@@ -73,6 +79,7 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' }
         });
         data = r.data;
+        // نخزن فقط النتائج المفيدة (التي فيها رقم IMDb)
         if (data && data.imdb) armCache.set(kitsuId, { time: Date.now(), data });
     }
 
@@ -81,6 +88,7 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const imdbId = Array.isArray(data.imdb) ? data.imdb[0] : data.imdb;
     if (!imdbId) return null;
 
+    // الموسم: إن لم تُرجع الخدمة موسماً (مثل ون بيس) نستخدم 1
     let season = data['thetvdb-season'];
     if (season === null || season === undefined) season = data['themoviedb-season'];
     if (season === null || season === undefined) season = 1;
@@ -88,6 +96,7 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     return `${imdbId}:${season}:${kitsuEp}`;
 }
 
+// الطريقة 2 (احتياطية): إضافة Kitsu القديمة
 async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     const kitsuMetaUrl = `https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`;
     const metaRes = await axios.get(kitsuMetaUrl, {
@@ -107,6 +116,7 @@ async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     return null;
 }
 
+// الدالة الرئيسية: تجرّب الطريقة 1 ثم 2، وترجع null إذا فشلتا
 async function mapKitsuToImdb(targetId) {
     const parts = targetId.split(':');
     if (parts.length !== 3) return null;
@@ -123,6 +133,7 @@ async function mapKitsuToImdb(targetId) {
             console.log(`[Anime Mapper] ARM mapped ${targetId} -> ${viaArm}`);
             return viaArm;
         }
+        console.log(`[Anime Mapper] ARM returned no IMDb match for ${targetId}`);
     } catch (err) {
         console.error(`[Anime Mapper] ARM failed for ${targetId} - ${err.message}`);
     }
@@ -133,6 +144,7 @@ async function mapKitsuToImdb(targetId) {
             console.log(`[Anime Mapper] Kitsu addon mapped ${targetId} -> ${viaKitsu}`);
             return viaKitsu;
         }
+        console.log(`[Anime Mapper] Kitsu addon returned no IMDb match for ${targetId}`);
     } catch (err) {
         console.error(`[Anime Mapper] Kitsu addon failed for ${targetId} - ${err.message}`);
     }
@@ -141,13 +153,19 @@ async function mapKitsuToImdb(targetId) {
 }
 
 // ==========================================
-// 4. جلب ترجمات ASS/SSA الأصلية بجميع اللغات
+// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org (القديم)
+//    منقول حرفياً من نسخة سابقة من نفس الإضافة كانت تنجح فعلياً في جلب ASS.
+//    نفس الآلية بالضبط (fetch العادي، sublanguageid=eng فقط، نفس الـ headers)
+//    بدون أي إضافة أو تخمين، وتعمل بالتوازي مع طلب SRT الرئيسي.
 // ==========================================
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
     const name = (fileName || '').toLowerCase();
+
     if (name.includes('.zip') || name.includes('.rar')) return true;
+
     const epStr = parseInt(targetEpisode, 10).toString();
+
     const patterns = [
         new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
         new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
@@ -155,6 +173,7 @@ function matchEpisode(fileName, targetEpisode) {
         new RegExp(`\\(0*${epStr}\\)`, 'i'),
         new RegExp(`\\b0*${epStr}\\b`, 'i')
     ];
+
     return patterns.some(p => p.test(name));
 }
 
@@ -184,7 +203,7 @@ async function fetchLegacyData(url) {
 
             results.push({
                 url: downloadLink,
-                lang: 'multi', // اللغة غير مهمة هنا لأن الفلتر الرئيسي سيعمل لاحقاً
+                lang: 'eng',
                 format: finalExt,
                 ext: finalExt,
                 subFormat: isAss ? 'ssa' : 'srt',
@@ -200,14 +219,13 @@ async function fetchLegacyData(url) {
     }
 }
 
-async function fetchLegacyApiAss(imdbId, season, episode) {
+async function fetchLegacyApiEnglish(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
 
-    // تغيير sublanguageid-eng إلى sublanguageid-all لجلب كل اللغات
-    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-all`;
+    let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
     if (season != null && episode != null) {
-        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-all`;
+        primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`;
     }
 
     let results = await fetchLegacyData(primaryUrl);
@@ -216,7 +234,7 @@ async function fetchLegacyApiAss(imdbId, season, episode) {
         const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
 
         if (!hasAss) {
-            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-all`;
+            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
             const fallbackResults = await fetchLegacyData(fallbackUrl);
 
             const filteredFallback = fallbackResults.filter(r => {
@@ -230,7 +248,7 @@ async function fetchLegacyApiAss(imdbId, season, episode) {
     return results;
 }
 
-async function fetchMirrorAss(imdbId, season, episode, type) {
+async function fetchMirrorEnglish(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
 
     try {
@@ -244,17 +262,10 @@ async function fetchMirrorAss(imdbId, season, episode, type) {
         const data = await response.json();
         const list = data.subtitles || [];
 
-        // قائمة اللغات الشاملة لمرآة OpenSubtitles
-        const allowedLangs = [
-            'en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 
-            'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa',
-            'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs'
-        ];
-
         return list
             .filter(s => {
                 const lang = (s.lang || '').toLowerCase();
-                return allowedLangs.some(l => lang === l || lang.startsWith(l)) && s.url;
+                return (lang === 'eng' || lang === 'en' || lang.startsWith('en')) && s.url;
             })
             .map(s => {
                 const rawUrl = (s.url || '').toLowerCase();
@@ -266,7 +277,7 @@ async function fetchMirrorAss(imdbId, season, episode, type) {
 
                 return {
                     url: s.url,
-                    lang: s.lang || 'multi',
+                    lang: 'eng',
                     format: format,
                     ext: format,
                     subFormat: isAss ? 'ssa' : 'srt',
@@ -281,10 +292,10 @@ async function fetchMirrorAss(imdbId, season, episode, type) {
     }
 }
 
-async function getOpenSubtitlesAss({ imdbId, season, episode, type }) {
+async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
     const tasks = [];
-    tasks.push(fetchLegacyApiAss(imdbId, season, episode));
-    tasks.push(fetchMirrorAss(imdbId, season, episode, type));
+    tasks.push(fetchLegacyApiEnglish(imdbId, season, episode));
+    tasks.push(fetchMirrorEnglish(imdbId, season, episode, type));
 
     const settled = await Promise.allSettled(tasks);
     const allSubs = settled
@@ -309,9 +320,9 @@ async function getOpenSubtitlesAss({ imdbId, season, episode, type }) {
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.2',
+    version: '1.9.1',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using Gemini. Multi-language fallback support.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -420,9 +431,11 @@ app.get(['/', '/configure'], (req, res) => {
                 if (!configStr) return;
                 const host = window.location.host;
 
+                // رابط التثبيت المباشر في نوفيو (زي ما كان بالظبط)
                 const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
+
+                // رابط https عادي لنفس الـ config، لعرضه ونسخه يدويًا للفحص (مش بيتنقل ليه تلقائي)
                 const testUrl = window.location.origin + '/' + configStr + '/manifest.json';
-                
                 document.getElementById('test-link-input').value = testUrl;
                 document.getElementById('test-link-box').style.display = 'block';
 
@@ -461,7 +474,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات (دعم شامل للغات المتعددة)
+// مسار جلب الترجمات (SRT + ASS مع دعم لغات متعددة)
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -471,6 +484,9 @@ app.get([
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
+    // Express بيفك تشفير req.params.config تلقائيًا (decodeURIComponent)، فلازم نرجّع نشفّره
+    // تاني قبل ما نحطه جوه روابط stream-ai.srt/ass، وإلا الرابط الناتج بيطلع فيه
+    // أحرف JSON خام ({ " : ,) غير مشفّرة وبيبقى رابط مكسور
     const configParamRaw = req.params.config || '';
     const configParam = configParamRaw ? encodeURIComponent(configParamRaw) : '';
     
@@ -485,18 +501,26 @@ app.get([
         let finalTargetId = targetId;
         let finalType = type;
 
+        // === دعم الأنمي: تحويل معرّف Kitsu إلى معرّف IMDb (ARM أولاً ثم الطريقة القديمة) ===
         if (targetId.startsWith('kitsu')) {
             const mapped = await mapKitsuToImdb(targetId);
             if (mapped) {
                 finalTargetId = mapped;
                 finalType = 'series';
+                console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
+            } else {
+                console.log(`[Anime Mapper] No mapping found for ${targetId}, using it as-is.`);
             }
         }
 
+        // === توحيد النوع: OpenSubtitles يعرف movie و series فقط ===
+        // إذا وصل معرّف tt بنوع anime أو other نحوّله للنوع الصحيح
         if (/^tt\d+/.test(finalTargetId) && finalType !== 'movie' && finalType !== 'series') {
             finalType = finalTargetId.includes(':') ? 'series' : 'movie';
         }
+        // ==========================================================
 
+        // === تجهيز imdbId/season/episode لاستخدامها في جلب ASS بالتوازي مع طلب SRT ===
         let assImdbId = null, assSeason = null, assEpisode = null;
         const idParts = finalTargetId.split(':');
         if (idParts[0] && idParts[0].startsWith('tt')) {
@@ -507,12 +531,14 @@ app.get([
             }
         }
 
+        // جلب الترجمة من المحرك الأساسي والموثوق (SRT) وجلب ASS الأصلي من OpenSubtitles.org
+        // القديم - الاثنان بالتوازي في نفس الوقت (Promise.all) لتقليل زمن الاستجابة
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
 
         const [r, assResults] = await Promise.all([
             axios.get(osUrl, { timeout: 10000 }),
-            getOpenSubtitlesAss({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType })
+            getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType })
                 .catch(() => [])
         ]);
 
@@ -524,26 +550,15 @@ app.get([
 
         if (subtitlesData.length > 0) {
             
-            // إضافة جميع اللغات: الانجليزية وباقي اللغات كاحتياط (من ضمنها الروسية، الهندية، البرتغالية، والصينية)
-            const targetLangs = [
-                'en', 'eng', 
-                'ja', 'jpn', 'jap', 
-                'tr', 'tur', 
-                'fa', 'per', 'fas', 
-                'ru', 'rus', 
-                'ko', 'kor', 
-                'fr', 'fre', 'fra', 
-                'es', 'spa',
-                'hi', 'hin',          // هندي
-                'pt', 'por', 'pob', 'pb', 'pt-br', // برتغالي
-                'zh', 'zho', 'chi', 'cht', 'chs'   // صيني
-            ];
+            // إضافة اللغات المطلوبة: انجليزي، ياباني، تركي، فارسي، روسي، كوري، فرنسي، اسباني
+            const targetLangs = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa',​'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
             
             const validSubs = subtitlesData.filter(s => {
                 const lang = (s.lang || '').toLowerCase();
                 return targetLangs.some(l => lang === l || lang.startsWith(l));
             });
             
+            // استبعاد SDH مطلقاً ونهائياً
             const cleanSubs = validSubs.filter(sub => {
                 const title = (sub.title || '').toLowerCase();
                 const idStr = (sub.id || '').toLowerCase();
@@ -555,6 +570,7 @@ app.get([
                 return res.json({ subtitles: [] });
             }
 
+            // الفرز لإبقاء SRT واستبعاد أي ملف ASS (هذا الفرع يبقى كما هو تماماً - لا تعديل)
             const srtSubs = cleanSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
@@ -565,9 +581,10 @@ app.get([
             const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
             const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
             
+            // إضافة 6 روابط SRT (بدون أي تغيير)
             if (srtSubs.length > 0) {
                 for (let i = 0; i < 6; i++) {
-                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; 
+                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
                     transSubs.push({
                         id: `nuvio-ai-srt-${i+1}`,
                         url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
@@ -577,6 +594,7 @@ app.get([
                 }
             }
 
+            // إضافة روابط ASS (حتى 4) من نتيجة OpenSubtitles.org القديم اللي جُلبت بالتوازي فوق
             if (assOnly.length > 0) {
                 const maxAss = Math.min(4, assOnly.length);
                 for (let i = 0; i < maxAss; i++) {
@@ -587,6 +605,9 @@ app.get([
                         title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                     });
                 }
+                console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
+            } else {
+                console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
             }
 
             return res.json({ subtitles: transSubs });
@@ -649,6 +670,7 @@ app.all([
     res.send(fakeSub);
 });
 
+// === جديد: مسار بث ترجمات ASS مترجمة - نفس منطق SRT تماماً لكن بدون أي تحويل نوع ===
 app.all([
     '/stream-ai.ass', '/:config/stream-ai.ass'
 ], async (req, res) => {
@@ -658,6 +680,7 @@ app.all([
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
+    // مفتاح كاش منفصل تماماً عن SRT حتى لو كان نفس الرابط الأصلي بالمصادفة
     const cacheKey = `ASS_${targetUrl}`;
 
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
