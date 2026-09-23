@@ -72,7 +72,7 @@ function extractCuesUniversal(text) {
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
-}
+
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     let text = String(txt)
@@ -82,21 +82,15 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\n/gi, '\n')
         .replace(/\\N/g, '\n');
 
-    // الحل البرمجي الجذري: 
-    // تخطي أكواد التنسيق، التقاط الشارحة والاقتباس بأي ترتيب، وإجبارها على التنسيق: - "
+    // 1. ترتيب الشارحة والاقتباس (حتى لو قبلها كود تنسيق) لتكون: - "
     text = text.replace(/^((?:<[^>]+>|\{[^}]+\})*\s*)(?:["”]\s*-\s*|-\s*["”]\s*)/gm, '$1- "');
-function preventFalseDialogueSplit(text) {
-    if (!text) return text;
-    // نضيف Zero Width Non-Joiner (U+200C) قبل أي شرطة بأول السطر
-    // عشان نمنع أي فحص بالتطبيق يدور على "أول حرف = شرطة"
-    return text.replace(/^-/gm, '\u200C-');
-}
 
-module.exports = { preventFalseDialogueSplit };
+    // 2. الخدعة السحرية (Zero Width Non-Joiner) لتعطيل انهيار ExoPlayer
+    // نضع الرمز المخفي (\u200C) قبل الشارحة مباشرة لنمنع المشغل من اكتشافها
+    text = text.replace(/^((?:<[^>]+>|\{[^}]+\})*\s*)-/gm, '$1\u200C-');
+
     return text;
 }
-
-
 
 
 
