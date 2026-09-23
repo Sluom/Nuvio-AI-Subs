@@ -186,8 +186,7 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
 4. Preserving any formatting tags or special characters
 5. Ensuring translations are contextually accurate for film/TV dialogue
-6. Detect and COMPLETELY REMOVE any SDH (Subtitles for the Deaf and Hard of Hearing) tags, such as sound effects, actions, or speaker names enclosed in brackets [] or parentheses (). Do not translate them and do not include them in the final Arabic output.
-
+6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
 7. Apply professional Arabic subtitling conventions for punctuation as follows:
    a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
    b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
