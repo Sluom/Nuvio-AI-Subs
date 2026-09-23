@@ -357,5 +357,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
+}
 
 module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
