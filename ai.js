@@ -76,16 +76,19 @@ function extractCuesUniversal(text) {
 
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
-    return String(txt)
-        .replace(/\\"/g, '"')       // مسح السلاش المزعج
+    let text = String(txt)
+        .replace(/\\"/g, '"')       
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
-        .replace(/\\N/g, '\n')
-        // [التعديل الجديد]: إصلاح تداخل الشارحة مع الاقتباس في بداية الأسطر للـ Voice-over
-        .replace(/^["”]\s*-\s*/gm, '- "')
-        .replace(/^-\s*["”]\s*/gm, '- "');
+        .replace(/\\N/g, '\n');
+
+    // التعديل الحالي فقط: اكتشاف السطر اللي يبدأ بشارحة واقتباس (بأي ترتيب) وتغليفه بالمحرف المخفي
+    text = text.replace(/^((?:-\s*["”]|["”]\s*-).*)$/gm, '\u200F$1\u200F');
+
+    return text;
 }
+
 
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
