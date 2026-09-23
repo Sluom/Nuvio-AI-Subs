@@ -85,7 +85,14 @@ function normalizeLineBreakArtifacts(txt) {
     // الحل البرمجي الجذري: 
     // تخطي أكواد التنسيق، التقاط الشارحة والاقتباس بأي ترتيب، وإجبارها على التنسيق: - "
     text = text.replace(/^((?:<[^>]+>|\{[^}]+\})*\s*)(?:["”]\s*-\s*|-\s*["”]\s*)/gm, '$1- "');
+function preventFalseDialogueSplit(text) {
+    if (!text) return text;
+    // نضيف Zero Width Non-Joiner (U+200C) قبل أي شرطة بأول السطر
+    // عشان نمنع أي فحص بالتطبيق يدور على "أول حرف = شرطة"
+    return text.replace(/^-/gm, '\u200C-');
+}
 
+module.exports = { preventFalseDialogueSplit };
     return text;
 }
 
