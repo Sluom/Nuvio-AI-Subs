@@ -72,6 +72,7 @@ function extractCuesUniversal(text) {
         if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
     }
     return cues;
+}
 
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
@@ -91,8 +92,6 @@ function normalizeLineBreakArtifacts(txt) {
 
     return text;
 }
-
-
 
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
@@ -356,7 +355,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     });
     
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
-}
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
