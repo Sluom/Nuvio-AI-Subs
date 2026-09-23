@@ -91,7 +91,7 @@ function normalizeLineBreakArtifacts(txt) {
     return text;
 }
 
-}
+
 
 
 function parseRobustJsonArray(raw, expectedLength) {
