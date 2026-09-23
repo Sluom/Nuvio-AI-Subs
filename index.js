@@ -53,8 +53,10 @@ class RequestQueue {
         }
     }
 }
-// طلبين ترجمة يعملوا بالتوازي في نفس الوقت بدل التسلسل الواحد تلو الآخر
-const globalTranslationQueue = new RequestQueue(2);
+// طابور الملفات: ملف واحد بيشتغل عليه كل المفاتيح مع بعض بالتوازي (جوه ai.js)
+// لحد ما يخلص، وبعدين يجيله اللي بعده فورًا - ده أسرع من تقسيم المفاتيح
+// المحدودة على أكتر من ملف في نفس الوقت
+const globalTranslationQueue = new RequestQueue(1);
 
 // ==========================================
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
@@ -482,7 +484,11 @@ app.get([
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    const configParam = req.params.config || '';
+    // Express بيفك تشفير req.params.config تلقائيًا (decodeURIComponent)، فلازم نرجّع نشفّره
+    // تاني قبل ما نحطه جوه روابط stream-ai.srt/ass، وإلا الرابط الناتج بيطلع فيه
+    // أحرف JSON خام ({ " : ,) غير مشفّرة وبيبقى رابط مكسور
+    const configParamRaw = req.params.config || '';
+    const configParam = configParamRaw ? encodeURIComponent(configParamRaw) : '';
     
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
