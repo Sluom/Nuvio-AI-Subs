@@ -74,15 +74,17 @@ function extractCuesUniversal(text) {
     return cues;
 }
 
-// [التعديل الأول]: معالجة السلاش وإزالته من علامات الاقتباس
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     return String(txt)
-        .replace(/\\"/g, '"')       // <--- التعديل: مسح السلاش المزعج
+        .replace(/\\"/g, '"')       // مسح السلاش المزعج
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
-        .replace(/\\N/g, '\n');
+        .replace(/\\N/g, '\n')
+        // [التعديل الجديد]: إصلاح تداخل الشارحة مع الاقتباس في بداية الأسطر للـ Voice-over
+        .replace(/^["”]\s*-\s*/gm, '- "')
+        .replace(/^-\s*["”]\s*/gm, '- "');
 }
 
 function parseRobustJsonArray(raw, expectedLength) {
@@ -99,9 +101,9 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // [التعديل الثاني]: إبقاء الرموز السليمة وإصلاح المضروبة فقط
+                // إبقاء الرموز السليمة وإصلاح المضروبة فقط
                 txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                // إصلاح فواصل الأسطر وعلامات الاقتباس
+                // إصلاح فواصل الأسطر وعلامات الاقتباس والشارحة
                 txt = normalizeLineBreakArtifacts(txt);
                 return txt.trim();
             });
@@ -341,7 +343,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
     
-    // [التعديل الثالث]: إعادة النزول الحقيقي لرمز ASS المعتمد \N
     const assLines = cues.map((c, idx) => {
         const safeText = finalTranslations[idx].replace(/\n/g, '\\N');
         return `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`;
