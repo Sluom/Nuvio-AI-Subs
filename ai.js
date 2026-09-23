@@ -29,8 +29,6 @@ function fixArabicEncoding(buffer) {
     }
     const utf8Text = buffer.toString('utf-8');
     // [إصلاح حرف الهاء] لو الملف أصلاً UTF-8 سليم (سواء فيه عربي أو لأ) نرجعه زي ما هو فورًا.
-    // ده بيمنع رموز زي ♪ من التلف عن طريق الخطأ لما يتفكوا بترميز windows-1256 غلط،
-    // لأن أول بايت من رمز ♪ (0xE2) كان بيتفك كحرف عربي وحيد فيخدع الشرط القديم.
     if (!utf8Text.includes('\uFFFD')) return buffer;
     if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
     try {
@@ -76,13 +74,11 @@ function extractCuesUniversal(text) {
     return cues;
 }
 
-// [إصلاح حرف N] نفس سلسلة التطبيع اللي كانت موجودة أصلاً في مسار النجاح بس،
-// اتحولت لدالة واحدة مشتركة عشان نقدر نطبّقها في المسار الاحتياطي (catch) كمان،
-// اللي كان العيب الحقيقي فيه: كان بيرجّع النص الخام زي ما هو من غير أي تطبيع،
-// فحرف N كان بيهرب بالظبط من هنا. لا علاقة لها بمعالجة رمز الموسيقى إطلاقًا.
+// [التعديل الأول]: معالجة السلاش وإزالته من علامات الاقتباس
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     return String(txt)
+        .replace(/\\"/g, '"')       // <--- التعديل: مسح السلاش المزعج
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
@@ -103,22 +99,25 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // تنظيف الرموز الغريبة دون المساس بالحروف العربية
-                txt = txt.replace(/[♪♫]/g, '').replace(/âTM./gi, '').replace(/â™ª/gi, '');
-                // إصلاح فواصل الأسطر
+                // [التعديل الثاني]: إبقاء الرموز السليمة وإصلاح المضروبة فقط
+                txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
+                // إصلاح فواصل الأسطر وعلامات الاقتباس
                 txt = normalizeLineBreakArtifacts(txt);
                 return txt.trim();
             });
         }
 
     } catch (e) {
-        // [إصلاح حرف N] المسار الاحتياطي: هنا بالظبط كان حرف N بيهرب من غير معالجة في
-        // الكود القديم. بنطبّق نفس تطبيع فواصل الأسطر اللي بيتطبق في مسار النجاح فوق.
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         if (stringMatches.length >= expectedLength * 0.5) {
             return stringMatches
                 .filter(s => s !== 'translations' && s !== 'data')
-                .map(s => normalizeLineBreakArtifacts(s).trim());
+                .map(s => {
+                    let text = normalizeLineBreakArtifacts(s);
+                    // تطبيق نفس إصلاح الموسيقى على المسار الاحتياطي
+                    text = text.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
+                    return text.trim();
+                });
         }
     }
     return null;
@@ -126,12 +125,6 @@ function parseRobustJsonArray(raw, expectedLength) {
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// ==========================================
-// مجمع تنفيذ متوازي (Concurrent Pool): بيشغّل كل الـ chunks بتاعة نفس الملف
-// مع بعض في نفس الوقت، بحد أقصى = limit (بنبعتلها عدد المفاتيح المتاحة فعليًا،
-// بدون أي سقف ثابت مكتوب في الكود - لو المستخدم زوّد مفاتيحه لـ 15 أو 20،
-// العدد بيتحدد تلقائيًا من طول المصفوفة اللي بعتها هو، مفيش رقم مقفول هنا).
-// ==========================================
 async function runConcurrentPool(tasks, limit = 1) {
     const results = new Array(tasks.length);
     let index = 0;
@@ -249,8 +242,6 @@ ${JSON.stringify(texts)}`;
                 return null;
             }
 
-            // إعادة المحاولة بعد تأخير تصاعدي (3s, 6s, 12s, 24s) بمفتاح تاني من الطابور،
-            // ثم رجوعه ينضم لباقي المفاتيح الشغالة بالتوازي زي ما هو مطلوب بالظبط
             const delayMs = baseDelay * Math.pow(2, attempt);
             console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
             
@@ -289,8 +280,6 @@ async function fetchAndExtractSub(subUrl) {
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
-// عدد الـ chunks اللي ممكن تتنفذ مع بعض في نفس الوقت = عدد المفاتيح المتاحة فعليًا
-// (بدون أي سقف مكتوب في الكود) - لو مفيش مفاتيح أو مفتاح واحد بس، بيشتغل بالتسلسل تلقائيًا
 function resolvePoolLimit(keysArray) {
     const n = Array.isArray(keysArray) ? keysArray.length : 0;
     return n > 0 ? n : 1;
@@ -314,10 +303,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    // كل الـ chunks بتشتغل بالتوازي مع بعض - عدد الشغالين في نفس اللحظة = عدد المفاتيح
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    // [إصلاح حرف N] طبقة حماية أخيرة: أي \n أو \N نصي متبقٍ بالغلط (من أي مسار)
-    // يتحول هنا لسطر جديد حقيقي قبل إرسال الملف للمستخدم مباشرة.
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
     let srtOutput = '';
@@ -352,11 +338,15 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    // كل الـ chunks بتشتغل بالتوازي مع بعض - عدد الشغالين في نفس اللحظة = عدد المفاتيح
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    // [إصلاح حرف N] نفس طبقة الحماية الأخيرة المطبّقة في مسار SRT.
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx]}`);
+    
+    // [التعديل الثالث]: إعادة النزول الحقيقي لرمز ASS المعتمد \N
+    const assLines = cues.map((c, idx) => {
+        const safeText = finalTranslations[idx].replace(/\n/g, '\\N');
+        return `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`;
+    });
+    
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
