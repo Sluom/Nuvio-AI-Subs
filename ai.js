@@ -73,7 +73,6 @@ function extractCuesUniversal(text) {
     }
     return cues;
 }
-
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     let text = String(txt)
@@ -81,12 +80,17 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
-        .replace(/\\N/g, '\n');
+        .replace(/\\N/g, '\n')
+        // التعديل الأول: توحيد وترتيب الشارحة والاقتباس بالبداية
+        .replace(/^["”]\s*-\s*/gm, '- "')
+        .replace(/^-\s*["”]\s*/gm, '- "');
 
-    // التعديل الحالي فقط: اكتشاف السطر اللي يبدأ بشارحة واقتباس (بأي ترتيب) وتغليفه بالمحرف المخفي
-    text = text.replace(/^((?:-\s*["”]|["”]\s*-).*)$/gm, '\u200F$1\u200F');
+    // التعديل الثاني: قفل الأسطر اللي تبدأ بشارحة واقتباس بالاتجاه العربي (RTL)
+    text = text.replace(/^(-\s*["”].*)$/gm, '\u200F$1\u200F');
 
     return text;
+}
+
 }
 
 
