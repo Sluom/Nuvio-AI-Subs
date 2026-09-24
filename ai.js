@@ -2,6 +2,8 @@ const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
+const crypto = require('crypto');
+const { MongoClient } = require('mongodb');
 
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -17,6 +19,79 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
+
+const MAX_SAFE_LINE_CHARS = 42;
+const CACHE_TTL_SECONDS = 7 * 24 * 60 * 60; // أسبوع
+
+// ===================== MongoDB Cache Layer =====================
+
+let mongoClient = null;
+let cacheCollection = null;
+let cacheReady = false;
+
+async function initCache() {
+    if (cacheReady) return cacheCollection;
+    if (!process.env.MONGODB_URI) {
+        console.warn('[Cache] MONGODB_URI not set — caching disabled.');
+        cacheReady = true; // نمنع إعادة المحاولة كل مرة
+        return null;
+    }
+    try {
+        mongoClient = new MongoClient(process.env.MONGODB_URI);
+        await mongoClient.connect();
+        const db = mongoClient.db('nuvio_subtitles');
+        cacheCollection = db.collection('translation_cache');
+        // TTL index — يُنشأ مرة وحدة، ولو موجود أصلًا ما يصير خطأ.
+        await cacheCollection.createIndex(
+            { createdAt: 1 },
+            { expireAfterSeconds: CACHE_TTL_SECONDS }
+        );
+        cacheReady = true;
+        console.log('[Cache] MongoDB connected, TTL index ready.');
+        return cacheCollection;
+    } catch (e) {
+        console.error('[Cache] MongoDB connection failed:', e.message);
+        cacheReady = true; // نمنع إعادة المحاولة كل طلب، نكمل بدون كاش
+        return null;
+    }
+}
+
+function buildCacheKey(subUrl, modelName, format) {
+    const hash = crypto.createHash('sha256').update(subUrl).digest('hex').slice(0, 32);
+    return `${format}:${hash}:${modelName || 'default'}`;
+}
+
+async function getCachedTranslation(key) {
+    const col = await initCache();
+    if (!col) return null;
+    try {
+        const doc = await col.findOne({ _id: key });
+        if (doc?.output) {
+            console.log(`[Cache] HIT for ${key}`);
+            return doc.output;
+        }
+    } catch (e) {
+        console.error('[Cache] Read failed:', e.message);
+    }
+    return null;
+}
+
+async function setCachedTranslation(key, output) {
+    const col = await initCache();
+    if (!col) return;
+    try {
+        await col.updateOne(
+            { _id: key },
+            { $set: { output, createdAt: new Date() } },
+            { upsert: true }
+        );
+        console.log(`[Cache] SET for ${key}`);
+    } catch (e) {
+        console.error('[Cache] Write failed:', e.message);
+    }
+}
+
+// ===================== Encoding / Parsing Helpers =====================
 
 function fixArabicEncoding(buffer) {
     if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
@@ -73,17 +148,84 @@ function extractCuesUniversal(text) {
     return cues;
 }
 
+// ===================== Text Normalization Helpers =====================
+
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     let text = String(txt)
-        .replace(/\\"/g, '"')       
+        .replace(/\\"/g, '"')
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
         .replace(/\\N/g, '\n')
-        .replace(/\\r/g, ''); 
+        .replace(/\\r/g, '')
+        // خط دفاع احترازي: نمنع أي رمز اتجاه (RLE/PDF/LRM/RLM) يوصل بالغلط من الـ AI،
+        // عشان التطبيق (PlayerSubtitleRtlFix.kt) يضل المتحكم الوحيد بمنطق الاتجاه.
+        .replace(/[\u200E\u200F\u202A-\u202E]/g, '');
 
     return text;
+}
+
+/**
+ * خط دفاع احتياطي: لو سطر واحد (بدون \n موجود أصلًا) طلع أطول من الحد الآمن،
+ * نقسمه نحن عند أقرب مسافة لمنتصفه. ما يلمس الأسطر المفصولة أصلًا (حوار/شاشية) —
+ * يشتغل فقط على النص المفرد اللي وصل بدون تقسيم من الـ AI.
+ */
+function splitLongLineAtMidpoint(line, maxChars) {
+    if (!line || line.length <= maxChars) return line;
+
+    const mid = Math.floor(line.length / 2);
+    let bestSpaceIdx = -1;
+    let bestDistance = Infinity;
+
+    for (let i = 0; i < line.length; i++) {
+        if (line[i] === ' ') {
+            const distance = Math.abs(i - mid);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestSpaceIdx = i;
+            }
+        }
+    }
+
+    if (bestSpaceIdx === -1) return line;
+
+    return line.slice(0, bestSpaceIdx) + '\n' + line.slice(bestSpaceIdx + 1);
+}
+
+/**
+ * يطبّق خط الدفاع الاحتياطي على كل سطر منطقي بالنص المترجم، بدون ما يلمس
+ * الأسطر اللي أصلاً مفصولة بـ \n من الـ AI (حوار شخصين، نص شاشي، إلخ).
+ */
+function applyLineLengthFallback(text) {
+    if (!text) return text;
+    return text
+        .split('\n')
+        .map(line => splitLongLineAtMidpoint(line, MAX_SAFE_LINE_CHARS))
+        .join('\n');
+}
+
+/**
+ * يحذف أي سطر فرعي (داخل نفس الـ cue) ما فيه محتوى فعلي — يبقي فقط شرطة
+ * أو علامات ترقيم بدون نص — بينما يحافظ على باقي الأسطر اللي فيها كلام.
+ */
+function stripEmptyDialogueLines(text) {
+    if (!text) return text;
+    return text
+        .split('\n')
+        .filter(line => {
+            const plain = line.replace(/<[^>]+>|\{[^}]+\}/g, '');
+            return /[a-zA-Z0-9\u0600-\u06FF♪]/.test(plain);
+        })
+        .join('\n');
+}
+
+/** يطبّق كل خطوات التنظيف بالترتيب الصحيح على نص مترجم واحد. */
+function postProcessTranslatedText(txt) {
+    let text = normalizeLineBreakArtifacts(txt);
+    text = stripEmptyDialogueLines(text);
+    text = applyLineLengthFallback(text);
+    return text.trim();
 }
 
 function parseRobustJsonArray(raw, expectedLength) {
@@ -96,13 +238,12 @@ function parseRobustJsonArray(raw, expectedLength) {
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-        
+
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
                 txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                txt = normalizeLineBreakArtifacts(txt);
-                return txt.trim();
+                return postProcessTranslatedText(txt);
             });
         }
 
@@ -112,9 +253,8 @@ function parseRobustJsonArray(raw, expectedLength) {
             return stringMatches
                 .filter(s => s !== 'translations' && s !== 'data')
                 .map(s => {
-                    let text = normalizeLineBreakArtifacts(s);
-                    text = text.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                    return text.trim();
+                    let text = s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
+                    return postProcessTranslatedText(text);
                 });
         }
     }
@@ -155,7 +295,7 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         const activeKey = getNextApiKey(keysArray);
-        
+
         if (!activeKey) {
             console.error("[Fatal] No Gemini API Keys configured!");
             return null;
@@ -163,13 +303,13 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        
+
         const p1 = "https://";
         const p2 = "generativelanguage.googleapis.com";
         const p3 = "/v1beta/models/";
         const p4 = ":generateContent";
         const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
-        
+
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
@@ -187,6 +327,8 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
 10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
 11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
+12. Line length control: if a translated line (not counting an existing dialogue dash "-" prefix) would exceed roughly 40 Arabic characters, break it into exactly two lines using a real line break (\\n) at a natural grammatical point (after a comma, between clauses, or near the sentence's midpoint) — never in the middle of a word. Prefer a shorter, more concise phrasing over a long literal one when it keeps the meaning intact.
+13. Do not exceed 2 lines per entry after any splitting from rule 12. Do not merge separate dialogue lines (lines that already start with "-" for different speakers) or separate on-screen-text lines into a single line, and do not add extra splits beyond what is needed — preserve the original line grouping given by the source as much as possible.
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
@@ -214,7 +356,7 @@ ${JSON.stringify(texts)}`;
                     ]
                 },
                 {
-                    headers: { 
+                    headers: {
                         'Content-Type': 'application/json',
                         'x-goog-api-key': cleanKey,
                         'x-goog-api-client': 'stremio-submaker/1.4.94'
@@ -222,7 +364,7 @@ ${JSON.stringify(texts)}`;
                     timeout: 30000
                 }
             );
-            
+
             if (r.status === 200) {
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length);
@@ -238,7 +380,7 @@ ${JSON.stringify(texts)}`;
             const isRateLimit = status === 429;
             const isServerError = status >= 500;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
-            
+
             if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
                 console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
                 return null;
@@ -246,11 +388,11 @@ ${JSON.stringify(texts)}`;
 
             const delayMs = baseDelay * Math.pow(2, attempt);
             console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
-            
+
             await delay(delayMs);
         }
     }
-    
+
     return null;
 }
 
@@ -258,8 +400,8 @@ async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
     try {
-        response = await axios.get(decodedUrl, { 
-            responseType: 'arraybuffer', 
+        response = await axios.get(decodedUrl, {
+            responseType: 'arraybuffer',
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -278,7 +420,7 @@ async function fetchAndExtractSub(subUrl) {
         const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
         if (subEntry) buffer = subEntry.getData();
     }
-    
+
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
@@ -287,9 +429,15 @@ function resolvePoolLimit(keysArray) {
     return n > 0 ? n : 1;
 }
 
+// ===================== Main Handlers =====================
+
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
+    const cacheKey = buildCacheKey(subUrl, modelName, 'srt');
+    const cached = await getCachedTranslation(cacheKey);
+    if (cached) return cached;
+
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
+    try { originalText = await fetchAndExtractSub(subUrl); }
     catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
 
     const cues = extractCuesUniversal(originalText);
@@ -312,17 +460,17 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     });
 
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+    const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
 
     let srtOutput = '';
     let counter = 1;
-    
+
     cues.forEach((c, idx) => {
         let text = finalTranslations[idx];
         if (!text) return;
 
-        let checkText = text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '');
-        if (checkText.length === 0) return;
+        let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+        if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
 
         let sTime = c.start.replace('.', ',');
         let eTime = c.end.replace('.', ',');
@@ -330,17 +478,25 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
-        
+
         srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
         counter++;
     });
-    
+
+    if (srtOutput) {
+        await setCachedTranslation(cacheKey, srtOutput);
+    }
+
     return srtOutput;
 }
 
 async function handleTranslationAss(subUrl, keysArray, modelName) {
+    const cacheKey = buildCacheKey(subUrl, modelName, 'ass');
+    const cached = await getCachedTranslation(cacheKey);
+    if (cached) return cached;
+
     let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
+    try { originalText = await fetchAndExtractSub(subUrl); }
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
     const cues = extractCuesUniversal(originalText);
@@ -363,21 +519,35 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     });
 
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
-    
+    const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
+
     const assLines = [];
     cues.forEach((c, idx) => {
         let text = finalTranslations[idx];
         if (!text) return;
 
-        let checkText = text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '');
-        if (checkText.length === 0) return;
+        let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+        if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
 
         const safeText = text.trim().replace(/\n/g, '\\N');
         assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
     });
-    
-    return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+
+    const assOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+
+    if (assLines.length) {
+        await setCachedTranslation(cacheKey, assOutput);
+    }
+
+    return assOutput;
 }
 
-module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
+module.exports = {
+    handleTranslationSrt,
+    handleTranslationAss,
+    normalizeLineBreakArtifacts,
+    parseRobustJsonArray,
+    applyLineLengthFallback,
+    stripEmptyDialogueLines,
+    postProcessTranslatedText
+};
