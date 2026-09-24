@@ -429,117 +429,145 @@ function resolvePoolLimit(keysArray) {
     return n > 0 ? n : 1;
 }
 
+// ===================== Translation Queue (Mutex Lock) =====================
+
+let translationQueue = Promise.resolve();
+
+async function enqueueTranslation(task) {
+    const currentWait = translationQueue;
+    let releaseNext;
+    translationQueue = new Promise(resolve => { releaseNext = resolve; });
+    try {
+        await currentWait;
+        return await task();
+    } finally {
+        releaseNext();
+    }
+}
+
 // ===================== Main Handlers =====================
 
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
     const cacheKey = buildCacheKey(subUrl, modelName, 'srt');
-    const cached = await getCachedTranslation(cacheKey);
+    let cached = await getCachedTranslation(cacheKey);
     if (cached) return cached;
 
-    let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); }
-    catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
+    return await enqueueTranslation(async () => {
+        // فحص مزدوج للكاش بعد الدخول من الطابور
+        cached = await getCachedTranslation(cacheKey);
+        if (cached) return cached;
 
-    const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
+        let originalText = "";
+        try { originalText = await fetchAndExtractSub(subUrl); }
+        catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
 
-    const CHUNK = 80;
-    const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+        const cues = extractCuesUniversal(originalText);
+        if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
-    const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => {
-            let t = c.text;
-            if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
-                return `[${t}]`;
-            }
-            return t;
+        const CHUNK = 80;
+        const chunks = [];
+        for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+
+        const tasks = chunks.map(chunk => async () => {
+            const texts = chunk.map(c => {
+                let t = c.text;
+                if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
+                    return `[${t}]`;
+                }
+                return t;
+            });
+            const translated = await translateChunkStrict(texts, keysArray, modelName);
+            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
         });
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+
+        const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
+        const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
+
+        let srtOutput = '';
+        let counter = 1;
+
+        cues.forEach((c, idx) => {
+            let text = finalTranslations[idx];
+            if (!text) return;
+
+            let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+            if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
+
+            let sTime = c.start.replace('.', ',');
+            let eTime = c.end.replace('.', ',');
+            if (sTime.length === 10) sTime = '0' + sTime;
+            if (eTime.length === 10) eTime = '0' + eTime;
+            if (sTime.split(',')[1].length === 2) sTime += '0';
+            if (eTime.split(',')[1].length === 2) eTime += '0';
+
+            srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
+            counter++;
+        });
+
+        if (srtOutput) {
+            await setCachedTranslation(cacheKey, srtOutput);
+        }
+
+        return srtOutput;
     });
-
-    const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
-
-    let srtOutput = '';
-    let counter = 1;
-
-    cues.forEach((c, idx) => {
-        let text = finalTranslations[idx];
-        if (!text) return;
-
-        let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-        if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
-
-        let sTime = c.start.replace('.', ',');
-        let eTime = c.end.replace('.', ',');
-        if (sTime.length === 10) sTime = '0' + sTime;
-        if (eTime.length === 10) eTime = '0' + eTime;
-        if (sTime.split(',')[1].length === 2) sTime += '0';
-        if (eTime.split(',')[1].length === 2) eTime += '0';
-
-        srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
-        counter++;
-    });
-
-    if (srtOutput) {
-        await setCachedTranslation(cacheKey, srtOutput);
-    }
-
-    return srtOutput;
 }
 
 async function handleTranslationAss(subUrl, keysArray, modelName) {
     const cacheKey = buildCacheKey(subUrl, modelName, 'ass');
-    const cached = await getCachedTranslation(cacheKey);
+    let cached = await getCachedTranslation(cacheKey);
     if (cached) return cached;
 
-    let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); }
-    catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
+    return await enqueueTranslation(async () => {
+        // فحص مزدوج للكاش بعد الدخول من الطابور
+        cached = await getCachedTranslation(cacheKey);
+        if (cached) return cached;
 
-    const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
+        let originalText = "";
+        try { originalText = await fetchAndExtractSub(subUrl); }
+        catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
-    const CHUNK = 80;
-    const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+        const cues = extractCuesUniversal(originalText);
+        if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-    const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => {
-            let t = c.text;
-            if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
-                return `[${t}]`;
-            }
-            return t;
+        const CHUNK = 80;
+        const chunks = [];
+        for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+
+        const tasks = chunks.map(chunk => async () => {
+            const texts = chunk.map(c => {
+                let t = c.text;
+                if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
+                    return `[${t}]`;
+                }
+                return t;
+            });
+            const translated = await translateChunkStrict(texts, keysArray, modelName);
+            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
         });
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+
+        const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
+        const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
+
+        const assLines = [];
+        cues.forEach((c, idx) => {
+            let text = finalTranslations[idx];
+            if (!text) return;
+
+            let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+            if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
+
+            const safeText = text.trim().replace(/\n/g, '\\N');
+            assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
+        });
+
+        const assOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+
+        if (assLines.length) {
+            await setCachedTranslation(cacheKey, assOutput);
+        }
+
+        return assOutput;
     });
-
-    const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-    const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
-
-    const assLines = [];
-    cues.forEach((c, idx) => {
-        let text = finalTranslations[idx];
-        if (!text) return;
-
-        let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-        if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
-
-        const safeText = text.trim().replace(/\n/g, '\\N');
-        assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
-    });
-
-    const assOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
-
-    if (assLines.length) {
-        await setCachedTranslation(cacheKey, assOutput);
-    }
-
-    return assOutput;
 }
 
 module.exports = {
