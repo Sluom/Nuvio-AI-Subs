@@ -28,7 +28,6 @@ function fixArabicEncoding(buffer) {
         try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) { }
     }
     const utf8Text = buffer.toString('utf-8');
-    // [إصلاح حرف الهاء] لو الملف أصلاً UTF-8 سليم (سواء فيه عربي أو لأ) نرجعه زي ما هو فورًا.
     if (!utf8Text.includes('\uFFFD')) return buffer;
     if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
     try {
@@ -81,14 +80,8 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
-        .replace(/\\N/g, '\n');
-
-    // 1. ترتيب الشارحة والاقتباس (حتى لو قبلها كود تنسيق) لتكون: - "
-    text = text.replace(/^((?:<[^>]+>|\{[^}]+\})*\s*)(?:["”]\s*-\s*|-\s*["”]\s*)/gm, '$1- "');
-
-    // 2. الخدعة السحرية (Zero Width Non-Joiner) لتعطيل انهيار ExoPlayer
-    // نضع الرمز المخفي (\u200C) قبل الشارحة مباشرة لنمنع المشغل من اكتشافها
-    text = text.replace(/^((?:<[^>]+>|\{[^}]+\})*\s*)-/gm, '$1\u200C-');
+        .replace(/\\N/g, '\n')
+        .replace(/\\r/g, ''); 
 
     return text;
 }
@@ -107,9 +100,7 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                // إبقاء الرموز السليمة وإصلاح المضروبة فقط
                 txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                // إصلاح فواصل الأسطر وعلامات الاقتباس والشارحة
                 txt = normalizeLineBreakArtifacts(txt);
                 return txt.trim();
             });
@@ -122,7 +113,6 @@ function parseRobustJsonArray(raw, expectedLength) {
                 .filter(s => s !== 'translations' && s !== 'data')
                 .map(s => {
                     let text = normalizeLineBreakArtifacts(s);
-                    // تطبيق نفس إصلاح الموسيقى على المسار الاحتياطي
                     text = text.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
                     return text.trim();
                 });
@@ -193,6 +183,10 @@ async function translateChunkStrict(texts, keysArray, modelName) {
    c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
    d. Do not double-wrap: if a full entry is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
    e. Never use quotation marks for places/objects and never use parentheses for person names.
+8. Carefully infer the gender of the speakers and listeners from context, relationships, or character names, and strictly apply the correct masculine or feminine Arabic pronouns and verb conjugations.
+9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
+10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
+11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
@@ -306,7 +300,13 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
     const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => c.text);
+        const texts = chunk.map(c => {
+            let t = c.text;
+            if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
+                return `[${t}]`;
+            }
+            return t;
+        });
         const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
@@ -315,14 +315,24 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
     let srtOutput = '';
+    let counter = 1;
+    
     cues.forEach((c, idx) => {
+        let text = finalTranslations[idx];
+        if (!text) return;
+
+        let checkText = text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '');
+        if (checkText.length === 0) return;
+
         let sTime = c.start.replace('.', ',');
         let eTime = c.end.replace('.', ',');
         if (sTime.length === 10) sTime = '0' + sTime;
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
-        srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx]}\n\n`;
+        
+        srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
+        counter++;
     });
     
     return srtOutput;
@@ -341,7 +351,13 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
     const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => c.text);
+        const texts = chunk.map(c => {
+            let t = c.text;
+            if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
+                return `[${t}]`;
+            }
+            return t;
+        });
         const translated = await translateChunkStrict(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
@@ -349,9 +365,16 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
     
-    const assLines = cues.map((c, idx) => {
-        const safeText = finalTranslations[idx].replace(/\n/g, '\\N');
-        return `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`;
+    const assLines = [];
+    cues.forEach((c, idx) => {
+        let text = finalTranslations[idx];
+        if (!text) return;
+
+        let checkText = text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '');
+        if (checkText.length === 0) return;
+
+        const safeText = text.trim().replace(/\n/g, '\\N');
+        assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
     });
     
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
