@@ -153,6 +153,33 @@ async function mapKitsuToImdb(targetId) {
 }
 
 // ==========================================
+// 3.5 كاشف ترجمات الصم وضعاف السمع (SDH / Hearing-Impaired)
+//    يفحص كل الحقول المحتملة (title, id, url, اسم الملف) + الحقل الرسمي
+//    SubHearingImpaired لو كان متوفر أصلاً بالبيانات القادمة من المصدر.
+//    نستخدمه للترتيب (غير SDH أولاً) وليس للاستبعاد النهائي، حتى ما نرجّع
+//    قائمة فاضية لو كل النسخ المتاحة كانت SDH.
+// ==========================================
+function isHearingImpairedSub(sub) {
+    if (!sub) return false;
+    if (sub.hearingImpaired === true) return true;
+
+    const fields = [sub.title, sub.id, sub.url, sub.subtitleFileName, sub.fileName]
+        .filter(Boolean)
+        .map(f => String(f).toLowerCase());
+
+    const patterns = [
+        /\bsdh\b/,
+        /\bhi\b/,
+        /\bcc\b/,
+        /hearing[\s_-]*impaired/,
+        /closed[\s_-]*caption/,
+        /\bdeaf\b/
+    ];
+
+    return fields.some(text => patterns.some(p => p.test(text)));
+}
+
+// ==========================================
 // 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org (القديم)
 //    منقول حرفياً من نسخة سابقة من نفس الإضافة كانت تنجح فعلياً في جلب ASS.
 //    نفس الآلية بالضبط (fetch العادي، sublanguageid=eng فقط، نفس الـ headers)
@@ -201,6 +228,9 @@ async function fetchLegacyData(url) {
             const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
             const finalExt = isAss ? 'ass' : 'srt';
 
+            // الحقل الرسمي من OpenSubtitles لتحديد نسخ الصم وضعاف السمع - أدق مصدر متوفر
+            const isHi = entry.SubHearingImpaired === '1' || entry.SubHearingImpaired === 1 || entry.SubHearingImpaired === true;
+
             results.push({
                 url: downloadLink,
                 lang: 'eng',
@@ -209,6 +239,7 @@ async function fetchLegacyData(url) {
                 subFormat: isAss ? 'ssa' : 'srt',
                 fileName: rawName,
                 origName: rawName,
+                hearingImpaired: isHi,
                 _source: 'opensubtitles',
                 _priority: isAss ? 0 : 2
             });
@@ -275,6 +306,12 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
                 const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
                 const format = isAss ? 'ass' : 'srt';
 
+                // المرآة لا ترجع دائمًا الحقل الرسمي؛ لو موجود نستخدمه، وإلا نعتمد على
+                // فحص نصي على اسم/رابط الملف كخط دفاع ثاني
+                const isHi = s.SubHearingImpaired === '1' || s.SubHearingImpaired === 1 || s.SubHearingImpaired === true
+                    || /\bsdh\b/.test(rawName) || /\bhi\b/.test(rawName) || /hearing[\s_-]*impaired/.test(rawName)
+                    || /\bsdh\b/.test(rawUrl) || /\bhi\b/.test(rawUrl);
+
                 return {
                     url: s.url,
                     lang: 'eng',
@@ -283,6 +320,7 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
                     subFormat: isAss ? 'ssa' : 'srt',
                     fileName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
                     origName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
+                    hearingImpaired: isHi,
                     _source: 'opensubtitles',
                     _priority: isAss ? 0 : 2
                 };
@@ -312,6 +350,15 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
         seenUrls.add(cleanUrl);
         uniqueSubs.push(sub);
     }
+
+    // ترتيب: النسخ غير SDH تطلع أولاً، وSDH يُستخدم فقط كاحتياطي لو النسخ
+    // النظيفة مش كافية لملء عدد المسارات المطلوب (لا نحذفها نهائيًا)
+    uniqueSubs.sort((a, b) => {
+        const aHi = isHearingImpairedSub(a) ? 1 : 0;
+        const bHi = isHearingImpairedSub(b) ? 1 : 0;
+        return aHi - bHi;
+    });
+
     return uniqueSubs;
 }
 
@@ -545,8 +592,10 @@ app.get([
         if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
 
+        // assOnly يطلع مرتب مسبقاً (غير SDH أولاً) من getOpenSubtitlesEnglish
         const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
-        console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId}`);
+        const assHiCount = assOnly.filter(s => isHearingImpairedSub(s)).length;
+        console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assHiCount} SDH, pushed to the back)`);
 
         if (subtitlesData.length > 0) {
             
@@ -557,21 +606,26 @@ app.get([
                 const lang = (s.lang || '').toLowerCase();
                 return targetLangs.some(l => lang === l || lang.startsWith(l));
             });
-            
-            // استبعاد SDH مطلقاً ونهائياً
-            const cleanSubs = validSubs.filter(sub => {
-                const title = (sub.title || '').toLowerCase();
-                const idStr = (sub.id || '').toLowerCase();
-                return !(title.includes('sdh') || title.includes('hi ') || title.includes('hearing impaired') || idStr.includes('sdh') || idStr.includes('hi'));
+
+            // ترتيب أولوية: النسخ غير SDH أولاً، ونسخ SDH تتنزل لآخر القائمة بدل ما تتشال
+            // نهائيًا - كده لو مفيش نسخ نظيفة كفاية لملء العدد المطلوب، بنستخدم SDH
+            // كحل احتياطي بدل ما نرجّع مسارات فاضية للمستخدم
+            const sortedSubs = [...validSubs].sort((a, b) => {
+                const aHi = isHearingImpairedSub(a) ? 1 : 0;
+                const bHi = isHearingImpairedSub(b) ? 1 : 0;
+                return aHi - bHi;
             });
 
-            if (cleanSubs.length === 0) {
-                console.log(`[Fetch] No usable subtitles left after language/SDH filters for ${finalTargetId}`);
+            const cleanCount = sortedSubs.filter(s => !isHearingImpairedSub(s)).length;
+            console.log(`[SDH Filter] ${cleanCount}/${sortedSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
+
+            if (sortedSubs.length === 0) {
+                console.log(`[Fetch] No usable subtitles left after language filter for ${finalTargetId}`);
                 return res.json({ subtitles: [] });
             }
 
-            // الفرز لإبقاء SRT واستبعاد أي ملف ASS (هذا الفرع يبقى كما هو تماماً - لا تعديل)
-            const srtSubs = cleanSubs.filter(s => {
+            // الفرز لإبقاء SRT واستبعاد أي ملف ASS (نفس المنطق السابق، لكن على القائمة المرتبة)
+            const srtSubs = sortedSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
                 return !fname.endsWith('.ass') && !fname.endsWith('.ssa') && !url.includes('.ass') && !url.includes('.ssa');
