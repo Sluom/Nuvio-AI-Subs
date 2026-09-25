@@ -222,6 +222,14 @@ function postProcessTranslatedText(txt, originalText) {
     return text.trim();
 }
 
+/**
+ * يحاول يحلّل استجابة Gemini كـ JSON array من النصوص.
+ * أولوية أولى: JSON.parse سليم. لو فشل، fallback عن طريق regex يمسك النصوص
+ * بين علامات تنصيص — لكن يرفض أي "ترجمة" هي بس علامات ترقيم (فاصلة، نقطة...)
+ * بدون أي حرف فعلي، ويشترط تطابق شبه كامل بالعدد (90%+) قبل ما يقبل النتيجة.
+ * لو ما وصلنا لهذا الحد، يرجّع null — وهذا يخلي الكود الأعلى يستخدم النص
+ * الإنجليزي الأصلي بدل ما يعرض فواصل فاضية.
+ */
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
@@ -236,18 +244,27 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
-                txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                return txt;
+                return txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
             });
         }
 
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-        if (stringMatches.length >= expectedLength * 0.5) {
-            return stringMatches
-                .filter(s => s !== 'translations' && s !== 'data')
-                .map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
+        const validMatches = stringMatches
+            .filter(s => s !== 'translations' && s !== 'data')
+            // نرفض أي نتيجة هي بس علامات ترقيم/فواصل — فشل تحليل حقيقي، مو ترجمة فعلية.
+            .filter(s => /[a-zA-Z0-9\u0600-\u06FF]/.test(s));
+
+        // نشترط تطابق شبه كامل بالعدد (90%+)، مو 50% كما كان سابقًا — عشان
+        // ما نقبل نتيجة مبتورة فيها فواصل فاضية بدل الترجمة الحقيقية.
+        if (validMatches.length >= expectedLength * 0.9) {
+            return validMatches.map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
         }
+
+        console.error(
+            `[ParseFailure] Fallback regex got ${stringMatches.length}/${expectedLength} raw matches, ` +
+            `only ${validMatches.length} valid (non-punctuation). Rejecting chunk — will fall back to original text.`
+        );
     }
     return null;
 }
