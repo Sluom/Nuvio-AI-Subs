@@ -21,7 +21,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
 const MAX_SAFE_LINE_CHARS = 42;
-const ARABIC_SAFE_LINE_CHARS = 38;
+const ARABIC_SAFE_LINE_CHARS = 50; // تم التعديل إلى 50 حسب طلبك
 const CACHE_TTL_SECONDS = 7 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
