@@ -33,7 +33,7 @@ async function initCache() {
     if (cacheReady) return cacheCollection;
     if (!process.env.MONGODB_URI) {
         console.warn('[Cache] MONGODB_URI not set — caching disabled.');
-        cacheReady = true; // نمنع إعادة المحاولة كل مرة
+        cacheReady = true;
         return null;
     }
     try {
@@ -41,7 +41,6 @@ async function initCache() {
         await mongoClient.connect();
         const db = mongoClient.db('nuvio_subtitles');
         cacheCollection = db.collection('translation_cache');
-        // TTL index — يُنشأ مرة وحدة، ولو موجود أصلًا ما يصير خطأ.
         await cacheCollection.createIndex(
             { createdAt: 1 },
             { expireAfterSeconds: CACHE_TTL_SECONDS }
@@ -51,7 +50,7 @@ async function initCache() {
         return cacheCollection;
     } catch (e) {
         console.error('[Cache] MongoDB connection failed:', e.message);
-        cacheReady = true; // نمنع إعادة المحاولة كل طلب، نكمل بدون كاش
+        cacheReady = true;
         return null;
     }
 }
@@ -159,18 +158,11 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\n/gi, '\n')
         .replace(/\\N/g, '\n')
         .replace(/\\r/g, '')
-        // خط دفاع احترازي: نمنع أي رمز اتجاه (RLE/PDF/LRM/RLM) يوصل بالغلط من الـ AI،
-        // عشان التطبيق (PlayerSubtitleRtlFix.kt) يضل المتحكم الوحيد بمنطق الاتجاه.
         .replace(/[\u200E\u200F\u202A-\u202E]/g, '');
 
     return text;
 }
 
-/**
- * خط دفاع احتياطي: لو سطر واحد (بدون \n موجود أصلًا) طلع أطول من الحد الآمن،
- * نقسمه نحن عند أقرب مسافة لمنتصفه. ما يلمس الأسطر المفصولة أصلًا (حوار/شاشية) —
- * يشتغل فقط على النص المفرد اللي وصل بدون تقسيم من الـ AI.
- */
 function splitLongLineAtMidpoint(line, maxChars) {
     if (!line || line.length <= maxChars) return line;
 
@@ -193,10 +185,6 @@ function splitLongLineAtMidpoint(line, maxChars) {
     return line.slice(0, bestSpaceIdx) + '\n' + line.slice(bestSpaceIdx + 1);
 }
 
-/**
- * يطبّق خط الدفاع الاحتياطي على كل سطر منطقي بالنص المترجم، بدون ما يلمس
- * الأسطر اللي أصلاً مفصولة بـ \n من الـ AI (حوار شخصين، نص شاشي، إلخ).
- */
 function applyLineLengthFallback(text) {
     if (!text) return text;
     return text
@@ -208,22 +196,28 @@ function applyLineLengthFallback(text) {
 /**
  * يحذف أي سطر فرعي (داخل نفس الـ cue) ما فيه محتوى فعلي — يبقي فقط شرطة
  * أو علامات ترقيم بدون نص — بينما يحافظ على باقي الأسطر اللي فيها كلام.
+ * يطبع تحذير تشخيصي لحظة ما يحذف سطر، عشان نلقط سبب المشكلة تلقائيًا من اللوق.
  */
-function stripEmptyDialogueLines(text) {
+function stripEmptyDialogueLines(text, originalTextForDebug) {
     if (!text) return text;
-    return text
-        .split('\n')
-        .filter(line => {
-            const plain = line.replace(/<[^>]+>|\{[^}]+\}/g, '');
-            return /[a-zA-Z0-9\u0600-\u06FF♪]/.test(plain);
-        })
-        .join('\n');
+    const lines = text.split('\n');
+    const filtered = lines.filter(line => {
+        const plain = line.replace(/<[^>]+>|\{[^}]+\}/g, '');
+        const hasContent = /[a-zA-Z0-9\u0600-\u06FF♪]/.test(plain);
+        if (!hasContent && line.trim() !== '') {
+            console.warn(
+                `[EmptyLineDropped] Removed line: "${line}" | Full translated text: "${text}" | Original: "${originalTextForDebug || 'N/A'}"`
+            );
+        }
+        return hasContent;
+    });
+    return filtered.join('\n');
 }
 
 /** يطبّق كل خطوات التنظيف بالترتيب الصحيح على نص مترجم واحد. */
-function postProcessTranslatedText(txt) {
+function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
-    text = stripEmptyDialogueLines(text);
+    text = stripEmptyDialogueLines(text, originalText);
     text = applyLineLengthFallback(text);
     return text.trim();
 }
@@ -243,7 +237,7 @@ function parseRobustJsonArray(raw, expectedLength) {
             return arr.map(x => {
                 let txt = String(x || '');
                 txt = txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                return postProcessTranslatedText(txt);
+                return txt;
             });
         }
 
@@ -252,10 +246,7 @@ function parseRobustJsonArray(raw, expectedLength) {
         if (stringMatches.length >= expectedLength * 0.5) {
             return stringMatches
                 .filter(s => s !== 'translations' && s !== 'data')
-                .map(s => {
-                    let text = s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-                    return postProcessTranslatedText(text);
-                });
+                .map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
         }
     }
     return null;
@@ -453,7 +444,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     if (cached) return cached;
 
     return await enqueueTranslation(async () => {
-        // فحص مزدوج للكاش بعد الدخول من الطابور
         cached = await getCachedTranslation(cacheKey);
         if (cached) return cached;
 
@@ -481,7 +471,8 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         });
 
         const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-        const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
+        const rawTranslations = chunkResults.flat();
+        const finalTranslations = rawTranslations.map((t, idx) => postProcessTranslatedText(t, cues[idx]?.text));
 
         let srtOutput = '';
         let counter = 1;
@@ -518,7 +509,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     if (cached) return cached;
 
     return await enqueueTranslation(async () => {
-        // فحص مزدوج للكاش بعد الدخول من الطابور
         cached = await getCachedTranslation(cacheKey);
         if (cached) return cached;
 
@@ -546,7 +536,8 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         });
 
         const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
-        const finalTranslations = chunkResults.flat().map(t => postProcessTranslatedText(t));
+        const rawTranslations = chunkResults.flat();
+        const finalTranslations = rawTranslations.map((t, idx) => postProcessTranslatedText(t, cues[idx]?.text));
 
         const assLines = [];
         cues.forEach((c, idx) => {
