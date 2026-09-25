@@ -340,7 +340,121 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName) {
+// ===================== Character Gender Map Extraction (NEW) =====================
+
+/**
+ * يسوي استدعاء واحد فقط لكامل الملف (قبل التقسيم لأجزاء) يطلع منه قائمة
+ * أسماء الشخصيات وجنس كل وحدة منها، بالاعتماد على كل الأدلة المتوفرة بكامل
+ * النص (مو بس جزء صغير معزول). هذا يحل مشكلة "الشخصية تتكرر بجزء بعيد بدون
+ * أي دليل جنس جديد" لأن الجنس يصير معروف مسبقًا وثابت لكل الأجزاء.
+ *
+ * يرجّع Object زي: { "SARAH": "female", "JOHN": "male" } أو null لو فشل
+ * الاستخراج (وبهذي الحالة يرجع الكود الأعلى يشتغل بدون خارطة، زي الوضع
+ * القديم بالضبط — ما فيه أي كسر بالوظيفة الأساسية).
+ */
+async function extractCharacterGenderMap(cues, keysArray, modelName) {
+    if (!cues || !cues.length) return null;
+
+    const fullText = cues.map(c => c.text).join('\n');
+    // بدون أي قص: نافذة السياق الكبيرة عند Gemini تسمح بقراءة نص الفلم كامل
+    // (حتى أطول فلم لا يتجاوز عادة 50-70 ألف حرف)، فالخارطة تصير شاملة
+    // (Global) لكل شخصيات الفلم من أول ثانية لآخر ثانية.
+    const sample = fullText;
+
+    const prompt = `You are analyzing an English subtitle script to identify character names and their genders, to help a downstream Arabic translation system apply correct gender-specific grammar consistently across the whole file.
+
+Read the following subtitle text and identify every character/person name that appears (real proper names of people only — never places, food, brands, or objects). For each name, determine the character's gender (male or female) using any contextual clues found ANYWHERE in the text (pronouns near the name, titles like Mr./Mrs./Sir/Ma'am, relationship words like wife/husband/sister/brother/girlfriend/boyfriend, dialogue addressed to them, etc).
+
+Rules:
+- Only include actual person names.
+- Merge obvious variants of the same character into one entry (e.g. "John" and "JOHN" and "Johnny" if clearly the same person) using the most common form as the name.
+- If a name appears with zero gender clues anywhere in the text, still include it with your best guess based on common name/gender association, or "unknown" if truly ambiguous.
+- Do NOT include narration-only labels or on-screen text placeholders.
+
+Output ONLY a valid JSON array of objects, nothing else, no explanations, in this exact format:
+[{"name": "JOHN", "gender": "male"}, {"name": "SARAH", "gender": "female"}]
+
+Subtitle text:
+${sample}`;
+
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const activeKey = getNextApiKey(keysArray);
+        if (!activeKey) return null;
+
+        const cleanKey = String(activeKey).trim();
+        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
+
+        try {
+            const r = await axios.post(
+                GEMINI_URL,
+                {
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        temperature: 0.1,
+                        responseMimeType: "application/json"
+                    },
+                    safetySettings: [
+                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                    ]
+                },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': cleanKey,
+                        'x-goog-api-client': 'stremio-submaker/1.4.94'
+                    },
+                    timeout: 20000
+                }
+            );
+
+            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!responseText) continue;
+
+            let clean = responseText.trim();
+            if (clean.startsWith('```json')) clean = clean.slice(7);
+            else if (clean.startsWith('```')) clean = clean.slice(3);
+            if (clean.endsWith('```')) clean = clean.slice(0, -3);
+            clean = clean.trim();
+
+            const parsed = JSON.parse(clean);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                const map = {};
+                for (const entry of parsed) {
+                    if (entry?.name && entry?.gender) {
+                        map[String(entry.name).trim().toUpperCase()] = String(entry.gender).trim().toLowerCase();
+                    }
+                }
+                if (Object.keys(map).length > 0) {
+                    console.log(`[GenderMap] Extracted ${Object.keys(map).length} character(s): ${Object.keys(map).join(', ')}`);
+                    return map;
+                }
+            }
+        } catch (e) {
+            console.error(`[GenderMap] Attempt ${attempt + 1}/${MAX_ATTEMPTS} failed: ${e.response?.data?.error?.message || e.message}`);
+        }
+    }
+
+    console.warn('[GenderMap] Extraction failed — proceeding without a gender map (fallback to per-chunk inference).');
+    return null;
+}
+
+/** يحوّل خارطة الأسماء/الجنس إلى نص جاهز للحقن داخل نقطة 8 بالبرومنت. */
+function formatGenderMapForPrompt(genderMap) {
+    if (!genderMap || Object.keys(genderMap).length === 0) return '';
+    const lines = Object.entries(genderMap).map(([name, gender]) => `   - ${name} = ${gender}`);
+    return `
+
+   KNOWN CHARACTER GENDER MAP (ground truth extracted from the full script — use this instead of guessing whenever a name below appears, even if this specific chunk has no gender clue on its own):
+${lines.join('\n')}
+`;
+}
+
+async function translateChunkStrict(texts, keysArray, modelName, genderMap = null) {
     const MAX_RETRIES = 4;
     let baseDelay = 3000;
 
@@ -361,6 +475,8 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const p4 = ":generateContent";
         const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
 
+        const genderMapBlock = formatGenderMapForPrompt(genderMap);
+
         const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given
 2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
@@ -379,6 +495,7 @@ async function translateChunkStrict(texts, keysArray, modelName) {
    b) APPLY FEMININE RIGOROUSLY: If addressing a female or if a female is speaking, you MUST use feminine conjugations perfectly (e.g., أنتِ، لكِ، ماذا تفعلين).
    c) LOCK CONSISTENCY: Once a gender is established in a conversation block, DO NOT flip-flop genders randomly between lines. Keep it locked.
    d) ZERO CLUE FALLBACK: Default to masculine ONLY if absolutely zero clues exist in the text, but NEVER ignore a female clue if it appears.
+   e) PRIORITY OVERRIDE: If a name below appears in the KNOWN CHARACTER GENDER MAP, its gender is already confirmed from analysis of the entire script — apply it directly to every line spoken to or by that character, even if this specific chunk alone has no visible clue. Only deviate from the map if the immediate line contains an unmistakable contradicting clue (e.g. the map is wrong for that one specific line).${genderMapBlock}
 
 9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
 10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
@@ -519,6 +636,9 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
+        // خطوة واحدة قبل التقسيم: استخراج خارطة أسماء الشخصيات وجنسها من كامل الملف
+        const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
+
         const CHUNK = 80;
         const chunks = [];
         for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
@@ -531,7 +651,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
                 }
                 return t;
             });
-            const translated = await translateChunkStrict(texts, keysArray, modelName);
+            const translated = await translateChunkStrict(texts, keysArray, modelName, genderMap);
             return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
         });
 
@@ -584,6 +704,9 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
+        // خطوة واحدة قبل التقسيم: استخراج خارطة أسماء الشخصيات وجنسها من كامل الملف
+        const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
+
         const CHUNK = 80;
         const chunks = [];
         for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
@@ -596,7 +719,7 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
                 }
                 return t;
             });
-            const translated = await translateChunkStrict(texts, keysArray, modelName);
+            const translated = await translateChunkStrict(texts, keysArray, modelName, genderMap);
             return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
         });
 
@@ -634,5 +757,7 @@ module.exports = {
     applyLineLengthFallback,
     applyRtlSafeLineSplit,
     stripEmptyDialogueLines,
-    postProcessTranslatedText
+    postProcessTranslatedText,
+    extractCharacterGenderMap,
+    formatGenderMapForPrompt
 };
