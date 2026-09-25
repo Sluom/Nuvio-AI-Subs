@@ -21,6 +21,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
 const MAX_SAFE_LINE_CHARS = 42;
+const ARABIC_SAFE_LINE_CHARS = 38;
 const CACHE_TTL_SECONDS = 7 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
@@ -194,6 +195,50 @@ function applyLineLengthFallback(text) {
 }
 
 /**
+ * يقسم سطر عربي طويل لعدة أسطر حقيقية (\n) عند حدود الكلمات، بحيث ما تحتاج
+ * أي تطبيق عرض auto-wrap لهالسطر — يشتغل بشكل مستقل عن أي منطق RTL بجانب
+ * التطبيق، لأن \n (عكس رموز RLE/PDF) لا يُحذف أو يُتجاهل من أي مشغل.
+ */
+function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS) {
+    if (!text || text.length <= maxChars) return text;
+
+    const segments = [];
+    let segmentStart = 0;
+    let lastSpaceIndex = -1;
+
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === ' ') lastSpaceIndex = i;
+        if (i - segmentStart >= maxChars) {
+            if (lastSpaceIndex > segmentStart) {
+                segments.push(text.slice(segmentStart, lastSpaceIndex));
+                segmentStart = lastSpaceIndex + 1;
+                lastSpaceIndex = -1;
+            }
+            // لو ما فيه مسافة جوا الحد (كلمة طويلة جدًا)، نكمل بدون قطع نصها.
+        }
+    }
+    if (segmentStart < text.length) {
+        segments.push(text.slice(segmentStart));
+    }
+    return segments.join('\n');
+}
+
+/**
+ * يطبّق التقسيم الآمن على كل سطر منطقي بالنص المترجم (لا يلمس الأسطر
+ * المفصولة أصلاً بحوار شخصين أو نص شاشي — كل وحدة تتعالج لحالها)، فقط
+ * لو النص يحتوي حروف عربية.
+ */
+function applyRtlSafeLineSplit(text) {
+    if (!text) return text;
+    const hasArabic = /[\u0600-\u06FF]/.test(text);
+    if (!hasArabic) return text;
+    return text
+        .split('\n')
+        .map(line => splitArabicLineAtWordBoundaries(line))
+        .join('\n');
+}
+
+/**
  * يحذف أي سطر فرعي (داخل نفس الـ cue) ما فيه محتوى فعلي — يبقي فقط شرطة
  * أو علامات ترقيم بدون نص — بينما يحافظ على باقي الأسطر اللي فيها كلام.
  * يطبع تحذير تشخيصي لحظة ما يحذف سطر، عشان نلقط سبب المشكلة تلقائيًا من اللوق.
@@ -219,6 +264,7 @@ function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
     text = stripEmptyDialogueLines(text, originalText);
     text = applyLineLengthFallback(text);
+    text = applyRtlSafeLineSplit(text);
     return text.trim();
 }
 
@@ -252,11 +298,8 @@ function parseRobustJsonArray(raw, expectedLength) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         const validMatches = stringMatches
             .filter(s => s !== 'translations' && s !== 'data')
-            // نرفض أي نتيجة هي بس علامات ترقيم/فواصل — فشل تحليل حقيقي، مو ترجمة فعلية.
             .filter(s => /[a-zA-Z0-9\u0600-\u06FF]/.test(s));
 
-        // نشترط تطابق شبه كامل بالعدد (90%+)، مو 50% كما كان سابقًا — عشان
-        // ما نقبل نتيجة مبتورة فيها فواصل فاضية بدل الترجمة الحقيقية.
         if (validMatches.length >= expectedLength * 0.9) {
             return validMatches.map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
         }
@@ -584,6 +627,7 @@ module.exports = {
     normalizeLineBreakArtifacts,
     parseRobustJsonArray,
     applyLineLengthFallback,
+    applyRtlSafeLineSplit,
     stripEmptyDialogueLines,
     postProcessTranslatedText
 };
