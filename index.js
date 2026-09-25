@@ -386,8 +386,37 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
-app.get(['/', '/configure'], (req, res) => {
+app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+    // لو فيه config بالرابط (يعني جاي من زر الإعدادات ⚙️ بإضافة مثبتة مسبقًا)،
+    // نفك تشفيره عشان نعبّي الحقول تلقائيًا بدل ما يبدأ المستخدم من الصفر.
+    let existingKeys = [];
+    let existingModel = 'gemini-3.1-flash-lite';
+    if (req.params.config) {
+        try {
+            const decoded = JSON.parse(decodeURIComponent(req.params.config));
+            if (Array.isArray(decoded.keys)) existingKeys = decoded.keys;
+            if (decoded.model) existingModel = decoded.model;
+        } catch (e) {
+            console.error('[Configure] Failed to parse existing config:', e.message);
+        }
+    }
+
+    // نبني صفوف حقول المفاتيح الموجودة كـ HTML جاهز (أول واحد بدون زر حذف، الباقي معهم زر حذف)
+    let keyRowsHtml = '';
+    if (existingKeys.length > 0) {
+        keyRowsHtml = existingKeys.map((key, i) => {
+            const escapedKey = String(key).replace(/"/g, '&quot;');
+            if (i === 0) {
+                return `<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)" value="${escapedKey}"></div>`;
+            }
+            return `<div class="key-row"><input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)" value="${escapedKey}"><button class="remove-btn" onclick="this.parentElement.remove()">X</button></div>`;
+        }).join('\n');
+    } else {
+        keyRowsHtml = `<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>`;
+    }
+
     res.send(`
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -409,17 +438,17 @@ app.get(['/', '/configure'], (req, res) => {
             .key-row { display: flex; gap: 10px; margin-bottom: 10px; }
             .key-row input { flex: 1; }
             .remove-btn { background: #ef4444; color: white; border: none; border-radius: 6px; padding: 0 15px; cursor: pointer; font-weight: bold; }
+            .status-banner { background: #14532d; color: #86efac; padding: 10px; border-radius: 8px; text-align: center; margin-bottom: 20px; font-size: 14px; }
         </style>
     </head>
     <body>
         <h1>إعدادات المترجم الذكي</h1>
         <div class="container">
+            ${existingKeys.length > 0 ? `<div class="status-banner">✅ تم تحميل ${existingKeys.length} مفتاح موجود مسبقًا — عدّل حسب حاجتك</div>` : ''}
             <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
             
             <div id="keys-container">
-                <div class="key-row">
-                    <input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)">
-                </div>
+                ${keyRowsHtml}
             </div>
 
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
@@ -427,14 +456,14 @@ app.get(['/', '/configure'], (req, res) => {
             <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
-                    <option value="gemini-3.7-flash">Gemini 3.7 Flash (beta)</option>
-                    <option value="gemini-3.6-flash">Gemini 3.6 Flash (beta)</option>
-                    <option value="gemini-3.5-flash">Gemini 3.5 Flash (beta)</option>
+                    <option value="gemini-3.1-flash-lite" ${existingModel === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash Lite</option>
+                    <option value="gemini-3.7-flash" ${existingModel === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash (beta)</option>
+                    <option value="gemini-3.6-flash" ${existingModel === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash (beta)</option>
+                    <option value="gemini-3.5-flash" ${existingModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (beta)</option>
                 </select>
             </div>
 
-            <button class="btn" onclick="generateInstallLink()">تثبيت الإضافة في Nuvio 🚀</button>
+            <button class="btn" onclick="generateInstallLink()">${existingKeys.length > 0 ? 'تحديث الإضافة في Nuvio 🔄' : 'تثبيت الإضافة في Nuvio 🚀'}</button>
 
             <div id="test-link-box" style="display:none; margin-top: 20px; padding: 12px; background: #0f172a; border-radius: 8px; border: 1px solid #334155;">
                 <label style="margin-bottom: 8px;">رابط اختبار (JSON) - انسخه للفحص اليدوي بالمفاتيح:</label>
