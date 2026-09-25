@@ -374,7 +374,12 @@ async function translateChunkStrict(texts, keysArray, modelName) {
    c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
    d. Do not double-wrap: if a full entry is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
    e. Never use quotation marks for places/objects and never use parentheses for person names.
-8. Carefully infer the gender of the speakers and listeners from context, relationships, or character names, and strictly apply the correct masculine or feminine Arabic pronouns and verb conjugations.
+8. CRITICAL GENDER ENFORCEMENT: English pronouns ('you', 'they', 'I') are gender-neutral, but Arabic is strictly gendered. You MUST act as a gender-context analyzer:
+   a) SCAN FOR CLUES: Actively look for names, titles (sir/ma'am), relationships (wife/sister/brother), or emotional context (e.g., romantic couples) before translating.
+   b) APPLY FEMININE RIGOROUSLY: If addressing a female or if a female is speaking, you MUST use feminine conjugations perfectly (e.g., أنتِ، لكِ، ماذا تفعلين).
+   c) LOCK CONSISTENCY: Once a gender is established in a conversation block, DO NOT flip-flop genders randomly between lines. Keep it locked.
+   d) ZERO CLUE FALLBACK: Default to masculine ONLY if absolutely zero clues exist in the text, but NEVER ignore a female clue if it appears.
+
 9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
 10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
 11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
