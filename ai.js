@@ -20,8 +20,7 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const MAX_SAFE_LINE_CHARS = 42;
-const ARABIC_SAFE_LINE_CHARS = 48; // تم التعديل إلى 50 حسب طلبك
+const ARABIC_SAFE_LINE_CHARS = 55; // تم التعديل إلى 55 لمنع تراكب الأسطر
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
@@ -164,36 +163,6 @@ function normalizeLineBreakArtifacts(txt) {
     return text;
 }
 
-function splitLongLineAtMidpoint(line, maxChars) {
-    if (!line || line.length <= maxChars) return line;
-
-    const mid = Math.floor(line.length / 2);
-    let bestSpaceIdx = -1;
-    let bestDistance = Infinity;
-
-    for (let i = 0; i < line.length; i++) {
-        if (line[i] === ' ') {
-            const distance = Math.abs(i - mid);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestSpaceIdx = i;
-            }
-        }
-    }
-
-    if (bestSpaceIdx === -1) return line;
-
-    return line.slice(0, bestSpaceIdx) + '\n' + line.slice(bestSpaceIdx + 1);
-}
-
-function applyLineLengthFallback(text) {
-    if (!text) return text;
-    return text
-        .split('\n')
-        .map(line => splitLongLineAtMidpoint(line, MAX_SAFE_LINE_CHARS))
-        .join('\n');
-}
-
 /**
  * يقسم سطر عربي طويل لعدة أسطر حقيقية (\n) عند حدود الكلمات، بحيث ما تحتاج
  * أي تطبيق عرض auto-wrap لهالسطر — يشتغل بشكل مستقل عن أي منطق RTL بجانب
@@ -263,7 +232,6 @@ function stripEmptyDialogueLines(text, originalTextForDebug) {
 function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
     text = stripEmptyDialogueLines(text, originalText);
-    text = applyLineLengthFallback(text);
     text = applyRtlSafeLineSplit(text);
     return text.trim();
 }
@@ -505,7 +473,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
 10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
 11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
-12. Line length control: if a translated line (not counting an existing dialogue dash "-" prefix) would exceed roughly 40 Arabic characters, break it into exactly two lines using a real line break (\\n) at a natural grammatical point (after a comma, between clauses, or near the sentence's midpoint) — never in the middle of a word. Prefer a shorter, more concise phrasing over a long literal one when it keeps the meaning intact.
+12. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve the original line breaks exactly as they appear in the source text.
 13. Do not exceed 2 lines per entry after any splitting from rule 12. Do not merge separate dialogue lines (lines that already start with "-" for different speakers) or separate on-screen-text lines into a single line, and do not add extra splits beyond what is needed — preserve the original line grouping given by the source as much as possible.
 14. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly the same number of elements as the input array — one output string per input string, in the same order. Never merge two input entries into one output entry, never split one input entry into two separate array elements, and never omit an entry. If an entry is a short exclamation, a name, or a sound-effect-only line, still translate/transliterate it and return it as its own array element — never leave it out or fold it into a neighboring entry. (Note: splitting a single entry's text into two lines with \\n, per rule 12, is not the same as splitting it into two array elements — that stays allowed and is separate from this rule.)
 
@@ -760,7 +728,6 @@ module.exports = {
     handleTranslationAss,
     normalizeLineBreakArtifacts,
     parseRobustJsonArray,
-    applyLineLengthFallback,
     applyRtlSafeLineSplit,
     stripEmptyDialogueLines,
     postProcessTranslatedText,
