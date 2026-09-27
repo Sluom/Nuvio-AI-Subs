@@ -20,10 +20,10 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const MAX_SAFE_LINE_CHARS = 48; // الحد الأقصى لعدد الأحرف في السطر الواحد
+const MAX_SAFE_LINE_CHARS = 48; 
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MIN_SPLIT_CHUNK_SIZE = 5;
-const CHUNK_SIZE = 48; // حجم الدفعة المثالي لتقليل الحمل المعرفي
+const CHUNK_SIZE = 80; // رجعناه لـ 80 لتقليل الطلبات الإجمالية
 
 // ===================== MongoDB Cache Layer =====================
 
@@ -168,7 +168,6 @@ function splitLongLineAtMidpoint(line, maxChars = MAX_SAFE_LINE_CHARS) {
     if (line.length <= maxChars) return line;
     const middle = Math.floor(line.length / 2);
     let splitIndex = -1;
-    // البحث عن أقرب مسافة للوسط
     for (let i = middle; i < line.length; i++) {
         if (line[i] === ' ') { splitIndex = i; break; }
     }
@@ -291,6 +290,8 @@ ${sample}`;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
+        
+        // إصلاح الخلل الكارثي للرابط المكسور (بدون Markdown)
         const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
         try {
@@ -356,11 +357,11 @@ function formatGenderMapForPrompt(genderMap) {
     return `\n\n   KNOWN CHARACTER GENDER MAP:\n${lines.join('\n')}\n`;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName, genderMap = null) {
-    const MAX_RETRIES = 4;
+// تعديل الدالة لتقبل عدد المحاولات كمتغير (maxRetries)
+async function translateChunkStrict(texts, keysArray, modelName, genderMap = null, maxRetries = 4) {
     let baseDelay = 3000;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const activeKey = getNextApiKey(keysArray);
 
         if (!activeKey) {
@@ -371,11 +372,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
 
-        const p1 = "https://";
-        const p2 = "generativelanguage.googleapis.com";
-        const p3 = "/v1beta/models/";
-        const p4 = ":generateContent";
-        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
 
         const genderMapBlock = formatGenderMapForPrompt(genderMap);
 
@@ -455,13 +452,13 @@ ${JSON.stringify(texts)}`;
             const isServerError = status >= 500;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
 
-            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
+            if (attempt === maxRetries || (!isRateLimit && !isServerError && !isTimeout)) {
                 console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
                 return null;
             }
 
             const delayMs = baseDelay * Math.pow(2, attempt);
-            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
+            console.log(`[Retry ${attempt + 1}/${maxRetries}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
 
             await delay(delayMs);
         }
@@ -470,8 +467,12 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap) {
-    const direct = await translateChunkStrict(texts, keysArray, modelName, genderMap);
+// إضافة متغير العمق (depth) لمنع انفجار المحاولات
+async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap, depth = 0) {
+    // المستوى صفر ياخذ 4 محاولات، الأقسام الفرعية تاخذ محاولة وحدة بس
+    const allowedRetries = depth === 0 ? 4 : 1; 
+    
+    const direct = await translateChunkStrict(texts, keysArray, modelName, genderMap, allowedRetries);
     if (direct && direct.length === texts.length) {
         return direct;
     }
@@ -481,14 +482,14 @@ async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap
         return texts.map(() => null);
     }
 
-    console.warn(`[Recovery] Chunk of ${texts.length} failed — splitting in half and retrying each half.`);
+    console.warn(`[Recovery - Depth ${depth}] Chunk of ${texts.length} failed — splitting in half and retrying each half.`);
     const mid = Math.ceil(texts.length / 2);
     const firstHalf = texts.slice(0, mid);
     const secondHalf = texts.slice(mid);
 
     const [firstResult, secondResult] = await Promise.all([
-        translateChunkWithRecovery(firstHalf, keysArray, modelName, genderMap),
-        translateChunkWithRecovery(secondHalf, keysArray, modelName, genderMap)
+        translateChunkWithRecovery(firstHalf, keysArray, modelName, genderMap, depth + 1),
+        translateChunkWithRecovery(secondHalf, keysArray, modelName, genderMap, depth + 1)
     ]);
 
     return [...firstResult, ...secondResult];
