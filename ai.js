@@ -384,7 +384,12 @@ ${sample}`;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+        
+        const p1 = "https://";
+        const p2 = "generativelanguage.googleapis.com";
+        const p3 = "/v1beta/models/";
+        const p4 = ":generateContent";
+        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
 
         try {
             const r = await axios.post(
