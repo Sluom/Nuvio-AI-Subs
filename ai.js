@@ -20,9 +20,13 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const MAX_SAFE_LINE_CHARS = 42; // متروك حسب طلبك
-const ARABIC_SAFE_LINE_CHARS = 55; // تم التعديل إلى 55 لمنع تراكب الأسطر
-const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // أسبوع
+const MAX_SAFE_LINE_CHARS = 42; // متروك حسب طلبك (غير مستخدم حاليًا، انظر applyLineLengthFallback)
+const ARABIC_SAFE_LINE_CHARS = 55;
+const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+// أصغر حجم دفعة نسمح نقسم له قبل ما نستسلم ونرجع الإنجليزي — هذا يحدد أقصى
+// "نطاق ضرر" ممكن لو صار فشل حقيقي (فلتر أمان، إلخ): 5 أسطر بس، مو 80.
+const MIN_SPLIT_CHUNK_SIZE = 5;
 
 // ===================== MongoDB Cache Layer =====================
 
@@ -165,13 +169,13 @@ function normalizeLineBreakArtifacts(txt) {
 }
 
 function splitLongLineAtMidpoint(line, maxChars) {
-    // تم إبطال مفعول القص العشوائي لمنع العجن
-    return line; 
+    // معطّلة عمدًا لمنع تراكب/عجن الأسطر — DEAD CODE، مبقاة للتوافق مع module.exports فقط.
+    return line;
 }
 
 function applyLineLengthFallback(text) {
     if (!text) return text;
-    // تم إبطال المفعول هنا أيضاً مع بقاء الدالة
+    // معطّلة عمدًا — انظر ملاحظة splitLongLineAtMidpoint أعلاه.
     return text;
 }
 
@@ -209,7 +213,7 @@ function applyRtlSafeLineSplit(text) {
 }
 
 function stripEmptyDialogueLines(text, originalTextForDebug) {
-    // تم الإبطال بالكامل لمنع نقص الأسطر
+    // معطّلة عمدًا — قفل الحذف الفعلي صار بنهاية handleTranslationSrt/Ass.
     return text;
 }
 
@@ -222,8 +226,12 @@ function postProcessTranslatedText(txt, originalText) {
 }
 
 /**
- * دالة القراءة الصارمة: ترفض أي مصفوفة لا تطابق العدد المطلوب
- * لضمان عدم ضياع أي سطر أو تخريب التزامن (Sync) نهائياً.
+ * دالة القراءة الصارمة: تشترط تطابق تام بعدد الأسطر (Strict 1:1).
+ * ملاحظة مهمة: الصرامة هنا مقصودة ومقبولة، لأن أي فشل بهذا المستوى
+ * (دفعة كاملة) لا يُعالج بإرجاع إنجليزي لكل الدفعة — بل عبر
+ * translateChunkWithRecovery (أدناه) اللي يقسم الدفعة الفاشلة لنصفين
+ * ويعيد المحاولة تكراريًا، فينحصر أي فشل نهائي بأصغر عدد أسطر ممكن
+ * (MIN_SPLIT_CHUNK_SIZE) بدل الدفعة كاملة.
  */
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
@@ -232,7 +240,7 @@ function parseRobustJsonArray(raw, expectedLength) {
     else if (clean.startsWith('```')) clean = clean.substring(3);
     if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
     clean = clean.trim();
-    
+
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
@@ -246,13 +254,12 @@ function parseRobustJsonArray(raw, expectedLength) {
         throw new Error("Length mismatch");
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-        const validMatches = stringMatches
-            .filter(s => s !== 'translations' && s !== 'data');
+        const validMatches = stringMatches.filter(s => s !== 'translations' && s !== 'data');
 
         if (validMatches.length === expectedLength) {
             return validMatches.map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
         }
-        console.error(`[ParseFailure] Strict 1:1 mapping failed. Expected ${expectedLength}. Rejecting chunk.`);
+        console.error(`[ParseFailure] Strict 1:1 mapping failed. Expected ${expectedLength}, got ${stringMatches.length} raw / ${validMatches.length} valid.`);
     }
     return null;
 }
@@ -316,12 +323,7 @@ ${sample}`;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        
-        const p1 = "https://";
-        const p2 = "generativelanguage.googleapis.com";
-        const p3 = "/v1beta/models/";
-        const p4 = ":generateContent";
-        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(
@@ -466,7 +468,7 @@ ${JSON.stringify(texts)}`;
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length);
                 if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
+                    console.log(`[Success] Translated chunk (${texts.length} lines) with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
                     return parsedArr;
                 }
             }
@@ -491,6 +493,44 @@ ${JSON.stringify(texts)}`;
     }
 
     return null;
+}
+
+/**
+ * الحل الجذري لمنع "قفزات الإنجليزي" الكبيرة: لو translateChunkStrict فشلت
+ * بدفعة (لأي سبب: تطابق عدد، فلتر أمان، إلخ)، بدل ما نستسلم فورًا ونرجع
+ * إنجليزي لكل الدفعة، نقسمها نصين ونعيد المحاولة على كل نص لحاله بشكل
+ * تكراري (recursive). هذا يحصر "نطاق الضرر" المحتمل بأصغر عدد أسطر ممكن
+ * (MIN_SPLIT_CHUNK_SIZE) بدل الدفعة كاملة (كانت 80 سطر).
+ *
+ * يرجّع دائمًا مصفوفة بنفس طول texts (لا يكسر التزامن أبدًا) — أي عنصر
+ * فشلت ترجمته الفردية يرجع null بمكانه، والمستدعي (handleTranslationSrt/Ass)
+ * يستبدله بالنص الأصلي عبر "قفل الحذف" الموجود أصلاً.
+ */
+async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap) {
+    const direct = await translateChunkStrict(texts, keysArray, modelName, genderMap);
+    if (direct && direct.length === texts.length) {
+        return direct;
+    }
+
+    // وصلنا لأصغر حجم مسموح بالتقسيم — نستسلم لهذا الجزء الصغير بس (لا يتجاوز
+    // MIN_SPLIT_CHUNK_SIZE سطر)، ونرجع null لكل عنصر فيه (يُستبدل بالإنجليزي
+    // بمرحلة لاحقة، بنطاق ضرر محدود جدًا).
+    if (texts.length <= MIN_SPLIT_CHUNK_SIZE) {
+        console.warn(`[Recovery] Giving up on a minimal chunk of ${texts.length} line(s) — will fall back to original text for just these.`);
+        return texts.map(() => null);
+    }
+
+    console.warn(`[Recovery] Chunk of ${texts.length} failed — splitting in half and retrying each half.`);
+    const mid = Math.ceil(texts.length / 2);
+    const firstHalf = texts.slice(0, mid);
+    const secondHalf = texts.slice(mid);
+
+    const [firstResult, secondResult] = await Promise.all([
+        translateChunkWithRecovery(firstHalf, keysArray, modelName, genderMap),
+        translateChunkWithRecovery(secondHalf, keysArray, modelName, genderMap)
+    ]);
+
+    return [...firstResult, ...secondResult];
 }
 
 async function fetchAndExtractSub(subUrl) {
@@ -574,26 +614,27 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
                 }
                 return t;
             });
-            const translated = await translateChunkStrict(texts, keysArray, modelName, genderMap);
-            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+            const translated = await translateChunkWithRecovery(texts, keysArray, modelName, genderMap);
+            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : null);
         });
 
         const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
         const rawTranslations = chunkResults.flat();
-        const finalTranslations = rawTranslations.map((t, idx) => postProcessTranslatedText(t, cues[idx]?.text));
+        const finalTranslations = rawTranslations.map((t, idx) =>
+            t ? postProcessTranslatedText(t, cues[idx]?.text) : null
+        );
 
         let srtOutput = '';
         let counter = 1;
 
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
-            
-            // قفل الحذف: إذا السطر فارغ، رجع النص الإنجليزي الأصلي
+
+            // قفل الحذف: إذا السطر فارغ أو فشلت ترجمته، رجع النص الإنجليزي الأصلي
             if (!text || text.trim() === '') {
                 text = c.text;
             } else {
                 let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-                // قفل الحذف 2: إذا النص بي بس فواصل أو مؤثرات، رجع الأصلي ولا تحذفه
                 if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) {
                     text = c.text;
                 }
@@ -648,24 +689,24 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
                 }
                 return t;
             });
-            const translated = await translateChunkStrict(texts, keysArray, modelName, genderMap);
-            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
+            const translated = await translateChunkWithRecovery(texts, keysArray, modelName, genderMap);
+            return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : null);
         });
 
         const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
         const rawTranslations = chunkResults.flat();
-        const finalTranslations = rawTranslations.map((t, idx) => postProcessTranslatedText(t, cues[idx]?.text));
+        const finalTranslations = rawTranslations.map((t, idx) =>
+            t ? postProcessTranslatedText(t, cues[idx]?.text) : null
+        );
 
         const assLines = [];
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
-            
-            // قفل الحذف: إذا السطر فارغ، رجع النص الإنجليزي الأصلي
+
             if (!text || text.trim() === '') {
                 text = c.text;
             } else {
                 let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-                // قفل الحذف 2: إذا النص بي بس فواصل أو مؤثرات، رجع الأصلي ولا تحذفه
                 if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) {
                     text = c.text;
                 }
@@ -695,5 +736,6 @@ module.exports = {
     stripEmptyDialogueLines,
     postProcessTranslatedText,
     extractCharacterGenderMap,
-    formatGenderMapForPrompt
+    formatGenderMapForPrompt,
+    translateChunkWithRecovery
 };
