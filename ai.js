@@ -20,7 +20,8 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const ARABIC_SAFE_LINE_CHARS = 55;
+const MAX_SAFE_LINE_CHARS = 42; // متروك حسب طلبك
+const ARABIC_SAFE_LINE_CHARS = 55; // تم التعديل إلى 55 لمنع تراكب الأسطر
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
@@ -163,6 +164,17 @@ function normalizeLineBreakArtifacts(txt) {
     return text;
 }
 
+function splitLongLineAtMidpoint(line, maxChars) {
+    // تم إبطال مفعول القص العشوائي لمنع العجن
+    return line; 
+}
+
+function applyLineLengthFallback(text) {
+    if (!text) return text;
+    // تم إبطال المفعول هنا أيضاً مع بقاء الدالة
+    return text;
+}
+
 function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS) {
     if (!text || text.length <= maxChars) return text;
 
@@ -197,28 +209,22 @@ function applyRtlSafeLineSplit(text) {
 }
 
 function stripEmptyDialogueLines(text, originalTextForDebug) {
-    if (!text) return text;
-    const lines = text.split('\n');
-    const filtered = lines.filter(line => {
-        const plain = line.replace(/<[^>]+>|\{[^}]+\}/g, '');
-        const hasContent = /[a-zA-Z0-9\u0600-\u06FF♪]/.test(plain);
-        if (!hasContent && line.trim() !== '') {
-            console.warn(
-                `[EmptyLineDropped] Removed line: "${line}" | Full translated text: "${text}" | Original: "${originalTextForDebug || 'N/A'}"`
-            );
-        }
-        return hasContent;
-    });
-    return filtered.join('\n');
+    // تم الإبطال بالكامل لمنع نقص الأسطر
+    return text;
 }
 
 function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
     text = stripEmptyDialogueLines(text, originalText);
+    text = applyLineLengthFallback(text);
     text = applyRtlSafeLineSplit(text);
     return text.trim();
 }
 
+/**
+ * دالة القراءة الصارمة: ترفض أي مصفوفة لا تطابق العدد المطلوب
+ * لضمان عدم ضياع أي سطر أو تخريب التزامن (Sync) نهائياً.
+ */
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
@@ -226,29 +232,27 @@ function parseRobustJsonArray(raw, expectedLength) {
     else if (clean.startsWith('```')) clean = clean.substring(3);
     if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
     clean = clean.trim();
+    
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
 
-        if (Array.isArray(arr) && arr.length > 0) {
+        if (Array.isArray(arr) && arr.length === expectedLength) {
             return arr.map(x => {
                 let txt = String(x || '');
                 return txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
             });
         }
+        throw new Error("Length mismatch");
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         const validMatches = stringMatches
-            .filter(s => s !== 'translations' && s !== 'data')
-            .filter(s => /[a-zA-Z0-9\u0600-\u06FF]/.test(s));
+            .filter(s => s !== 'translations' && s !== 'data');
 
-        if (validMatches.length >= expectedLength * 0.9) {
+        if (validMatches.length === expectedLength) {
             return validMatches.map(s => s.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪'));
         }
-
-        console.error(
-            `[ParseFailure] Fallback regex got ${stringMatches.length}/${expectedLength} raw matches, rejecting chunk.`
-        );
+        console.error(`[ParseFailure] Strict 1:1 mapping failed. Expected ${expectedLength}. Rejecting chunk.`);
     }
     return null;
 }
@@ -363,7 +367,7 @@ ${sample}`;
                     }
                 }
                 if (Object.keys(map).length > 0) {
-                    console.log(`[GenderMap] Extracted ${Object.keys(map).length} character(s): ${Object.keys(map).join(', ')}`);
+                    console.log(`[GenderMap] Extracted ${Object.keys(map).length} character(s)`);
                     return map;
                 }
             }
@@ -371,6 +375,7 @@ ${sample}`;
             console.error(`[GenderMap] Attempt ${attempt + 1}/${MAX_ATTEMPTS} failed.`);
         }
     }
+
     console.warn('[GenderMap] Extraction failed — proceeding without a gender map.');
     return null;
 }
@@ -405,35 +410,28 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
         const genderMapBlock = formatGenderMapForPrompt(genderMap);
 
         const prompt = `Translate the following subtitles while:
-1. Preserving the timing and structure exactly as given
-2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
-3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
-4. Preserving any formatting tags or special characters
-5. Ensuring translations are contextually accurate for film/TV dialogue
-6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-7. Apply professional Arabic subtitling conventions for punctuation.
-8. CRITICAL GENDER ENFORCEMENT: English pronouns ('you', 'they', 'I') are gender-neutral, but Arabic is strictly gendered. Apply feminine conjugations rigorously when appropriate.${genderMapBlock}
-9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
-10. Pay close attention to split sentences. Ensure the Arabic grammar and phrasing flow logically.
-11. Any text wrapped entirely in square brackets [ ] represents on-screen text. Translate it accurately and strictly keep the square brackets.
-12. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve original line breaks only.
-13. Do not merge separate dialogue lines.
-14. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly the same number of elements as the input array.
+1. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly ${texts.length} elements — one output string per input string. Never merge or skip lines.
+2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language.
+3. Preserving any formatting tags or special characters.
+4. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
+5. Apply professional Arabic subtitling conventions for punctuation.
+6. CRITICAL GENDER ENFORCEMENT: Enforce Arabic gender conjugations strictly. ${genderMapBlock}
+7. Pay close attention to split sentences. Ensure the Arabic grammar flows logically.
+8. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve original line breaks only.
 
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
-15. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name unless referring to the actual historical figure.
-16. ACRONYMS & BRANDS: Keep famous brands/entities in English letters (e.g., KFC, CIA). For functional business acronyms (e.g., PLC), translate to the Arabic equivalent (e.g., ش.م.ع). NEVER drop a line containing only an acronym.
-17. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
-18. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
-19. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone (e.g., a man calling another man "little girl"). In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
-20. FORMALITY & HONORIFICS: Observe the status of the characters. When addressing figures of authority (judges, bosses, royalty), use formal Arabic equivalents (e.g., سيدي، حضرتك، جلالتك) instead of the casual 'أنت'.
-21. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally (e.g., 'break a leg'). Use the closest culturally appropriate Arabic idiom.
-22. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally to 'آه' or 'همم'. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context, to keep the flow smooth. Never return an empty line for them.
-23. SONGS & POETRY: If a line contains the music symbol '♪', keep the symbol at the start/end and translate the lyrics poetically rather than literally.
-24. PROFANITY: Translate swear words into standard cinematic Arabic equivalents (e.g., اللعنة، تباً، سحقاً) without literal awkwardness.
+9. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
+10. ACRONYMS & BRANDS: Keep famous brands/entities in English letters (e.g., KFC, CIA). For functional business acronyms (e.g., PLC), translate to the Arabic equivalent (e.g., ش.م.ع). NEVER drop a line containing only an acronym.
+11. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
+12. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
+13. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone (e.g., a man calling another man "little girl"). In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
+14. FORMALITY & HONORIFICS: Observe the status of the characters. When addressing figures of authority (judges, bosses, royalty), use formal Arabic equivalents (e.g., سيدي، حضرتك، جلالتك) instead of the casual 'أنت'.
+15. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally (e.g., 'break a leg'). Use the closest culturally appropriate Arabic idiom.
+16. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally to 'آه' or 'همم'. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context. Never return an empty line.
+17. SONGS & POETRY: If a line contains the music symbol '♪', keep the symbol at the start/end and translate the lyrics poetically rather than literally.
+18. PROFANITY: Translate swear words into standard cinematic Arabic equivalents (e.g., اللعنة، تباً، سحقاً) without literal awkwardness.
 
-Translate to Arabic.
-Do NOT overthink. Do NOT overplan. Output ONLY A VALID JSON ARRAY OF STRINGS.
+Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 
 Content to translate:
 ${JSON.stringify(texts)}`;
@@ -481,15 +479,17 @@ ${JSON.stringify(texts)}`;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
 
             if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
-                console.error(`[Gemini Error] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
+                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
                 return null;
             }
 
             const delayMs = baseDelay * Math.pow(2, attempt);
-            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Waiting ${delayMs}ms before trying NEXT key...`);
+            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
+
             await delay(delayMs);
         }
     }
+
     return null;
 }
 
@@ -525,6 +525,8 @@ function resolvePoolLimit(keysArray) {
     const n = Array.isArray(keysArray) ? keysArray.length : 0;
     return n > 0 ? n : 1;
 }
+
+// ===================== Translation Queue (Mutex Lock) =====================
 
 let translationQueue = Promise.resolve();
 
@@ -585,10 +587,17 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
-            if (!text) return;
-
-            let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-            if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
+            
+            // قفل الحذف: إذا السطر فارغ، رجع النص الإنجليزي الأصلي
+            if (!text || text.trim() === '') {
+                text = c.text;
+            } else {
+                let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+                // قفل الحذف 2: إذا النص بي بس فواصل أو مؤثرات، رجع الأصلي ولا تحذفه
+                if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) {
+                    text = c.text;
+                }
+            }
 
             let sTime = c.start.replace('.', ',');
             let eTime = c.end.replace('.', ',');
@@ -650,10 +659,17 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         const assLines = [];
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
-            if (!text) return;
-
-            let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
-            if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) return;
+            
+            // قفل الحذف: إذا السطر فارغ، رجع النص الإنجليزي الأصلي
+            if (!text || text.trim() === '') {
+                text = c.text;
+            } else {
+                let plainText = text.replace(/<[^>]+>|\{[^}]+\}/g, '');
+                // قفل الحذف 2: إذا النص بي بس فواصل أو مؤثرات، رجع الأصلي ولا تحذفه
+                if (!/[a-zA-Z0-9\u0600-\u06FF♪]/.test(plainText)) {
+                    text = c.text;
+                }
+            }
 
             const safeText = text.trim().replace(/\n/g, '\\N');
             assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
@@ -674,6 +690,7 @@ module.exports = {
     handleTranslationAss,
     normalizeLineBreakArtifacts,
     parseRobustJsonArray,
+    applyLineLengthFallback,
     applyRtlSafeLineSplit,
     stripEmptyDialogueLines,
     postProcessTranslatedText,
