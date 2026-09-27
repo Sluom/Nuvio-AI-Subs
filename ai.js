@@ -21,7 +21,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
 const MAX_SAFE_LINE_CHARS = 42;
-const ARABIC_SAFE_LINE_CHARS = 42; // تم التعديل إلى 50 حسب طلبك
+const ARABIC_SAFE_LINE_CHARS = 48; // تم التعديل إلى 50 حسب طلبك
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
@@ -384,7 +384,7 @@ ${sample}`;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(
@@ -502,6 +502,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
 12. Line length control: if a translated line (not counting an existing dialogue dash "-" prefix) would exceed roughly 40 Arabic characters, break it into exactly two lines using a real line break (\\n) at a natural grammatical point (after a comma, between clauses, or near the sentence's midpoint) — never in the middle of a word. Prefer a shorter, more concise phrasing over a long literal one when it keeps the meaning intact.
 13. Do not exceed 2 lines per entry after any splitting from rule 12. Do not merge separate dialogue lines (lines that already start with "-" for different speakers) or separate on-screen-text lines into a single line, and do not add extra splits beyond what is needed — preserve the original line grouping given by the source as much as possible.
+14. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly the same number of elements as the input array — one output string per input string, in the same order. Never merge two input entries into one output entry, never split one input entry into two separate array elements, and never omit an entry. If an entry is a short exclamation, a name, or a sound-effect-only line, still translate/transliterate it and return it as its own array element — never leave it out or fold it into a neighboring entry. (Note: splitting a single entry's text into two lines with \\n, per rule 12, is not the same as splitting it into two array elements — that stays allowed and is separate from this rule.)
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
