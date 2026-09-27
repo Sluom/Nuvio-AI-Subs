@@ -423,7 +423,12 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
 9. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
-10. ACRONYMS & BRANDS: Keep famous brands/entities in English letters (e.g., KFC, CIA). For functional business acronyms (e.g., PLC), translate to the Arabic equivalent (e.g., ش.م.ع). NEVER drop a line containing only an acronym.
+10. ACRONYMS, AGENCIES & ENTITIES (STRICT ARABIZATION):
+    - TRANSLATE ALL government, military, medical, and scientific acronyms (e.g., FBI, CIA, SWAT, TAT, DNA, BAU, NSA) into their FULL and official Arabic meanings (e.g., المباحث الفدرالية، وكالة المخابرات المركزية، القوات الخاصة، اختبار الإدراك الموضوعي، الحمض النووي).
+    - ABSOLUTELY NO ENGLISH LETTERS for agencies or scientific acronyms.
+    - If a highly obscure acronym cannot be translated to a meaning, transliterate it phonetically using ARABIC letters ONLY (e.g., output 'تي إيه تي' instead of 'TAT').
+    - Only purely commercial global brands (e.g., Apple, KFC) may remain in English if transliteration is awkward, but Arabic letters are always preferred.
+
 11. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
 12. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 13. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone (e.g., a man calling another man "little girl"). In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
