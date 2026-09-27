@@ -20,7 +20,7 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const ARABIC_SAFE_LINE_CHARS = 55; // تم التعديل إلى 55 لمنع تراكب الأسطر
+const ARABIC_SAFE_LINE_CHARS = 55;
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // أسبوع
 
 // ===================== MongoDB Cache Layer =====================
@@ -163,11 +163,6 @@ function normalizeLineBreakArtifacts(txt) {
     return text;
 }
 
-/**
- * يقسم سطر عربي طويل لعدة أسطر حقيقية (\n) عند حدود الكلمات، بحيث ما تحتاج
- * أي تطبيق عرض auto-wrap لهالسطر — يشتغل بشكل مستقل عن أي منطق RTL بجانب
- * التطبيق، لأن \n (عكس رموز RLE/PDF) لا يُحذف أو يُتجاهل من أي مشغل.
- */
 function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS) {
     if (!text || text.length <= maxChars) return text;
 
@@ -183,7 +178,6 @@ function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS
                 segmentStart = lastSpaceIndex + 1;
                 lastSpaceIndex = -1;
             }
-            // لو ما فيه مسافة جوا الحد (كلمة طويلة جدًا)، نكمل بدون قطع نصها.
         }
     }
     if (segmentStart < text.length) {
@@ -192,11 +186,6 @@ function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS
     return segments.join('\n');
 }
 
-/**
- * يطبّق التقسيم الآمن على كل سطر منطقي بالنص المترجم (لا يلمس الأسطر
- * المفصولة أصلاً بحوار شخصين أو نص شاشي — كل وحدة تتعالج لحالها)، فقط
- * لو النص يحتوي حروف عربية.
- */
 function applyRtlSafeLineSplit(text) {
     if (!text) return text;
     const hasArabic = /[\u0600-\u06FF]/.test(text);
@@ -207,11 +196,6 @@ function applyRtlSafeLineSplit(text) {
         .join('\n');
 }
 
-/**
- * يحذف أي سطر فرعي (داخل نفس الـ cue) ما فيه محتوى فعلي — يبقي فقط شرطة
- * أو علامات ترقيم بدون نص — بينما يحافظ على باقي الأسطر اللي فيها كلام.
- * يطبع تحذير تشخيصي لحظة ما يحذف سطر، عشان نلقط سبب المشكلة تلقائيًا من اللوق.
- */
 function stripEmptyDialogueLines(text, originalTextForDebug) {
     if (!text) return text;
     const lines = text.split('\n');
@@ -228,7 +212,6 @@ function stripEmptyDialogueLines(text, originalTextForDebug) {
     return filtered.join('\n');
 }
 
-/** يطبّق كل خطوات التنظيف بالترتيب الصحيح على نص مترجم واحد. */
 function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
     text = stripEmptyDialogueLines(text, originalText);
@@ -236,14 +219,6 @@ function postProcessTranslatedText(txt, originalText) {
     return text.trim();
 }
 
-/**
- * يحاول يحلّل استجابة Gemini كـ JSON array من النصوص.
- * أولوية أولى: JSON.parse سليم. لو فشل، fallback عن طريق regex يمسك النصوص
- * بين علامات تنصيص — لكن يرفض أي "ترجمة" هي بس علامات ترقيم (فاصلة، نقطة...)
- * بدون أي حرف فعلي، ويشترط تطابق شبه كامل بالعدد (90%+) قبل ما يقبل النتيجة.
- * لو ما وصلنا لهذا الحد، يرجّع null — وهذا يخلي الكود الأعلى يستخدم النص
- * الإنجليزي الأصلي بدل ما يعرض فواصل فاضية.
- */
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
@@ -261,7 +236,6 @@ function parseRobustJsonArray(raw, expectedLength) {
                 return txt.replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
             });
         }
-
     } catch (e) {
         const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
         const validMatches = stringMatches
@@ -273,8 +247,7 @@ function parseRobustJsonArray(raw, expectedLength) {
         }
 
         console.error(
-            `[ParseFailure] Fallback regex got ${stringMatches.length}/${expectedLength} raw matches, ` +
-            `only ${validMatches.length} valid (non-punctuation). Rejecting chunk — will fall back to original text.`
+            `[ParseFailure] Fallback regex got ${stringMatches.length}/${expectedLength} raw matches, rejecting chunk.`
         );
     }
     return null;
@@ -308,35 +281,22 @@ function getNextApiKey(keysArray) {
     return key;
 }
 
-// ===================== Character Gender Map Extraction (NEW) =====================
+// ===================== Character Gender Map Extraction =====================
 
-/**
- * يسوي استدعاء واحد فقط لكامل الملف (قبل التقسيم لأجزاء) يطلع منه قائمة
- * أسماء الشخصيات وجنس كل وحدة منها، بالاعتماد على كل الأدلة المتوفرة بكامل
- * النص (مو بس جزء صغير معزول). هذا يحل مشكلة "الشخصية تتكرر بجزء بعيد بدون
- * أي دليل جنس جديد" لأن الجنس يصير معروف مسبقًا وثابت لكل الأجزاء.
- *
- * يرجّع Object زي: { "SARAH": "female", "JOHN": "male" } أو null لو فشل
- * الاستخراج (وبهذي الحالة يرجع الكود الأعلى يشتغل بدون خارطة، زي الوضع
- * القديم بالضبط — ما فيه أي كسر بالوظيفة الأساسية).
- */
 async function extractCharacterGenderMap(cues, keysArray, modelName) {
     if (!cues || !cues.length) return null;
 
     const fullText = cues.map(c => c.text).join('\n');
-    // بدون أي قص: نافذة السياق الكبيرة عند Gemini تسمح بقراءة نص الفلم كامل
-    // (حتى أطول فلم لا يتجاوز عادة 50-70 ألف حرف)، فالخارطة تصير شاملة
-    // (Global) لكل شخصيات الفلم من أول ثانية لآخر ثانية.
     const sample = fullText;
 
     const prompt = `You are analyzing an English subtitle script to identify character names and their genders, to help a downstream Arabic translation system apply correct gender-specific grammar consistently across the whole file.
 
-Read the following subtitle text and identify every character/person name that appears (real proper names of people only — never places, food, brands, or objects). For each name, determine the character's gender (male or female) using any contextual clues found ANYWHERE in the text (pronouns near the name, titles like Mr./Mrs./Sir/Ma'am, relationship words like wife/husband/sister/brother/girlfriend/boyfriend, dialogue addressed to them, etc).
+Read the following subtitle text and identify every character/person name that appears (real proper names of people only — never places, food, brands, or objects). For each name, determine the character's gender (male or female) using any contextual clues found ANYWHERE in the text.
 
 Rules:
 - Only include actual person names.
-- Merge obvious variants of the same character into one entry (e.g. "John" and "JOHN" and "Johnny" if clearly the same person) using the most common form as the name.
-- If a name appears with zero gender clues anywhere in the text, still include it with your best guess based on common name/gender association, or "unknown" if truly ambiguous.
+- Merge obvious variants of the same character into one entry.
+- If a name appears with zero gender clues anywhere in the text, still include it with your best guess, or "unknown".
 - Do NOT include narration-only labels or on-screen text placeholders.
 
 Output ONLY a valid JSON array of objects, nothing else, no explanations, in this exact format:
@@ -408,23 +368,17 @@ ${sample}`;
                 }
             }
         } catch (e) {
-            console.error(`[GenderMap] Attempt ${attempt + 1}/${MAX_ATTEMPTS} failed: ${e.response?.data?.error?.message || e.message}`);
+            console.error(`[GenderMap] Attempt ${attempt + 1}/${MAX_ATTEMPTS} failed.`);
         }
     }
-
-    console.warn('[GenderMap] Extraction failed — proceeding without a gender map (fallback to per-chunk inference).');
+    console.warn('[GenderMap] Extraction failed — proceeding without a gender map.');
     return null;
 }
 
-/** يحوّل خارطة الأسماء/الجنس إلى نص جاهز للحقن داخل نقطة 8 بالبرومنت. */
 function formatGenderMapForPrompt(genderMap) {
     if (!genderMap || Object.keys(genderMap).length === 0) return '';
     const lines = Object.entries(genderMap).map(([name, gender]) => `   - ${name} = ${gender}`);
-    return `
-
-   KNOWN CHARACTER GENDER MAP (ground truth extracted from the full script — use this instead of guessing whenever a name below appears, even if this specific chunk has no gender clue on its own):
-${lines.join('\n')}
-`;
+    return `\n\n   KNOWN CHARACTER GENDER MAP:\n${lines.join('\n')}\n`;
 }
 
 async function translateChunkStrict(texts, keysArray, modelName, genderMap = null) {
@@ -457,31 +411,29 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 4. Preserving any formatting tags or special characters
 5. Ensuring translations are contextually accurate for film/TV dialogue
 6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-7. Apply professional Arabic subtitling conventions for punctuation as follows:
-   a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
-   b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
-   c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
-   d. Do not double-wrap: if a full entry is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
-   e. Never use quotation marks for places/objects and never use parentheses for person names.
-8. CRITICAL GENDER ENFORCEMENT: English pronouns ('you', 'they', 'I') are gender-neutral, but Arabic is strictly gendered. You MUST act as a gender-context analyzer:
-   a) SCAN FOR CLUES: Actively look for names, titles (sir/ma'am), relationships (wife/sister/brother), or emotional context (e.g., romantic couples) before translating.
-   b) APPLY FEMININE RIGOROUSLY: If addressing a female or if a female is speaking, you MUST use feminine conjugations perfectly (e.g., أنتِ، لكِ، ماذا تفعلين).
-   c) LOCK CONSISTENCY: Once a gender is established in a conversation block, DO NOT flip-flop genders randomly between lines. Keep it locked.
-   d) ZERO CLUE FALLBACK: Default to masculine ONLY if absolutely zero clues exist in the text, but NEVER ignore a female clue if it appears.
-   e) PRIORITY OVERRIDE: If a name below appears in the KNOWN CHARACTER GENDER MAP, its gender is already confirmed from analysis of the entire script — apply it directly to every line spoken to or by that character, even if this specific chunk alone has no visible clue. Only deviate from the map if the immediate line contains an unmistakable contradicting clue (e.g. the map is wrong for that one specific line).${genderMapBlock}
-
+7. Apply professional Arabic subtitling conventions for punctuation.
+8. CRITICAL GENDER ENFORCEMENT: English pronouns ('you', 'they', 'I') are gender-neutral, but Arabic is strictly gendered. Apply feminine conjugations rigorously when appropriate.${genderMapBlock}
 9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
-10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
-11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
-12. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve the original line breaks exactly as they appear in the source text.
-13. Do not exceed 2 lines per entry after any splitting from rule 12. Do not merge separate dialogue lines (lines that already start with "-" for different speakers) or separate on-screen-text lines into a single line, and do not add extra splits beyond what is needed — preserve the original line grouping given by the source as much as possible.
-14. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly the same number of elements as the input array — one output string per input string, in the same order. Never merge two input entries into one output entry, never split one input entry into two separate array elements, and never omit an entry. If an entry is a short exclamation, a name, or a sound-effect-only line, still translate/transliterate it and return it as its own array element — never leave it out or fold it into a neighboring entry. (Note: splitting a single entry's text into two lines with \\n, per rule 12, is not the same as splitting it into two array elements — that stays allowed and is separate from this rule.)
+10. Pay close attention to split sentences. Ensure the Arabic grammar and phrasing flow logically.
+11. Any text wrapped entirely in square brackets [ ] represents on-screen text. Translate it accurately and strictly keep the square brackets.
+12. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve original line breaks only.
+13. Do not merge separate dialogue lines.
+14. STRICT 1:1 ARRAY MAPPING (CRITICAL): The output JSON array MUST have exactly the same number of elements as the input array.
+
+=== CINEMATIC CONSTITUTION (CRITICAL RULES) ===
+15. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name unless referring to the actual historical figure.
+16. ACRONYMS & BRANDS: Keep famous brands/entities in English letters (e.g., KFC, CIA). For functional business acronyms (e.g., PLC), translate to the Arabic equivalent (e.g., ش.م.ع). NEVER drop a line containing only an acronym.
+17. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
+18. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
+19. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone (e.g., a man calling another man "little girl"). In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
+20. FORMALITY & HONORIFICS: Observe the status of the characters. When addressing figures of authority (judges, bosses, royalty), use formal Arabic equivalents (e.g., سيدي، حضرتك، جلالتك) instead of the casual 'أنت'.
+21. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally (e.g., 'break a leg'). Use the closest culturally appropriate Arabic idiom.
+22. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally to 'آه' or 'همم'. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context, to keep the flow smooth. Never return an empty line for them.
+23. SONGS & POETRY: If a line contains the music symbol '♪', keep the symbol at the start/end and translate the lyrics poetically rather than literally.
+24. PROFANITY: Translate swear words into standard cinematic Arabic equivalents (e.g., اللعنة، تباً، سحقاً) without literal awkwardness.
 
 Translate to Arabic.
-Do NOT overthink. Do NOT overplan.
-Do NOT include acknowledgements, explanations, notes or alternative translations.
-
-Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
+Do NOT overthink. Do NOT overplan. Output ONLY A VALID JSON ARRAY OF STRINGS.
 
 Content to translate:
 ${JSON.stringify(texts)}`;
@@ -529,17 +481,15 @@ ${JSON.stringify(texts)}`;
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
 
             if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
-                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
+                console.error(`[Gemini Error] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
                 return null;
             }
 
             const delayMs = baseDelay * Math.pow(2, attempt);
-            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
-
+            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Waiting ${delayMs}ms before trying NEXT key...`);
             await delay(delayMs);
         }
     }
-
     return null;
 }
 
@@ -576,8 +526,6 @@ function resolvePoolLimit(keysArray) {
     return n > 0 ? n : 1;
 }
 
-// ===================== Translation Queue (Mutex Lock) =====================
-
 let translationQueue = Promise.resolve();
 
 async function enqueueTranslation(task) {
@@ -610,7 +558,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
-        // خطوة واحدة قبل التقسيم: استخراج خارطة أسماء الشخصيات وجنسها من كامل الملف
         const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
 
         const CHUNK = 80;
@@ -678,7 +625,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-        // خطوة واحدة قبل التقسيم: استخراج خارطة أسماء الشخصيات وجنسها من كامل الملف
         const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
 
         const CHUNK = 80;
