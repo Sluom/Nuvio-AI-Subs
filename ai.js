@@ -20,13 +20,10 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const MAX_SAFE_LINE_CHARS = 42; // متروك حسب طلبك (غير مستخدم حاليًا، انظر applyLineLengthFallback)
-const ARABIC_SAFE_LINE_CHARS = 55;
+const MAX_SAFE_LINE_CHARS = 48; // الحد الأقصى لعدد الأحرف في السطر الواحد
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
-
-// أصغر حجم دفعة نسمح نقسم له قبل ما نستسلم ونرجع الإنجليزي — هذا يحدد أقصى
-// "نطاق ضرر" ممكن لو صار فشل حقيقي (فلتر أمان، إلخ): 5 أسطر بس، مو 80.
 const MIN_SPLIT_CHUNK_SIZE = 5;
+const CHUNK_SIZE = 48; // حجم الدفعة المثالي لتقليل الحمل المعرفي
 
 // ===================== MongoDB Cache Layer =====================
 
@@ -164,75 +161,46 @@ function normalizeLineBreakArtifacts(txt) {
         .replace(/\\N/g, '\n')
         .replace(/\\r/g, '')
         .replace(/[\u200E\u200F\u202A-\u202E]/g, '');
-
     return text;
 }
 
-function splitLongLineAtMidpoint(line, maxChars) {
-    // معطّلة عمدًا لمنع تراكب/عجن الأسطر — DEAD CODE، مبقاة للتوافق مع module.exports فقط.
+function splitLongLineAtMidpoint(line, maxChars = MAX_SAFE_LINE_CHARS) {
+    if (line.length <= maxChars) return line;
+    const middle = Math.floor(line.length / 2);
+    let splitIndex = -1;
+    // البحث عن أقرب مسافة للوسط
+    for (let i = middle; i < line.length; i++) {
+        if (line[i] === ' ') { splitIndex = i; break; }
+    }
+    if (splitIndex === -1) {
+        for (let i = middle; i >= 0; i--) {
+            if (line[i] === ' ') { splitIndex = i; break; }
+        }
+    }
+    if (splitIndex !== -1) {
+        return line.slice(0, splitIndex) + '\n' + line.slice(splitIndex + 1);
+    }
     return line;
 }
 
 function applyLineLengthFallback(text) {
     if (!text) return text;
-    // معطّلة عمدًا — انظر ملاحظة splitLongLineAtMidpoint أعلاه.
-    return text;
-}
-
-function splitArabicLineAtWordBoundaries(text, maxChars = ARABIC_SAFE_LINE_CHARS) {
-    if (!text || text.length <= maxChars) return text;
-
-    const segments = [];
-    let segmentStart = 0;
-    let lastSpaceIndex = -1;
-
-    for (let i = 0; i < text.length; i++) {
-        if (text[i] === ' ') lastSpaceIndex = i;
-        if (i - segmentStart >= maxChars) {
-            if (lastSpaceIndex > segmentStart) {
-                segments.push(text.slice(segmentStart, lastSpaceIndex));
-                segmentStart = lastSpaceIndex + 1;
-                lastSpaceIndex = -1;
-            }
+    const lines = text.split('\n');
+    const processedLines = lines.map(line => {
+        if (line.length > MAX_SAFE_LINE_CHARS) {
+            return splitLongLineAtMidpoint(line);
         }
-    }
-    if (segmentStart < text.length) {
-        segments.push(text.slice(segmentStart));
-    }
-    return segments.join('\n');
-}
-
-function applyRtlSafeLineSplit(text) {
-    if (!text) return text;
-    const hasArabic = /[\u0600-\u06FF]/.test(text);
-    if (!hasArabic) return text;
-    return text
-        .split('\n')
-        .map(line => splitArabicLineAtWordBoundaries(line))
-        .join('\n');
-}
-
-function stripEmptyDialogueLines(text, originalTextForDebug) {
-    // معطّلة عمدًا — قفل الحذف الفعلي صار بنهاية handleTranslationSrt/Ass.
-    return text;
+        return line;
+    });
+    return processedLines.join('\n');
 }
 
 function postProcessTranslatedText(txt, originalText) {
     let text = normalizeLineBreakArtifacts(txt);
-    text = stripEmptyDialogueLines(text, originalText);
     text = applyLineLengthFallback(text);
-    text = applyRtlSafeLineSplit(text);
     return text.trim();
 }
 
-/**
- * دالة القراءة الصارمة: تشترط تطابق تام بعدد الأسطر (Strict 1:1).
- * ملاحظة مهمة: الصرامة هنا مقصودة ومقبولة، لأن أي فشل بهذا المستوى
- * (دفعة كاملة) لا يُعالج بإرجاع إنجليزي لكل الدفعة — بل عبر
- * translateChunkWithRecovery (أدناه) اللي يقسم الدفعة الفاشلة لنصفين
- * ويعيد المحاولة تكراريًا، فينحصر أي فشل نهائي بأصغر عدد أسطر ممكن
- * (MIN_SPLIT_CHUNK_SIZE) بدل الدفعة كاملة.
- */
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     let clean = raw.trim();
@@ -323,7 +291,7 @@ ${sample}`;
 
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(
@@ -417,9 +385,11 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 3. Preserving any formatting tags or special characters.
 4. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
 5. Apply professional Arabic subtitling conventions for punctuation.
-6. CRITICAL GENDER ENFORCEMENT: Enforce Arabic gender conjugations strictly. ${genderMapBlock}
-7. Pay close attention to split sentences. Ensure the Arabic grammar flows logically.
-8. Keep translations concise. DO NOT insert artificial line breaks (\\n) to split long sentences. Preserve original line breaks only.
+6. LINE LENGTH CONTROL (CRITICAL): If an English subtitle is a single long line, translate it as a single Arabic line UNLESS it exceeds ${MAX_SAFE_LINE_CHARS} characters. If it is too long, insert exactly ONE line break (\\n) at a logical midpoint (e.g. after a comma or conjunction). If the original text already contains a line break (\\n), PRESERVE IT in the exact same logical place in the Arabic translation.
+7. CRITICAL GENDER ENFORCEMENT & DYNAMIC CONTEXT: Treat this chunk as a continuous cinematic scene. Use the provided GENDER MAP to deduce who is participating in the conversation.
+   - If the dialogue is a clear back-and-forth between a male and a female, dynamically alternate the Arabic pronouns to match the conversation flow.
+   - NEUTRAL EVASION: If the gender of the speaker/listener is completely ambiguous and cannot be logically deduced from the scene's flow or the Gender Map, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., rephrase using passive voice or verbal nouns to avoid explicit أنتَ/أنتِ). ${genderMapBlock}
+8. Pay close attention to split sentences. Ensure the Arabic grammar flows logically.
 
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
 9. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
@@ -431,12 +401,12 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 
 11. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
 12. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
-13. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone (e.g., a man calling another man "little girl"). In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
+13. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone. In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
 14. FORMALITY & HONORIFICS: Observe the status of the characters. When addressing figures of authority (judges, bosses, royalty), use formal Arabic equivalents (e.g., سيدي، حضرتك، جلالتك) instead of the casual 'أنت'.
-15. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally (e.g., 'break a leg'). Use the closest culturally appropriate Arabic idiom.
-16. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally to 'آه' or 'همم'. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context. Never return an empty line.
+15. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally. Use the closest culturally appropriate Arabic idiom.
+16. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context. Never return an empty line.
 17. SONGS & POETRY: If a line contains the music symbol '♪', keep the symbol at the start/end and translate the lyrics poetically rather than literally.
-18. PROFANITY: Translate swear words into standard cinematic Arabic equivalents (e.g., اللعنة، تباً، سحقاً) without literal awkwardness.
+18. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
 
 Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 
@@ -500,26 +470,12 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-/**
- * الحل الجذري لمنع "قفزات الإنجليزي" الكبيرة: لو translateChunkStrict فشلت
- * بدفعة (لأي سبب: تطابق عدد، فلتر أمان، إلخ)، بدل ما نستسلم فورًا ونرجع
- * إنجليزي لكل الدفعة، نقسمها نصين ونعيد المحاولة على كل نص لحاله بشكل
- * تكراري (recursive). هذا يحصر "نطاق الضرر" المحتمل بأصغر عدد أسطر ممكن
- * (MIN_SPLIT_CHUNK_SIZE) بدل الدفعة كاملة (كانت 80 سطر).
- *
- * يرجّع دائمًا مصفوفة بنفس طول texts (لا يكسر التزامن أبدًا) — أي عنصر
- * فشلت ترجمته الفردية يرجع null بمكانه، والمستدعي (handleTranslationSrt/Ass)
- * يستبدله بالنص الأصلي عبر "قفل الحذف" الموجود أصلاً.
- */
 async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap) {
     const direct = await translateChunkStrict(texts, keysArray, modelName, genderMap);
     if (direct && direct.length === texts.length) {
         return direct;
     }
 
-    // وصلنا لأصغر حجم مسموح بالتقسيم — نستسلم لهذا الجزء الصغير بس (لا يتجاوز
-    // MIN_SPLIT_CHUNK_SIZE سطر)، ونرجع null لكل عنصر فيه (يُستبدل بالإنجليزي
-    // بمرحلة لاحقة، بنطاق ضرر محدود جدًا).
     if (texts.length <= MIN_SPLIT_CHUNK_SIZE) {
         console.warn(`[Recovery] Giving up on a minimal chunk of ${texts.length} line(s) — will fall back to original text for just these.`);
         return texts.map(() => null);
@@ -607,9 +563,8 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
 
         const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
 
-        const CHUNK = 80;
         const chunks = [];
-        for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+        for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
         const tasks = chunks.map(chunk => async () => {
             const texts = chunk.map(c => {
@@ -635,7 +590,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
 
-            // قفل الحذف: إذا السطر فارغ أو فشلت ترجمته، رجع النص الإنجليزي الأصلي
             if (!text || text.trim() === '') {
                 text = c.text;
             } else {
@@ -682,9 +636,8 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
         const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
 
-        const CHUNK = 80;
         const chunks = [];
-        for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+        for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
         const tasks = chunks.map(chunk => async () => {
             const texts = chunk.map(c => {
@@ -737,8 +690,6 @@ module.exports = {
     normalizeLineBreakArtifacts,
     parseRobustJsonArray,
     applyLineLengthFallback,
-    applyRtlSafeLineSplit,
-    stripEmptyDialogueLines,
     postProcessTranslatedText,
     extractCharacterGenderMap,
     formatGenderMapForPrompt,
