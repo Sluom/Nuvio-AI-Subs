@@ -23,7 +23,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 const MAX_SAFE_LINE_CHARS = 48; 
 const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MIN_SPLIT_CHUNK_SIZE = 5;
-const CHUNK_SIZE = 80; // رجعناه لـ 80 لتقليل الطلبات الإجمالية
+const CHUNK_SIZE = 80;
 
 // ===================== MongoDB Cache Layer =====================
 
@@ -92,9 +92,6 @@ async function setCachedTranslation(key, output) {
     }
 }
 
-// يقرر هل الترجمة كاملة بما يكفي لحفظها بالكاش.
-// الشرطان: (1) ما فيه أي سطر فشل بالكامل (رجع null من جيميناي)،
-// (2) على الأقل 90% من الأسطر الإنجليزية الأصلية صارت فيها حروف عربية فعلاً.
 function isTranslationCacheable(cues, finalTranslations) {
     let needed = 0;
     let failed = 0;
@@ -313,7 +310,7 @@ ${sample}`;
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
+        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(
@@ -378,7 +375,8 @@ function formatGenderMapForPrompt(genderMap) {
     return `\n\n   KNOWN CHARACTER GENDER MAP:\n${lines.join('\n')}\n`;
 }
 
-// تعديل الدالة لتقبل عدد المحاولات كمتغير (maxRetries)
+// ===================== Translation Engine =====================
+
 async function translateChunkStrict(texts, keysArray, modelName, genderMap = null, maxRetries = 4) {
     let baseDelay = 3000;
 
@@ -411,20 +409,9 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
 9. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
-10. ACRONYMS, AGENCIES & ENTITIES (STRICT ARABIZATION):
-    - TRANSLATE ALL government, military, medical, and scientific acronyms (e.g., FBI, CIA, SWAT, TAT, DNA, BAU, NSA) into their FULL and official Arabic meanings (e.g., المباحث الفدرالية، وكالة المخابرات المركزية، القوات الخاصة، اختبار الإدراك الموضوعي، الحمض النووي).
-    - ABSOLUTELY NO ENGLISH LETTERS for agencies or scientific acronyms.
-    - If a highly obscure acronym cannot be translated to a meaning, transliterate it phonetically using ARABIC letters ONLY (e.g., output 'تي إيه تي' instead of 'TAT').
-    - Only purely commercial global brands (e.g., Apple, KFC) may remain in English if transliteration is awkward, but Arabic letters are always preferred.
-
-11. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
-12. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
-13. SARCASM & GENDER FLIPPING: Follow the GENDER MAP strictly, EXCEPT when a character intentionally uses the wrong gender to insult or mock someone. In cases of deliberate sarcasm/insult, preserve the insulting gendered conjugation.
-14. FORMALITY & HONORIFICS: Observe the status of the characters. When addressing figures of authority (judges, bosses, royalty), use formal Arabic equivalents (e.g., سيدي، حضرتك، جلالتك) instead of the casual 'أنت'.
-15. IDIOMS & WORDPLAY: Do not translate English idioms or jokes literally. Use the closest culturally appropriate Arabic idiom.
-16. FILLER WORDS: When encountering fillers like 'Umm', 'Uh', or 'Ah' as standalone dialogue, do not translate them literally. Replace them with natural Arabic conversational responses like 'حسناً', 'أجل', 'تمام', or 'واو' depending on context. Never return an empty line.
-17. SONGS & POETRY: If a line contains the music symbol '♪', keep the symbol at the start/end and translate the lyrics poetically rather than literally.
-18. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
+10. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text (like true-story epilogues). Translate them completely and accurately.
+11. FOREIGN LANGUAGES: If dialogue is in a third language (e.g., 'Amigo') or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
+12. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
 
 Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 
@@ -437,8 +424,13 @@ ${JSON.stringify(texts)}`;
                 {
                     contents: [{ parts: [{ text: prompt }] }],
                     generationConfig: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json"
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "ARRAY",
+                            items: { type: "STRING" },
+                            minItems: texts.length,
+                            maxItems: texts.length
+                        }
                     },
                     safetySettings: [
                         { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -488,9 +480,7 @@ ${JSON.stringify(texts)}`;
     return null;
 }
 
-// إضافة متغير العمق (depth) لمنع انفجار المحاولات
 async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap, depth = 0) {
-    // المستوى صفر ياخذ 4 محاولات، الأقسام الفرعية تاخذ محاولة وحدة بس
     const allowedRetries = depth === 0 ? 4 : 1; 
     
     const direct = await translateChunkStrict(texts, keysArray, modelName, genderMap, allowedRetries);
@@ -589,13 +579,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
         const tasks = chunks.map(chunk => async () => {
-            const texts = chunk.map(c => {
-                let t = c.text;
-                if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
-                    return `[${t}]`;
-                }
-                return t;
-            });
+            const texts = chunk.map(c => c.text); // إزالة تغليف الصياح بالأقواس
             const translated = await translateChunkWithRecovery(texts, keysArray, modelName, genderMap);
             return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : null);
         });
@@ -606,7 +590,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
             t ? postProcessTranslatedText(t, cues[idx]?.text) : null
         );
 
-        // نقرر قبل بناء الملف: هل الترجمة كاملة وتستاهل الحفظ بالكاش؟
         const cacheable = isTranslationCacheable(cues, finalTranslations);
 
         let srtOutput = '';
@@ -667,13 +650,7 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
         const tasks = chunks.map(chunk => async () => {
-            const texts = chunk.map(c => {
-                let t = c.text;
-                if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
-                    return `[${t}]`;
-                }
-                return t;
-            });
+            const texts = chunk.map(c => c.text); // إزالة تغليف الصياح بالأقواس
             const translated = await translateChunkWithRecovery(texts, keysArray, modelName, genderMap);
             return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : null);
         });
@@ -684,7 +661,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
             t ? postProcessTranslatedText(t, cues[idx]?.text) : null
         );
 
-        // نقرر قبل بناء الملف: هل الترجمة كاملة وتستاهل الحفظ بالكاش؟
         const cacheable = isTranslationCacheable(cues, finalTranslations);
 
         const assLines = [];
