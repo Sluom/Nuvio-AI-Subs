@@ -26,7 +26,7 @@ const MIN_SPLIT_CHUNK_SIZE = 5;
 const CHUNK_SIZE = 80;
 
 // ---- Tuning knobs ----
-const MAX_CONCURRENCY = 30;         // هجوم شامل: 30 دفعة متوازية تستوعب كل مفاتيحك الـ 25 دفعة وحدة
+const MAX_CONCURRENCY = 30;         // هجوم شامل بـ 30 دفعة متوازية تستوعب كل مفاتيحك الـ 25 دفعة وحدة
 const MAX_HTTP_ATTEMPTS = 5;        // محاولات لكل دفعة
 const REQUEST_TIMEOUT_MS = 45000;
 
@@ -310,7 +310,6 @@ function computeCooldownMs(errData) {
     try { s = typeof errData === 'string' ? errData : JSON.stringify(errData || {}); } catch (e) { }
     if (/PerDay|per day|daily/i.test(s)) return 60 * 60 * 1000;
     
-    // إجبار الكود على انتظار 61 ثانية لأي 429 لحماية المفاتيح
     const m = s.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
     if (m) {
         const ms = (parseFloat(m[1]) + 1) * 1000;
@@ -324,6 +323,7 @@ function computeCooldownMs(errData) {
 async function translateChunkStrict(texts, keysArray, modelName) {
     let maxRetries = Math.min(keysArray.length, MAX_HTTP_ATTEMPTS);
     
+    // استخدام المتغير القادم من الموقع مباشرة
     const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
     const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
 
@@ -344,6 +344,11 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 8. RELIGIOUS EXCLAMATIONS: Translate 'Jesus', 'Christ', 'Holy shit', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a prophet's name.
 9. FOREIGN LANGUAGES: Translate tags like [speaks Spanish] to [يتحدث الإسبانية] AND translate any accompanying third-language text.
 10. ON-SCREEN TEXT & EPILOGUES: Never summarize long blocks of text. Translate completely and accurately.
+
+=== CINEMATIC FLUENCY (NEW ADDITIONS) ===
+11. NATURAL DIALOGUE: Avoid robotic literal translations. Eliminate excessive use of "لقد" and "سوف" (e.g., use "ذهبتُ" instead of "لقد ذهبت"). Use natural conversational Arabic appropriate for cinematic dialogue.
+12. STUTTERS & INTERRUPTIONS: If the original text contains stutters (e.g., "I- I- I don't") or trailing dashes for interruptions (e.g., "Wait, you-"), you MUST preserve the exact stuttering rhythm and dashes in Arabic (e.g., "أنا- أنا- أنا لا" or "انتظر، أنتَ-").
+13. TITLES & NUMBERS: Translate titles contextually (e.g., "Mr." -> "السيد", "Officer" -> "أيها الضابط"). Write numbers logically; use digits (1, 2, 3) for dates, times, and exact measurements, but spell out small numbers in dialogue (e.g., "ثلاثة رجال") for better cinematic reading.
 
 Output ONLY A VALID JSON ARRAY OF STRINGS.
 
@@ -476,7 +481,7 @@ async function fetchAndExtractSub(subUrl) {
 }
 
 function resolvePoolLimit(keysArray) {
-    return MAX_CONCURRENCY; // إجبار التزامن على الرقم 30 بغض النظر عن عدد المفاتيح
+    return MAX_CONCURRENCY; 
 }
 
 let translationQueue = Promise.resolve();
