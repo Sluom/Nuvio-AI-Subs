@@ -457,6 +457,7 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
                     <option value="gemini-3.1-flash-lite" ${existingModel === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash Lite</option>
+                    <option value="gemini-1.5-flash" ${existingModel === 'gemini-1.5-flash' ? 'selected' : ''}>Gemini 1.5 Flash (Stable)</option>
                     <option value="gemini-3.7-flash" ${existingModel === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash (beta)</option>
                     <option value="gemini-3.6-flash" ${existingModel === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash (beta)</option>
                     <option value="gemini-3.5-flash" ${existingModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (beta)</option>
