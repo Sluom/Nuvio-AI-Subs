@@ -92,6 +92,28 @@ async function setCachedTranslation(key, output) {
     }
 }
 
+// يقرر هل الترجمة كاملة بما يكفي لحفظها بالكاش.
+// الشرطان: (1) ما فيه أي سطر فشل بالكامل (رجع null من جيميناي)،
+// (2) على الأقل 90% من الأسطر الإنجليزية الأصلية صارت فيها حروف عربية فعلاً.
+function isTranslationCacheable(cues, finalTranslations) {
+    let needed = 0;
+    let failed = 0;
+    let arabic = 0;
+
+    cues.forEach((c, idx) => {
+        const t = finalTranslations[idx];
+        if (!t || String(t).trim() === '') { failed++; return; }
+        if (/[A-Za-z]/.test(c.text)) {
+            needed++;
+            if (/[\u0600-\u06FF]/.test(t)) arabic++;
+        }
+    });
+
+    if (failed > 0) return false;
+    if (needed === 0) return true;
+    return (arabic / needed) >= 0.9;
+}
+
 // ===================== Encoding / Parsing Helpers =====================
 
 function fixArabicEncoding(buffer) {
@@ -291,8 +313,7 @@ ${sample}`;
         const cleanKey = String(activeKey).trim();
         const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
         
-        // إصلاح الخلل الكارثي للرابط المكسور (بدون Markdown)
-        const GEMINI_URL = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){cleanModelName}:generateContent`;
+        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
 
         try {
             const r = await axios.post(
@@ -585,6 +606,9 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
             t ? postProcessTranslatedText(t, cues[idx]?.text) : null
         );
 
+        // نقرر قبل بناء الملف: هل الترجمة كاملة وتستاهل الحفظ بالكاش؟
+        const cacheable = isTranslationCacheable(cues, finalTranslations);
+
         let srtOutput = '';
         let counter = 1;
 
@@ -611,8 +635,10 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
             counter++;
         });
 
-        if (srtOutput) {
+        if (srtOutput && cacheable) {
             await setCachedTranslation(cacheKey, srtOutput);
+        } else if (srtOutput) {
+            console.warn(`[Cache] SKIPPED for ${cacheKey} — translation incomplete (some lines failed or stayed non-Arabic). Not saving to MongoDB.`);
         }
 
         return srtOutput;
@@ -658,6 +684,9 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
             t ? postProcessTranslatedText(t, cues[idx]?.text) : null
         );
 
+        // نقرر قبل بناء الملف: هل الترجمة كاملة وتستاهل الحفظ بالكاش؟
+        const cacheable = isTranslationCacheable(cues, finalTranslations);
+
         const assLines = [];
         cues.forEach((c, idx) => {
             let text = finalTranslations[idx];
@@ -677,8 +706,10 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 
         const assOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 
-        if (assLines.length) {
+        if (assLines.length && cacheable) {
             await setCachedTranslation(cacheKey, assOutput);
+        } else if (assLines.length) {
+            console.warn(`[Cache] SKIPPED for ${cacheKey} — translation incomplete (some lines failed or stayed non-Arabic). Not saving to MongoDB.`);
         }
 
         return assOutput;
