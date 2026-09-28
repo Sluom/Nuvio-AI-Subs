@@ -26,9 +26,11 @@ const CHUNK_SIZE = 80;
 
 // ---- Tuning knobs ----
 const MAX_CONCURRENCY = 5;          // parallel chunks (lower to 3 if you see 429/503 in logs)
-const MAX_HTTP_ATTEMPTS = 6;        // max HTTP tries per request (each try uses the next healthy key)
+const MAX_HTTP_ATTEMPTS = 10;       // max HTTP tries per request (each try uses the next healthy key) - more patience
 const MAX_RECOVERY_ROUNDS = 3;      // re-asks for lines that came back missing (only the missing ones)
-const MAX_KEY_WAIT_MS = 20000;      // if every key is cooling longer than this, fail fast instead of waiting
+const MAX_KEY_WAIT_MS = 30000;      // if every key is cooling longer than this, fail fast instead of waiting
+const RATE_LIMIT_COOLDOWN_MS = 10000; // how long a key rests after a 429 (was 60s; logs showed keys work again after ~2s)
+const GROUP_PAUSE_MS = 3000;        // short pause for ALL chunks when any key gets a 429 (stops the burst)
 const REQUEST_TIMEOUT_MS = 45000;
 const USE_RESPONSE_SCHEMA = true;   // set to false if the API ever rejects the schema with a 400
 
@@ -351,6 +353,7 @@ async function runConcurrentPool(tasks, limit = 1) {
 
 let currentKeyIndex = 0;
 const keyCooldownUntil = new Map(); // key -> timestamp (ms) until which the key is resting
+let globalPauseUntil = 0;           // shared short pause: when any key gets a 429, all chunks wait briefly
 
 function coolDownKey(key, ms) {
     keyCooldownUntil.set(key, Date.now() + ms);
@@ -393,7 +396,7 @@ function computeCooldownMs(errData) {
         const ms = (parseFloat(m[1]) + 1) * 1000;
         return Math.min(Math.max(ms, 5000), 10 * 60 * 1000);
     }
-    return 60 * 1000;
+    return RATE_LIMIT_COOLDOWN_MS;
 }
 
 async function extractCharacterGenderMap(cues, keysArray, modelName) {
@@ -557,6 +560,9 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
     let serverErrors = 0;
 
     for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
+        const pauseLeft = globalPauseUntil - Date.now();
+        if (pauseLeft > 0) await delay(pauseLeft);
+
         const acquired = acquireKey(keysArray);
         if (!acquired) return { status: 'error', data: null };
 
@@ -614,6 +620,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
                 // This key is out: rest it and move to the NEXT key immediately (no sleeping).
                 const ms = computeCooldownMs(errData);
                 coolDownKey(cleanKey, ms);
+                globalPauseUntil = Math.max(globalPauseUntil, Date.now() + GROUP_PAUSE_MS);
                 console.log(`[429] Key ...${cleanKey.slice(-4)} resting ${Math.ceil(ms / 1000)}s. Switching key (attempt ${attempt + 1}/${MAX_HTTP_ATTEMPTS}).`);
                 continue;
             }
