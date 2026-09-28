@@ -610,6 +610,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
             const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
 
             if (status === 429) {
+                console.log('[429 body]', cleanKey.slice(-4), JSON.stringify(errData || e.message).slice(0, 700));
                 // This key is out: rest it and move to the NEXT key immediately (no sleeping).
                 const ms = computeCooldownMs(errData);
                 coolDownKey(cleanKey, ms);
@@ -624,6 +625,7 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
             }
 
             if ((status >= 500) || isTimeout) {
+                console.log('[5xx body]', status || e.code, JSON.stringify(errData || e.message).slice(0, 300));
                 // Server-side trouble is not key-specific: short backoff, then the next key.
                 serverErrors++;
                 const delayMs = Math.min(2000 * Math.pow(2, serverErrors - 1), 12000);
