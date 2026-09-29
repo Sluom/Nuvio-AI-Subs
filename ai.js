@@ -18,33 +18,45 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // نظام تبريد المفاتيح بالخلفية
 const keyCooldowns = new Map();
 let currentKeyIndex = 0;
 
-function acquireKey(keysArray) {
+async function acquireKey(keysArray) {
     if (!keysArray || keysArray.length === 0) return null;
-    const now = Date.now();
     
-    // البحث عن أول مفتاح متاح وما داخل تبريد
-    for (let i = 0; i < keysArray.length; i++) {
-        const key = keysArray[currentKeyIndex % keysArray.length];
-        currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
-        const cooldownUntil = keyCooldowns.get(key) || 0;
+    while (true) {
+        const now = Date.now();
         
-        if (now >= cooldownUntil) {
-            return key;
+        // البحث عن أول مفتاح متاح وما داخل تبريد (تبديل لحظي)
+        for (let i = 0; i < keysArray.length; i++) {
+            const key = keysArray[currentKeyIndex % keysArray.length];
+            currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
+            const cooldownUntil = keyCooldowns.get(key) || 0;
+            
+            if (now >= cooldownUntil) {
+                return key; // مفتاح جاهز وفريش! انطلق فوراً
+            }
+        }
+        
+        // إذا كل المفاتيح بالتبريد، انتظر إجبارياً لحين فك أول واحد حتى ما ندخل بلوب لا نهائي
+        let bestKey = keysArray[0];
+        let bestTime = Infinity;
+        for (const k of keysArray) {
+            const t = keyCooldowns.get(k) || 0;
+            if (t < bestTime) { bestTime = t; bestKey = k; }
+        }
+        
+        const waitTime = bestTime - now;
+        if (waitTime > 0) {
+            console.log(`[نفاد تام] جميع المفاتيح بالتبريد. السكربت سينتظر ${Math.ceil(waitTime/1000)} ثانية...`);
+            await delay(waitTime);
+        } else {
+            return bestKey;
         }
     }
-    
-    // إذا كل المفاتيح بالتبريد (مستبعد جداً وي الـ 25 مفتاح)، نرجع أقدم مفتاح راح يخلص تبريده.
-    let bestKey = keysArray[0];
-    let bestTime = Infinity;
-    for (const k of keysArray) {
-        const t = keyCooldowns.get(k) || 0;
-        if (t < bestTime) { bestTime = t; bestKey = k; }
-    }
-    return bestKey;
 }
 
 function fixArabicEncoding(buffer) {
@@ -169,10 +181,10 @@ async function runConcurrentPool(tasks, limit = 1) {
 }
 
 async function translateChunkStrict(texts, keysArray, modelName) {
-    const MAX_RETRIES = keysArray.length; // جرب كل المفاتيح قبل لا تستسلم
+    const MAX_RETRIES = keysArray.length;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = acquireKey(keysArray);
+        const activeKey = await acquireKey(keysArray);
         
         if (!activeKey) {
             console.error("[Fatal] No Gemini API Keys configured!");
@@ -252,10 +264,14 @@ ${JSON.stringify(texts)}`;
         } catch (e) {
             const status = e.response?.status || 'Unknown';
             
-            // التبديل اللحظي: نشمر المفتاح الحالي بغرفة التبريد لمدة 60 ثانية بدون أي تأخير بالكود
-            keyCooldowns.set(activeKey, Date.now() + 60000);
-            console.log(`[فشل لحظي] المفتاح ...${cleanKey.slice(-4)} دخل التبريد (السبب: ${status}). جاري السحب الفوري للمفتاح التالي...`);
-            // اللوب راح يفتر فوراً وبدون أي await delay
+            // تطبيق فكرتك: التبريد حسب نوع الخطأ
+            let cooldownTime = 60000; // خطأ 429 (نفاد الحصة): تبريد دقيقة كاملة
+            if (status === 503 || status === 500 || status === 502) {
+                cooldownTime = 3000; // خطأ سيرفر كوكل: تبريد 3 ثواني فقط
+            }
+
+            keyCooldowns.set(activeKey, Date.now() + cooldownTime);
+            console.log(`[فشل لحظي] المفتاح ...${cleanKey.slice(-4)} دخل التبريد لـ ${cooldownTime/1000} ثانية (السبب: ${status}). جاري السحب الفوري للمفتاح التالي...`);
         }
     }
     
@@ -314,7 +330,6 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    // انطلاق المهام بتزامن مقفل (limit = 1) حتى ينطلق كل مفتاح على حدة
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
@@ -366,7 +381,6 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    // انطلاق المهام بتزامن مقفل (limit = 1) حتى ينطلق كل مفتاح على حدة
     const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
     
