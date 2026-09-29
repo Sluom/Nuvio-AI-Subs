@@ -18,40 +18,55 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
+// ============ الإعدادات (تقدر تغيّرها من هنا فقط) ============
+const CHUNK_SIZE = 300;          // عدد الأسطر بكل طلب (قليل الطلبات = ما نصطدم بحد جوجل)
+const CONCURRENCY = 1;           // كم طلب نرسل بنفس الوقت (خليه 1، وإذا كل شي تمام جرب 2)
+const REQUEST_TIMEOUT = 180000;  // مهلة الطلب: 3 دقائق (الدفعة الكبيرة تحتاج وقت)
+const MAX_OUTPUT_TOKENS = 32000; // سقف طول الرد
+const COOLDOWN_429 = 60000;      // تبريد المفتاح عند 429
+const COOLDOWN_SERVER = 3000;    // تبريد المفتاح عند 500/502/503
+const GLOBAL_PAUSE = 65000;      // الإيقاف الجماعي لما الحد يكون عام
+const MIN_SPLIT_SIZE = 10;       // ما نقسم الدفعة لو صارت أصغر من هذا
+// ============================================================
+
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // نظام تبريد المفاتيح بالخلفية
 const keyCooldowns = new Map();
 let currentKeyIndex = 0;
 
+// إيقاف جماعي: لما جوجل يرفض عدة مفاتيح ورا بعض، معناها الحد عام
+let globalPauseUntil = 0;
+let consecutive429 = 0;
+
 async function acquireKey(keysArray) {
     if (!keysArray || keysArray.length === 0) return null;
-    
+
     while (true) {
         const now = Date.now();
-        
-        // البحث عن أول مفتاح متاح وما داخل تبريد (تبديل لحظي)
+
+        // البحث عن أول مفتاح متاح وما داخل تبريد
         for (let i = 0; i < keysArray.length; i++) {
             const key = keysArray[currentKeyIndex % keysArray.length];
             currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
             const cooldownUntil = keyCooldowns.get(key) || 0;
-            
+
             if (now >= cooldownUntil) {
-                return key; // مفتاح جاهز وفريش! انطلق فوراً
+                return key;
             }
         }
-        
-        // إذا كل المفاتيح بالتبريد، انتظر إجبارياً لحين فك أول واحد حتى ما ندخل بلوب لا نهائي
+
+        // إذا كل المفاتيح بالتبريد، انتظر لحين فك أول واحد
         let bestKey = keysArray[0];
         let bestTime = Infinity;
         for (const k of keysArray) {
             const t = keyCooldowns.get(k) || 0;
             if (t < bestTime) { bestTime = t; bestKey = k; }
         }
-        
+
         const waitTime = bestTime - now;
         if (waitTime > 0) {
-            console.log(`[نفاد تام] جميع المفاتيح بالتبريد. السكربت سينتظر ${Math.ceil(waitTime/1000)} ثانية...`);
+            console.log(`[نفاد تام] جميع المفاتيح بالتبريد. السكربت سينتظر ${Math.ceil(waitTime / 1000)} ثانية...`);
             await delay(waitTime);
         } else {
             return bestKey;
@@ -117,12 +132,12 @@ function extractCuesUniversal(text) {
 function normalizeLineBreakArtifacts(txt) {
     if (!txt) return txt;
     let text = String(txt)
-        .replace(/\\"/g, '"')       
+        .replace(/\\"/g, '"')
         .replace(/\\\\n/gi, '\n')
         .replace(/\\\\N/g, '\n')
         .replace(/\\n/gi, '\n')
         .replace(/\\N/g, '\n')
-        .replace(/\\r/g, ''); 
+        .replace(/\\r/g, '');
 
     return text;
 }
@@ -137,7 +152,7 @@ function parseRobustJsonArray(raw, expectedLength) {
     try {
         const parsed = JSON.parse(clean);
         let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-        
+
         if (Array.isArray(arr) && arr.length > 0) {
             return arr.map(x => {
                 let txt = String(x || '');
@@ -180,27 +195,8 @@ async function runConcurrentPool(tasks, limit = 1) {
     return results;
 }
 
-async function translateChunkStrict(texts, keysArray, modelName) {
-    const MAX_RETRIES = keysArray.length;
-
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = await acquireKey(keysArray);
-        
-        if (!activeKey) {
-            console.error("[Fatal] No Gemini API Keys configured!");
-            return null;
-        }
-
-        const cleanKey = String(activeKey).trim();
-        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-        
-        const p1 = "https://";
-        const p2 = "generativelanguage.googleapis.com";
-        const p3 = "/v1beta/models/";
-        const p4 = ":generateContent";
-        const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
-        
-        const prompt = `Translate the following subtitles while:
+function buildPrompt(texts) {
+    return `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given.
 2. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
 3. Preserving any formatting tags or special characters.
@@ -221,11 +217,39 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
+The output array MUST contain exactly ${texts.length} strings, one per input entry, in the same order.
 
 Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 
 Content to translate:
 ${JSON.stringify(texts)}`;
+}
+
+// يترجم دفعة واحدة. يرجع مصفوفة بنفس عدد الأسطر، أو null إذا فشل.
+async function translateChunkStrict(texts, keysArray, modelName) {
+    const MAX_FAILS = 4;    // فشل حقيقي (مو 429)
+    const MAX_PAUSES = 6;   // عدد مرات الإيقاف الجماعي
+    let fails = 0;
+    let pauses = 0;
+
+    const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
+    const prompt = buildPrompt(texts);
+
+    while (fails <= MAX_FAILS && pauses <= MAX_PAUSES) {
+        // إذا في إيقاف جماعي شغال، انتظر
+        const pauseLeft = globalPauseUntil - Date.now();
+        if (pauseLeft > 0) {
+            console.log(`[إيقاف جماعي] انتظار ${Math.ceil(pauseLeft / 1000)} ثانية...`);
+            await delay(pauseLeft);
+        }
+
+        const activeKey = await acquireKey(keysArray);
+        if (!activeKey) {
+            console.error('[Fatal] No Gemini API Keys configured!');
+            return null;
+        }
+        const cleanKey = String(activeKey).trim();
 
         try {
             const r = await axios.post(
@@ -234,7 +258,8 @@ ${JSON.stringify(texts)}`;
                     contents: [{ parts: [{ text: prompt }] }],
                     generationConfig: {
                         temperature: 0.1,
-                        responseMimeType: "application/json"
+                        maxOutputTokens: MAX_OUTPUT_TOKENS,
+                        responseMimeType: 'application/json'
                     },
                     safetySettings: [
                         { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -244,46 +269,77 @@ ${JSON.stringify(texts)}`;
                     ]
                 },
                 {
-                    headers: { 
+                    headers: {
                         'Content-Type': 'application/json',
                         'x-goog-api-key': cleanKey,
                         'x-goog-api-client': 'stremio-submaker/1.4.94'
                     },
-                    timeout: 30000
+                    timeout: REQUEST_TIMEOUT
                 }
             );
-            
-            if (r.status === 200) {
-                const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                const parsedArr = parseRobustJsonArray(responseText, texts.length);
-                if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk via Key: ...${cleanKey.slice(-4)}`);
-                    return parsedArr;
-                }
-            }
-        } catch (e) {
-            const status = e.response?.status || 'Unknown';
-            
-            // تطبيق فكرتك: التبريد حسب نوع الخطأ
-            let cooldownTime = 60000; // خطأ 429 (نفاد الحصة): تبريد دقيقة كاملة
-            if (status === 503 || status === 500 || status === 502) {
-                cooldownTime = 3000; // خطأ سيرفر كوكل: تبريد 3 ثواني فقط
+
+            const parts = r.data?.candidates?.[0]?.content?.parts || [];
+            const responseText = parts.map(p => (p && typeof p.text === 'string') ? p.text : '').join('');
+            const parsedArr = parseRobustJsonArray(responseText, texts.length);
+
+            // نقبل الرد فقط إذا العدد مطابق، حتى ما تنزاح الترجمة عن مكانها
+            if (parsedArr && parsedArr.length === texts.length) {
+                consecutive429 = 0;
+                console.log(`[Success] ${texts.length} سطر via Key: ...${cleanKey.slice(-4)}`);
+                return parsedArr;
             }
 
-            keyCooldowns.set(activeKey, Date.now() + cooldownTime);
-            console.log(`[فشل لحظي] المفتاح ...${cleanKey.slice(-4)} دخل التبريد لـ ${cooldownTime/1000} ثانية (السبب: ${status}). جاري السحب الفوري للمفتاح التالي...`);
+            fails++;
+            console.log(`[عدد غلط] المطلوب ${texts.length} والراجع ${parsedArr ? parsedArr.length : 0}. إعادة المحاولة...`);
+
+        } catch (e) {
+            const status = e.response?.status || 0;
+
+            if (status === 429) {
+                consecutive429++;
+                keyCooldowns.set(activeKey, Date.now() + COOLDOWN_429);
+
+                if (consecutive429 >= 3) {
+                    // الحد عام: أوقف الكل مرة وحدة بدل ما نحرق المفاتيح
+                    globalPauseUntil = Date.now() + GLOBAL_PAUSE;
+                    keyCooldowns.clear();
+                    consecutive429 = 0;
+                    pauses++;
+                    console.log(`[429 متكرر] الحد عام، إيقاف كل المفاتيح ${GLOBAL_PAUSE / 1000} ثانية (مرة ${pauses})`);
+                }
+                // الـ429 ما تنحسب من المحاولات
+            } else {
+                fails++;
+                const cooldown = (status === 500 || status === 502 || status === 503) ? COOLDOWN_SERVER : COOLDOWN_SERVER;
+                keyCooldowns.set(activeKey, Date.now() + cooldown);
+                console.log(`[فشل] المفتاح ...${cleanKey.slice(-4)} السبب: ${status || e.code || e.message}`);
+            }
         }
     }
-    
+
     return null;
+}
+
+// إذا فشلت الدفعة الكبيرة، نقسمها نصفين ونحاول كل نصف لحاله
+async function translateWithSplit(texts, keysArray, modelName) {
+    const result = await translateChunkStrict(texts, keysArray, modelName);
+    if (result) return result;
+
+    if (texts.length <= MIN_SPLIT_SIZE) return texts.map(() => null);
+
+    console.log(`[تقسيم] الدفعة (${texts.length} سطر) فشلت، نقسمها نصفين...`);
+    const mid = Math.ceil(texts.length / 2);
+    const firstHalf = await translateWithSplit(texts.slice(0, mid), keysArray, modelName);
+    const secondHalf = await translateWithSplit(texts.slice(mid), keysArray, modelName);
+    return [...firstHalf, ...secondHalf];
 }
 
 async function fetchAndExtractSub(subUrl) {
     let response;
     const decodedUrl = decodeURIComponent(subUrl);
     try {
-        response = await axios.get(decodedUrl, { 
-            responseType: 'arraybuffer', 
+        response = await axios.get(decodedUrl, {
+            responseType: 'arraybuffer',
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -302,21 +358,16 @@ async function fetchAndExtractSub(subUrl) {
         const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
         if (subEntry) buffer = subEntry.getData();
     }
-    
+
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
-async function handleTranslationSrt(subUrl, keysArray, modelName) {
-    let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
-    catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
-
-    const cues = extractCuesUniversal(originalText);
-    if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
-
-    const CHUNK = 80;
+// يترجم كل الأسطر (مشترك بين SRT و ASS)
+async function translateAllCues(cues, keysArray, modelName) {
     const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+    for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
+
+    console.log(`[بدء] ${cues.length} سطر مقسمة على ${chunks.length} طلب (${CHUNK_SIZE} سطر بالطلب)`);
 
     const tasks = chunks.map(chunk => async () => {
         const texts = chunk.map(c => {
@@ -326,16 +377,30 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
             }
             return t;
         });
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
+        const translated = await translateWithSplit(texts, keysArray, modelName);
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, 1);
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+    const chunkResults = await runConcurrentPool(tasks, CONCURRENCY);
+    // لو دفعة كاملة فشلت بشكل غير متوقع نرجع النص الأصلي بدل ما نضيع الأسطر
+    return chunkResults.map((res, i) => res || chunks[i].map(c => c.text))
+        .flat()
+        .map(t => normalizeLineBreakArtifacts(t));
+}
+
+async function handleTranslationSrt(subUrl, keysArray, modelName) {
+    let originalText = '';
+    try { originalText = await fetchAndExtractSub(subUrl); }
+    catch (e) { return '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n'; }
+
+    const cues = extractCuesUniversal(originalText);
+    if (!cues.length) return '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n';
+
+    const finalTranslations = await translateAllCues(cues, keysArray, modelName);
 
     let srtOutput = '';
     let counter = 1;
-    
+
     cues.forEach((c, idx) => {
         let text = finalTranslations[idx];
         if (!text) return;
@@ -349,41 +414,24 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         if (eTime.length === 10) eTime = '0' + eTime;
         if (sTime.split(',')[1].length === 2) sTime += '0';
         if (eTime.split(',')[1].length === 2) eTime += '0';
-        
+
         srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
         counter++;
     });
-    
+
     return srtOutput;
 }
 
 async function handleTranslationAss(subUrl, keysArray, modelName) {
-    let originalText = "";
-    try { originalText = await fetchAndExtractSub(subUrl); } 
+    let originalText = '';
+    try { originalText = await fetchAndExtractSub(subUrl); }
     catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.`; }
 
     const cues = extractCuesUniversal(originalText);
     if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-    const CHUNK = 80;
-    const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+    const finalTranslations = await translateAllCues(cues, keysArray, modelName);
 
-    const tasks = chunks.map(chunk => async () => {
-        const texts = chunk.map(c => {
-            let t = c.text;
-            if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) {
-                return `[${t}]`;
-            }
-            return t;
-        });
-        const translated = await translateChunkStrict(texts, keysArray, modelName);
-        return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
-    });
-
-    const chunkResults = await runConcurrentPool(tasks, 1);
-    const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
-    
     const assLines = [];
     cues.forEach((c, idx) => {
         let text = finalTranslations[idx];
@@ -395,7 +443,7 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         const safeText = text.trim().replace(/\n/g, '\\N');
         assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${safeText}`);
     });
-    
+
     return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
