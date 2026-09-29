@@ -18,6 +18,35 @@ Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
+// نظام تبريد المفاتيح بالخلفية
+const keyCooldowns = new Map();
+let currentKeyIndex = 0;
+
+function acquireKey(keysArray) {
+    if (!keysArray || keysArray.length === 0) return null;
+    const now = Date.now();
+    
+    // البحث عن أول مفتاح متاح وما داخل تبريد
+    for (let i = 0; i < keysArray.length; i++) {
+        const key = keysArray[currentKeyIndex % keysArray.length];
+        currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
+        const cooldownUntil = keyCooldowns.get(key) || 0;
+        
+        if (now >= cooldownUntil) {
+            return key;
+        }
+    }
+    
+    // إذا كل المفاتيح بالتبريد (مستبعد جداً وي الـ 25 مفتاح)، نرجع أقدم مفتاح راح يخلص تبريده.
+    let bestKey = keysArray[0];
+    let bestTime = Infinity;
+    for (const k of keysArray) {
+        const t = keyCooldowns.get(k) || 0;
+        if (t < bestTime) { bestTime = t; bestKey = k; }
+    }
+    return bestKey;
+}
+
 function fixArabicEncoding(buffer) {
     if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
@@ -121,8 +150,6 @@ function parseRobustJsonArray(raw, expectedLength) {
     return null;
 }
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
 async function runConcurrentPool(tasks, limit = 1) {
     const results = new Array(tasks.length);
     let index = 0;
@@ -141,20 +168,11 @@ async function runConcurrentPool(tasks, limit = 1) {
     return results;
 }
 
-let currentKeyIndex = 0;
-function getNextApiKey(keysArray) {
-    if (!keysArray || keysArray.length === 0) return null;
-    const key = keysArray[currentKeyIndex % keysArray.length];
-    currentKeyIndex = (currentKeyIndex + 1) % keysArray.length;
-    return key;
-}
-
 async function translateChunkStrict(texts, keysArray, modelName) {
-    const MAX_RETRIES = 4;
-    let baseDelay = 3000;
+    const MAX_RETRIES = keysArray.length; // جرب كل المفاتيح قبل لا تستسلم
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        const activeKey = getNextApiKey(keysArray);
+        const activeKey = acquireKey(keysArray);
         
         if (!activeKey) {
             console.error("[Fatal] No Gemini API Keys configured!");
@@ -171,22 +189,22 @@ async function translateChunkStrict(texts, keysArray, modelName) {
         const GEMINI_URL = p1 + p2 + p3 + cleanModelName + p4;
         
         const prompt = `Translate the following subtitles while:
-1. Preserving the timing and structure exactly as given
-2. Maintaining natural dialogue flow and colloquialisms appropriate to the target language
-3. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
-4. Preserving any formatting tags or special characters
-5. Ensuring translations are contextually accurate for film/TV dialogue
-6. Translate any text inside brackets [] or parentheses () into Arabic professionally while strictly keeping the original brackets/parentheses in the output.
-7. Apply professional Arabic subtitling conventions for punctuation as follows:
-   a. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
-   b. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
-   c. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen — even if it spans multiple lines — wrap the WHOLE entry in ONE single pair of quotation marks: one opening mark at the very start of the first line, and one closing mark at the very end of the last line. Do NOT put a separate pair of quotation marks around each individual line.
-   d. Do not double-wrap: if a full entry is already voice-over (rule c), do not additionally quote a name inside it — the outer quotes are enough.
-   e. Never use quotation marks for places/objects and never use parentheses for person names.
-8. Carefully infer the gender of the speakers and listeners from context, relationships, or character names, and strictly apply the correct masculine or feminine Arabic pronouns and verb conjugations.
-9. Act as an expert cinematic subtitler. Maintain a consistent tone throughout the dialogue, and translate idioms/slang naturally into Arabic rather than literally.
-10. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
-11. Any text wrapped entirely in square brackets [ ] represents on-screen text (like signs, locations, or dates). Translate it accurately and strictly keep the square brackets in the Arabic output.
+1. Preserving the timing and structure exactly as given.
+2. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
+3. Preserving any formatting tags or special characters.
+4. Any text wrapped entirely in square brackets [ ] represents on-screen text or action tags. Translate it accurately and strictly keep the square brackets in the Arabic output.
+5. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
+6. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
+7. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE entry in ONE single pair of quotation marks (one at the start, one at the end). Do not add internal quotes for names if the whole entry is already quoted.
+8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar. Infer the speaker's/listener's gender from the context available within this chunk only (names, titles, dialogue cues). If there is a clear back-and-forth between a male and a female, alternate the Arabic pronouns accordingly. If gender is impossible to determine from the context, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., use passive voice or verbal nouns to avoid explicit أنتَ/أنتِ).
+9. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
+10. Act as an expert cinematic subtitler. Translate idioms/slang naturally into Arabic rather than literally.
+
+=== CINEMATIC CONSTITUTION (CRITICAL RULES) ===
+11. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
+12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
+13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
+14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
 
 Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
@@ -227,27 +245,17 @@ ${JSON.stringify(texts)}`;
                 const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
                 const parsedArr = parseRobustJsonArray(responseText, texts.length);
                 if (parsedArr && parsedArr.length > 0) {
-                    console.log(`[Success] Translated chunk with ${cleanModelName} via Key: ...${cleanKey.slice(-4)}`);
+                    console.log(`[Success] Translated chunk via Key: ...${cleanKey.slice(-4)}`);
                     return parsedArr;
                 }
             }
-            return null;
-
         } catch (e) {
-            const status = e.response?.status;
-            const isRateLimit = status === 429;
-            const isServerError = status >= 500;
-            const isTimeout = e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT';
+            const status = e.response?.status || 'Unknown';
             
-            if (attempt === MAX_RETRIES || (!isRateLimit && !isServerError && !isTimeout)) {
-                console.error(`[Gemini Error - Final] Key ...${cleanKey.slice(-4)}: ${e.response?.data?.error?.message || e.message}`);
-                return null;
-            }
-
-            const delayMs = baseDelay * Math.pow(2, attempt);
-            console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Key ...${cleanKey.slice(-4)} failed (Status: ${status}). Waiting ${delayMs}ms before trying NEXT key...`);
-            
-            await delay(delayMs);
+            // التبديل اللحظي: نشمر المفتاح الحالي بغرفة التبريد لمدة 60 ثانية بدون أي تأخير بالكود
+            keyCooldowns.set(activeKey, Date.now() + 60000);
+            console.log(`[فشل لحظي] المفتاح ...${cleanKey.slice(-4)} دخل التبريد (السبب: ${status}). جاري السحب الفوري للمفتاح التالي...`);
+            // اللوب راح يفتر فوراً وبدون أي await delay
         }
     }
     
@@ -282,11 +290,6 @@ async function fetchAndExtractSub(subUrl) {
     return fixArabicEncoding(buffer).toString('utf-8');
 }
 
-function resolvePoolLimit(keysArray) {
-    const n = Array.isArray(keysArray) ? keysArray.length : 0;
-    return n > 0 ? n : 1;
-}
-
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
     let originalText = "";
     try { originalText = await fetchAndExtractSub(subUrl); } 
@@ -311,7 +314,8 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
+    // انطلاق المهام بتزامن مقفل (limit = 1) حتى ينطلق كل مفتاح على حدة
+    const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
     let srtOutput = '';
@@ -362,7 +366,8 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
     });
 
-    const chunkResults = await runConcurrentPool(tasks, resolvePoolLimit(keysArray));
+    // انطلاق المهام بتزامن مقفل (limit = 1) حتى ينطلق كل مفتاح على حدة
+    const chunkResults = await runConcurrentPool(tasks, 1);
     const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
     
     const assLines = [];
