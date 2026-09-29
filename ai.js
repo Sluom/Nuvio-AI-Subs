@@ -1,6 +1,3 @@
-
-
-```js
 const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
@@ -38,7 +35,7 @@ let currentKeyIndex = 0;
 function normalizeGeminiModelId(m) { return String(m || '').trim().replace(/^models\//, ''); }
 function isGemini3Model(m) {
     const id = normalizeGeminiModelId(m);
-    return /^gemini-3(?:[.-]|$)/i.test(id) || /^gemini-(?:flash|flash-lite|pro)-latest$/i.test(id);
+    return /^gemini-3(?:[.-]|$)/i.test(id) \vert{}\vert{} /^gemini-(?:flash\vert{}flash-lite\vert{}pro)-latest$/i.test(id);
 }
 function getFallbackOutputTokenLimit(model) {
     const n = normalizeGeminiModelId(model).toLowerCase();
@@ -364,4 +361,3 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
-```
