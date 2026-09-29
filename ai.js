@@ -25,12 +25,10 @@ const CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
 const CHUNK_SIZE = 80;
 
 // ---- Tuning knobs ----
-// لا يوجد أي معالجة متوازية (لا Concurrency، لا Pool، لا Pause جماعي).
-// كل جزء (chunk) يُترجم بعد ما يخلص اللي قبله، بالتتابع، بدون أي تزامن بين الأسطر.
-const MAX_RECOVERY_ROUNDS = 3;       // إعادة الطلب فقط للأسطر الناقصة (بدون تقسيم الجزء نفسه)
-const RATE_LIMIT_COOLDOWN_MS = 60000; // إذا جوجل ما حددت مدة انتظار (retryDelay)، نعتبرها دقيقة كاملة (حد الحصة المجانية يتصفر كل دقيقة عادةً)
+const MAX_RECOVERY_ROUNDS = 3;
+const RATE_LIMIT_COOLDOWN_MS = 60000;
 const REQUEST_TIMEOUT_MS = 45000;
-const USE_RESPONSE_SCHEMA = true;    // اجعلها false لو الـ API رفض الـ schema بخطأ 400
+const USE_RESPONSE_SCHEMA = true;
 
 // ===================== MongoDB Cache Layer =====================
 
@@ -123,7 +121,6 @@ function isTranslationCacheable(cues, finalTranslations) {
     return (arabic / needed) >= 0.9;
 }
 
-// نفس فكرة الدالة فوق، لكن لجزء واحد (تُستخدم لكاش الجزء الفردي)
 function chunkLooksTranslated(texts, translated) {
     let needed = 0;
     let arabic = 0;
@@ -256,7 +253,6 @@ function stripJsonFences(raw) {
     return clean.trim();
 }
 
-// موجودة للتوافق مع الاستدعاءات القديمة (مُصدَّرة). المحرك الحالي يستخدم parseIndexedTranslations.
 function parseRobustJsonArray(raw, expectedLength) {
     if (!raw) return null;
     const clean = stripJsonFences(raw);
@@ -281,8 +277,6 @@ function parseRobustJsonArray(raw, expectedLength) {
     return null;
 }
 
-// يحلل [{"i":0,"t":"..."}, ...] إلى مصفوفة بطول expectedLength.
-// الأسطر اللي تجاهلها النموذج تبقى null، عشان بس هذي الأسطر تُطلب مرة ثانية.
 function parseIndexedTranslations(raw, expectedLength) {
     if (!raw) return null;
     const clean = stripJsonFences(raw);
@@ -293,7 +287,6 @@ function parseIndexedTranslations(raw, expectedLength) {
     try {
         parsed = JSON.parse(clean);
     } catch (e) {
-        // JSON مقطوع أو مكسور جزئياً: ننقذ أي زوج {"i":N,"t":"..."} كامل موجود
         for (const m of clean.matchAll(/"i"\s*:\s*(\d+)\s*,\s*"t"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
             const idx = parseInt(m[1], 10);
             if (idx >= 0 && idx < expectedLength && out[idx] === null) {
@@ -309,7 +302,6 @@ function parseIndexedTranslations(raw, expectedLength) {
     const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || null);
     if (!Array.isArray(arr) || arr.length === 0) return null;
 
-    // النموذج تجاهل صيغة الـ id ورجّع نصوصاً عادية: نقبلها بس لو العدد يطابق تماماً
     if (typeof arr[0] !== 'object' || arr[0] === null) {
         if (arr.length === expectedLength) return arr.map(x => fixMusicNote(x));
         return null;
@@ -339,14 +331,12 @@ function getNextApiKey(keysArray) {
 
 // ===================== API Key Pool (with cooldown) =====================
 
-const keyCooldownUntil = new Map(); // key -> timestamp (ms) إلى متى المفتاح "مستريح"
+const keyCooldownUntil = new Map();
 
 function coolDownKey(key, ms) {
     keyCooldownUntil.set(key, Date.now() + ms);
 }
 
-// يرجع أقرب مفتاح سليم (round-robin). لو كل المفاتيح مستريحة، يرجع أقربها استعداداً
-// مع مدة الانتظار اللازمة (بدون أي حد أقصى — ننتظر مهما طالت المدة).
 function acquireKey(keysArray) {
     if (!keysArray || keysArray.length === 0) return null;
     const n = keysArray.length;
@@ -370,114 +360,13 @@ function acquireKey(keysArray) {
 function computeCooldownMs(errData) {
     let s = '';
     try { s = typeof errData === 'string' ? errData : JSON.stringify(errData || {}); } catch (e) { }
-    // حصة يومية خلصت: ما فايدة نجرب هذا المفتاح قريب
     if (/PerDay|per day|daily/i.test(s)) return 60 * 60 * 1000;
-    // جوجل حددت مدة انتظار صريحة بالرد (retryDelay) — نحترمها بالضبط
     const m = s.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
     if (m) {
         const ms = (parseFloat(m[1]) + 1) * 1000;
         return Math.min(Math.max(ms, 5000), 10 * 60 * 1000);
     }
-    // ما فيه retryDelay بالرد: نفترض حد الحصة بالدقيقة (المعيار الشائع بالخطة المجانية)
-    // ونعطي المفتاح دقيقة كاملة راحة بدل تجربته كل ثواني قليلة بلا فايدة
     return RATE_LIMIT_COOLDOWN_MS;
-}
-
-// ===================== Character Gender Map Extraction =====================
-
-async function extractCharacterGenderMap(cues, keysArray, modelName) {
-    if (!cues || !cues.length) return null;
-
-    const fullText = cues.map(c => c.text).join('\n');
-    const sample = fullText;
-
-    const prompt = `You are analyzing an English subtitle script to identify character names and their genders, to help a downstream Arabic translation system apply correct gender-specific grammar consistently across the whole file.
-
-Read the following subtitle text and identify every character/person name that appears (real proper names of people only — never places, food, brands, or objects). For each name, determine the character's gender (male or female) using any contextual clues found ANYWHERE in the text.
-
-Rules:
-- Only include actual person names.
-- Merge obvious variants of the same character into one entry.
-- If a name appears with zero gender clues anywhere in the text, still include it with your best guess, or "unknown".
-- Do NOT include narration-only labels or on-screen text placeholders.
-
-Output ONLY a valid JSON array of objects, nothing else, no explanations, in this exact format:
-[{"name": "JOHN", "gender": "male"}, {"name": "SARAH", "gender": "female"}]
-
-Subtitle text:
-${sample}`;
-
-    const MAX_ATTEMPTS = 2;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const activeKey = getNextApiKey(keysArray);
-        if (!activeKey) return null;
-
-        const cleanKey = String(activeKey).trim();
-        const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
-
-        const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
-
-        try {
-            const r = await axios.post(
-                GEMINI_URL,
-                {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json"
-                    },
-                    safetySettings: [
-                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                    ]
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-goog-api-key': cleanKey,
-                        'x-goog-api-client': 'stremio-submaker/1.4.94'
-                    },
-                    timeout: 20000
-                }
-            );
-
-            const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!responseText) continue;
-
-            let clean = responseText.trim();
-            if (clean.startsWith('```json')) clean = clean.slice(7);
-            else if (clean.startsWith('```')) clean = clean.slice(3);
-            if (clean.endsWith('```')) clean = clean.slice(0, -3);
-            clean = clean.trim();
-
-            const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-                const map = {};
-                for (const entry of parsed) {
-                    if (entry?.name && entry?.gender) {
-                        map[String(entry.name).trim().toUpperCase()] = String(entry.gender).trim().toLowerCase();
-                    }
-                }
-                if (Object.keys(map).length > 0) {
-                    console.log(`[GenderMap] Extracted ${Object.keys(map).length} character(s)`);
-                    return map;
-                }
-            }
-        } catch (e) {
-            console.error(`[GenderMap] Attempt ${attempt + 1}/${MAX_ATTEMPTS} failed.`);
-        }
-    }
-
-    console.warn('[GenderMap] Extraction failed — proceeding without a gender map.');
-    return null;
-}
-
-function formatGenderMapForPrompt(genderMap) {
-    if (!genderMap || Object.keys(genderMap).length === 0) return '';
-    const lines = Object.entries(genderMap).map(([name, gender]) => `   - ${name} = ${gender}`);
-    return `\n\n   KNOWN CHARACTER GENDER MAP:\n${lines.join('\n')}\n`;
 }
 
 // ===================== Translation Engine =====================
@@ -494,8 +383,7 @@ const RESPONSE_SCHEMA = {
     }
 };
 
-function buildTranslationPrompt(texts, genderMap) {
-    const genderMapBlock = formatGenderMapForPrompt(genderMap);
+function buildTranslationPrompt(texts) {
     const items = texts.map((t, i) => ({ i, t }));
 
     return `Translate the following subtitles while:
@@ -509,9 +397,7 @@ function buildTranslationPrompt(texts, genderMap) {
    d) Never use square brackets [] for names, cities, companies, or countries — [] is reserved only for sound/action cues already present in the source (e.g. [door creaks]).
 5. Apply professional Arabic subtitling conventions for punctuation.
 6. LINE LENGTH CONTROL (CRITICAL): If an English subtitle is a single long line, translate it as a single Arabic line UNLESS it exceeds ${MAX_SAFE_LINE_CHARS} characters. If it is too long, insert exactly ONE line break (\\n) at a logical midpoint (e.g. after a comma or conjunction). If the original text already contains a line break (\\n), PRESERVE IT in the exact same logical place in the Arabic translation.
-7. CRITICAL GENDER ENFORCEMENT & DYNAMIC CONTEXT: Treat this chunk as a continuous cinematic scene. Use the provided GENDER MAP to deduce who is participating in the conversation.
-   - If the dialogue is a clear back-and-forth between a male and a female, dynamically alternate the Arabic pronouns to match the conversation flow.
-   - NEUTRAL EVASION: If the gender of the speaker/listener is completely ambiguous and cannot be logically deduced from the scene's flow or the Gender Map, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., rephrase using passive voice or verbal nouns to avoid explicit أنتَ/أنتِ). ${genderMapBlock}
+7. GENDER ENFORCEMENT FROM CONTEXT: Arabic requires gendered grammar where English does not. Infer the speaker's/listener's gender from context available within this chunk alone (names, titles, pronouns already present, dialogue cues). If a clear back-and-forth between a male and a female is evident from the chunk, alternate the Arabic pronouns to match. If gender truly cannot be determined from this chunk, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., rephrase using passive voice or verbal nouns to avoid explicit أنتَ/أنتِ).
 8. Pay close attention to split sentences. Ensure the Arabic grammar flows logically.
 
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
@@ -526,16 +412,7 @@ Content to translate:
 ${JSON.stringify(items)}`;
 }
 
-/**
- * طلب واحد (يدور على المفاتيح لو فشل). ما فيه أي تزامن أو تعدد طلبات هنا —
- * هذه الدالة نفسها تُستدعى مرة وحدة بمرة، بالتتابع.
- * يرجع { status, data } حيث:
- *   status: 'ok'    -> data مصفوفة (طولها = texts.length)؛ الأسطر الناقصة null
- *           'parse' -> رد وصل لكن ما نقدر نقرأه (المتصل ممكن يعيد الطلب)
- *           'quota' -> كل المفاتيح جربناها بهالدورة ولا وحدة نجحت
- *           'error' -> خطأ غير قابل لإعادة المحاولة
- */
-async function translateChunkStrict(texts, keysArray, modelName, genderMap = null) {
+async function translateChunkStrict(texts, keysArray, modelName) {
     if (!Array.isArray(keysArray) || keysArray.length === 0) {
         console.error("[Fatal] No Gemini API Keys configured!");
         return { status: 'error', data: null };
@@ -543,20 +420,18 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
 
     const cleanModelName = String(modelName || 'gemini-3.1-flash-lite').trim().replace(/^models\//, '');
     const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent`;
-    const prompt = buildTranslationPrompt(texts, genderMap);
+    const prompt = buildTranslationPrompt(texts);
 
     const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
     if (USE_RESPONSE_SCHEMA) generationConfig.responseSchema = RESPONSE_SCHEMA;
 
     let serverErrors = 0;
-    // أول طلب يحق له يجرب كل مفتاح من مفاتيحك (بدون أي حد أصغر) قبل ما نستسلم
     const maxAttempts = keysArray.length;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const acquired = acquireKey(keysArray);
         if (!acquired) return { status: 'error', data: null };
 
-        // ما فيه أي حد أقصى للانتظار — لو كل المفاتيح مستريحة، ننتظر أقربها مهما طالت المدة
         if (acquired.waitMs > 0) {
             console.log(`[Cooldown] All keys resting — waiting ${Math.ceil(acquired.waitMs / 1000)}s for Key ...${String(acquired.key).slice(-4)} to free up.`);
             await delay(acquired.waitMs);
@@ -633,17 +508,13 @@ async function translateChunkStrict(texts, keysArray, modelName, genderMap = nul
     return { status: 'quota', data: null };
 }
 
-/**
- * يترجم جزء واحد. الأسطر اللي ترجع ناقصة تُعاد فقط هي (بدون تقسيم الجزء لنصفين)،
- * فعدد الطلبات ما يتضاعف أبداً. يرجع مصفوفة بطول texts.length، وnull للسطر اللي فشل نهائياً.
- */
-async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap) {
+async function translateChunkWithRecovery(texts, keysArray, modelName) {
     const results = new Array(texts.length).fill(null);
     let pending = texts.map((_, i) => i);
 
     for (let round = 0; round < MAX_RECOVERY_ROUNDS && pending.length > 0; round++) {
         const subTexts = pending.map(i => texts[i]);
-        const res = await translateChunkStrict(subTexts, keysArray, modelName, genderMap);
+        const res = await translateChunkStrict(subTexts, keysArray, modelName);
 
         if (res.data) {
             pending.forEach((origIdx, k) => {
@@ -666,13 +537,12 @@ async function translateChunkWithRecovery(texts, keysArray, modelName, genderMap
     return results;
 }
 
-// يغلّف الاسترجاع بكاش لكل جزء، عشان الملف اللي فشل جزئياً يعيد بس اللي ناقص.
-async function translateChunkCached(texts, keysArray, modelName, genderMap) {
+async function translateChunkCached(texts, keysArray, modelName) {
     const key = buildChunkCacheKey(texts, modelName);
     const cached = await getCachedTranslation(key);
     if (Array.isArray(cached) && cached.length === texts.length) return cached;
 
-    const result = await translateChunkWithRecovery(texts, keysArray, modelName, genderMap);
+    const result = await translateChunkWithRecovery(texts, keysArray, modelName);
     if (chunkLooksTranslated(texts, result)) {
         await setCachedTranslation(key, result);
     }
@@ -741,17 +611,13 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
-        const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
-
         const chunks = [];
         for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
-        // معالجة تتابعية بحتة: جزء واحد بمرة وحدة. ما نبدأ بالجزء التالي إلا بعد
-        // ما يخلص اللي قبله تماماً — صفر تزامن بين الأسطر أو الأجزاء.
         const rawTranslations = [];
         for (const chunk of chunks) {
             const texts = chunk.map(c => c.text);
-            const translated = await translateChunkCached(texts, keysArray, modelName, genderMap);
+            const translated = await translateChunkCached(texts, keysArray, modelName);
             chunk.forEach((_, idx) => {
                 rawTranslations.push(translated && translated[idx] ? translated[idx] : null);
             });
@@ -815,16 +681,13 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
         const cues = extractCuesUniversal(originalText);
         if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل استخراج النصوص.`;
 
-        const genderMap = await extractCharacterGenderMap(cues, keysArray, modelName);
-
         const chunks = [];
         for (let i = 0; i < cues.length; i += CHUNK_SIZE) chunks.push(cues.slice(i, i + CHUNK_SIZE));
 
-        // نفس المبدأ: جزء واحد بمرة وحدة، بالتتابع، بدون أي تزامن.
         const rawTranslations = [];
         for (const chunk of chunks) {
             const texts = chunk.map(c => c.text);
-            const translated = await translateChunkCached(texts, keysArray, modelName, genderMap);
+            const translated = await translateChunkCached(texts, keysArray, modelName);
             chunk.forEach((_, idx) => {
                 rawTranslations.push(translated && translated[idx] ? translated[idx] : null);
             });
@@ -872,7 +735,5 @@ module.exports = {
     parseRobustJsonArray,
     applyLineLengthFallback,
     postProcessTranslatedText,
-    extractCharacterGenderMap,
-    formatGenderMapForPrompt,
     translateChunkWithRecovery
 };
