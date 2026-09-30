@@ -70,8 +70,8 @@ function getDynamicChunkSize(modelName) {
   const limit = getFallbackOutputTokenLimit(modelName);
   const safetyMargin = Math.floor(limit * 0.05);
   const available = limit - safetyMargin;
-  if (available >= 60000) return 120;
-  if (available >= 30000) return 100;
+  if (available >= 60000) return 280;
+  if (available >= 30000) return 180;
   return 80;
 }
 
