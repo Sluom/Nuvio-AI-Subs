@@ -30,6 +30,9 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 // عدد مرات إعادة طلب الأسطر الناقصة فقط (بعد الطلب الأول)
 const MAX_MISSING_RETRIES = 3;
 
+// عدد الجولات الإضافية لإعادة الأسطر اللي انتجاوزت بسبب الخنق (429/503)
+const MAX_RETRY_PASSES = 4;
+
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ================== نظام 25 مفتاح - تبريد ذكي ==================
@@ -398,45 +401,100 @@ function prepCueText(t) {
   return t;
 }
 
-// يترجم كل الأسطر ويرجع مصفوفة بنفس ترتيب الأسطر الأصلية بالضبط
-async function translateAllCues(cues, keysArray, modelName, concurrency) {
-  const CHUNK = getDynamicChunkSize(modelName);
+// ================== كاش الأسطر (يحفظ كل سطر ترجم) ==================
+// رابط الترجمة -> Map(رقم السطر -> الترجمة)
+// إذا المحاولة الأولى نقصت أسطر، المحاولة الثانية تترجم الناقصة فقط
+const lineCaches = new Map();
+const MAX_LINE_CACHES = 40;
 
-  const chunks = [];
-  for (let i = 0; i < cues.length; i += CHUNK) {
-    chunks.push(
-      cues.slice(i, i + CHUNK).map((c, k) => ({ id: i + k, text: prepCueText(c.text) }))
-    );
+function getLineCache(key) {
+  if (!lineCaches.has(key)) {
+    lineCaches.set(key, new Map());
+    if (lineCaches.size > MAX_LINE_CACHES) lineCaches.delete(lineCaches.keys().next().value);
   }
-
-  const tasks = chunks.map(chunk => async () => {
-    const map = await translateItemsWithRecovery(chunk, keysArray, modelName);
-    return chunk.map(it => map.get(it.id) || cues[it.id].text);
-  });
-
-  const chunkResults = await runConcurrentPool(tasks, concurrency);
-  // إذا دفعة كاملة فشلت (null) نرجع نصوصها الأصلية
-  const out = [];
-  chunks.forEach((chunk, ci) => {
-    const res = chunkResults[ci];
-    chunk.forEach((it, k) => {
-      out.push(normalizeLineBreakArtifacts((res && res[k]) ? res[k] : cues[it.id].text));
-    });
-  });
-  return out;
+  return lineCaches.get(key);
 }
 
-async function handleTranslationSrt(subUrl, keysArray, modelName) {
+// الأسطر اللي فيها رموز أو أرقام أو وسوم بس (مثل ♪ أو {\an8}) ما تحتاج ترجمة
+function needsTranslation(text) {
+  const t = String(text || '').replace(/<[^>]*>|\{[^}]*\}|\\N|\\n/g, '');
+  return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
+}
+
+// يترجم الأسطر اللي ناقصة فقط، ويرجع { texts, missing }
+// texts بنفس ترتيب الأسطر الأصلية بالضبط، وmissing = عدد الأسطر اللي بقت بدون ترجمة
+async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey) {
+  const CHUNK = getDynamicChunkSize(modelName);
+  const cache = getLineCache(cacheKey);
+
+  const results = new Array(cues.length).fill(null); // رقم السطر -> الترجمة
+  const toDo = [];
+  let fromCache = 0;
+  cues.forEach((c, i) => {
+    if (!needsTranslation(c.text)) { results[i] = c.text; return; }
+    if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
+    toDo.push({ id: i, text: prepCueText(c.text) });
+  });
+  if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
+
+  let pendingChunks = [];
+  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
+
+  for (let pass = 0; pass <= MAX_RETRY_PASSES && pendingChunks.length > 0; pass++) {
+    if (pass > 0) {
+      const left = pendingChunks.reduce((n, ch) => n + ch.length, 0);
+      if (keysArray.every(k => deadKeys.has(k))) {
+        console.log('[توقف] كل المفاتيح ميتة، ما فايدة من إعادة المحاولة.');
+        break;
+      }
+      console.log(`[جولة إعادة ${pass}/${MAX_RETRY_PASSES} 🔁] باقي ${left} سطر انتجاوزوا بسبب الخنق. راحة ثم أعيدهم...`);
+      await delay(5000 + Math.random() * 3000);
+    }
+
+    const tasks = pendingChunks.map(chunk => async () => {
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName);
+      for (const [id, text] of map) {
+        results[id] = text;
+        cache.set(id, text);
+      }
+    });
+
+    // بالجولات الإضافية نخفف الضغط: دفعتين بنفس الوقت بالأكثر
+    await runConcurrentPool(tasks, pass === 0 ? concurrency : Math.min(2, concurrency));
+
+    pendingChunks = pendingChunks
+      .map(ch => ch.filter(it => results[it.id] == null))
+      .filter(ch => ch.length > 0);
+  }
+
+  const missing = results.filter(r => r == null).length;
+  if (missing > 0) {
+    console.log(`[تنبيه] ${missing} سطر بقوا بنصهم الأصلي بعد كل المحاولات (محفوظ الباقي بالكاش).`);
+  }
+
+  return {
+    texts: cues.map((c, i) => normalizeLineBreakArtifacts(results[i] || c.text)),
+    missing
+  };
+}
+
+// ترجع { content, missing, total, failed }
+// failed = true يعني فشل تحميل الملف الأصلي أو استخراج النص (ما تنحفظ كترجمة جاهزة)
+async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
-  catch (e) { return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n"; }
+  catch (e) {
+    return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n", missing: 0, total: 0, failed: true };
+  }
 
   const cues = extractCuesUniversal(originalText);
-  if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
+  if (!cues.length) {
+    return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
+  }
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)}`);
 
-  const finalTranslations = await translateAllCues(cues, keysArray, modelName, 3);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 3, subUrl);
 
   let srtOutput = '';
   let counter = 1;
@@ -452,18 +510,22 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
     counter++;
   });
-  return srtOutput;
+  return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-async function handleTranslationAss(subUrl, keysArray, modelName) {
+async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
-  catch (e) { return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`; }
+  catch (e) {
+    return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`, missing: 0, total: 0, failed: true };
+  }
 
   const cues = extractCuesUniversal(originalText);
-  if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`;
+  if (!cues.length) {
+    return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
+  }
 
-  const finalTranslations = await translateAllCues(cues, keysArray, modelName, 8);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl);
 
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -472,12 +534,22 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
     if (text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
     assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\n/g, '\\N')}`);
   });
-  return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
+}
+
+// نسخ قديمة ترجع نص فقط (للتوافق)
+async function handleTranslationSrt(subUrl, keysArray, modelName) {
+  return (await handleTranslationSrtDetailed(subUrl, keysArray, modelName)).content;
+}
+async function handleTranslationAss(subUrl, keysArray, modelName) {
+  return (await handleTranslationAssDetailed(subUrl, keysArray, modelName)).content;
 }
 
 module.exports = {
   handleTranslationSrt,
   handleTranslationAss,
+  handleTranslationSrtDetailed,
+  handleTranslationAssDetailed,
   normalizeLineBreakArtifacts,
   parseRobustJsonArray,
   parseIdTranslations,
