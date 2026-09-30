@@ -186,7 +186,7 @@ function parseRobustJsonArray(raw, expectedLength) {
   return null;
 }
 
-async function runConcurrentPool(tasks, limit = 8) {
+async function runConcurrentPool(tasks, limit = 5) {
   const results = new Array(tasks.length);
   let index = 0;
   async function worker() {
