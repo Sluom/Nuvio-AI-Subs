@@ -461,6 +461,8 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                     <option value="gemini-3.7-flash" ${existingModel === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash (beta)</option>
                     <option value="gemini-3.6-flash" ${existingModel === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash (beta)</option>
                     <option value="gemini-3.5-flash" ${existingModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (beta)</option>
+                    <option value="gemini-2.5-flash" ${existingModel === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash</option>
+
                 </select>
             </div>
 
