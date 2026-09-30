@@ -31,8 +31,8 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_MISSING_RETRIES = 3;
 
 // تحليل المتكلم والمخاطَب (المذكر/المؤنث) قبل الترجمة لتحسين الضمائر
-// اجعلها false لإيقافه والرجوع للسلوك القديم
-const ENABLE_GENDER_ANALYSIS = true;
+// موقوف حالياً (false). غيّرها إلى true إذا تبي ترجع تشغله يوماً ما.
+const ENABLE_GENDER_ANALYSIS = false;
 const ANNOTATION_MIN_COVERAGE = 0.8;
 
 // عدد الجولات الإضافية لإعادة الأسطر اللي انتجاوزت بسبب الخنق (429/503)
@@ -254,14 +254,77 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
+// ================== قائمة الشخصيات من TMDB (تنحط بأول برومبت الترجمة) ==================
+// تحتاج متغير بيئة TMDB_API_KEY ورقم IMDb (مثل tt0421384 أو tt0421384:1:1).
+// إذا ما توفر أي واحد منهم أو فشل الطلب ترجع نص فاضي والترجمة تشتغل مثل السابق.
+const castHintCache = new Map();
+const MAX_CAST_HINTS = 100;
+const MAX_CAST_CHARACTERS = 30;
+
+async function getCastHint(imdbId) {
+  const m = String(imdbId || '').match(/tt\d+/i);
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!m || !apiKey) return '';
+  const tt = m[0].toLowerCase();
+  if (castHintCache.has(tt)) return castHintCache.get(tt);
+
+  try {
+    const base = 'https://api.themoviedb.org/3';
+    const opts = { timeout: 8000, httpAgent, httpsAgent };
+
+    const found = await axios.get(`${base}/find/${tt}`, {
+      ...opts, params: { api_key: apiKey, external_source: 'imdb_id' }
+    });
+    const fd = found.data || {};
+    const tvId = fd.tv_results?.[0]?.id || fd.tv_episode_results?.[0]?.show_id;
+    const movieId = fd.movie_results?.[0]?.id;
+
+    let rawCast = [];
+    if (tvId) {
+      const r = await axios.get(`${base}/tv/${tvId}/aggregate_credits`, { ...opts, params: { api_key: apiKey } });
+      rawCast = (r.data?.cast || []).map(a => ({ gender: a.gender, character: a.roles?.[0]?.character }));
+    } else if (movieId) {
+      const r = await axios.get(`${base}/movie/${movieId}/credits`, { ...opts, params: { api_key: apiKey } });
+      rawCast = (r.data?.cast || []).map(a => ({ gender: a.gender, character: a.character }));
+    }
+
+    const seen = new Set();
+    const parts = [];
+    for (const a of rawCast) {
+      if (parts.length >= MAX_CAST_CHARACTERS) break;
+      const g = a.gender === 1 ? 'F' : (a.gender === 2 ? 'M' : null);
+      if (!g) continue;
+      const name = String(a.character || '').replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+      if (!name || /^(self|himself|herself|themselves|uncredited)$/i.test(name)) continue;
+      const k = name.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      parts.push(`${name} = ${g}`);
+    }
+
+    const hint = parts.join(', ');
+    castHintCache.set(tt, hint);
+    if (castHintCache.size > MAX_CAST_HINTS) castHintCache.delete(castHintCache.keys().next().value);
+    if (hint) console.log(`[TMDB] قائمة شخصيات جاهزة لـ ${tt} (${parts.length} شخصية).`);
+    return hint;
+  } catch (e) {
+    console.log(`[TMDB] فشل جلب الشخصيات (${e.message})، أكمل الترجمة بدونها.`);
+    return '';
+  }
+}
+
 // ================== الترجمة الأساسية (بالأرقام) ==================
 // items = [{ id: 5, text: "..." }, ...]
 // ترجع: { status, map }  حيث map = رقم السطر -> الترجمة
-async function translateChunkStrict(items, keysArray, modelName) {
+async function translateChunkStrict(items, keysArray, modelName, castHint) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
+
+  const castBlock = castHint
+    ? `CHARACTER GENDER REFERENCE (from the cast list; use it to choose the correct Arabic gender when these characters speak, are addressed, or are mentioned by name; never output it): ${castHint}\n`
+    : '';
 
   const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a two-letter hint code.
 "g" = first letter is the SPEAKER's gender, second letter is the gender of the person being ADDRESSED. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
@@ -283,7 +346,7 @@ Translate the "text" of every entry to Arabic while:
 12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
 13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
-Do NOT overthink. Do NOT overplan.
+${castBlock}Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
 Output ONLY A VALID JSON ARRAY OF OBJECTS {"id","text"}, nothing else.
 Content to translate:
@@ -349,14 +412,14 @@ ${JSON.stringify(items)}`;
 }
 
 // يترجم الدفعة، وإذا نقصت أسطر يعيد طلب الناقصة فقط (مو الدفعة كلها)
-async function translateItemsWithRecovery(items, keysArray, modelName) {
+async function translateItemsWithRecovery(items, keysArray, modelName, castHint) {
   const done = new Map();
   if (!items || items.length === 0) return done;
 
   let pending = items;
 
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await translateChunkStrict(pending, keysArray, modelName);
+    const result = await translateChunkStrict(pending, keysArray, modelName, castHint);
 
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
@@ -440,6 +503,9 @@ function getAnnotationCache(key) {
   return annotationCaches.get(key);
 }
 
+// الأسطر اللي فيها أنا/أنت/نحن/هو/هي فقط هي اللي تحتاج تحليل جنس (الباقي مثل "Okay." تنتجاوز)
+const NEEDS_GENDER = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
+
 const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
   { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'OFF' },
@@ -498,7 +564,7 @@ function parseAnnotationCodes(raw) {
 async function annotateSlice(items, keysArray, modelName) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: 'application/json' };
-  if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+  if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
 
   const prompt = `You will receive numbered subtitle lines from one film or episode, in order, as a JSON array of {"id","text"}.
 Read the whole story first. Then, for EVERY line, work out WHO IS SPEAKING and WHO IS BEING ADDRESSED, and output only their genders.
@@ -509,19 +575,25 @@ Output ONLY a valid JSON array of strings, exactly one string per input id, in t
 Lines:
 ${JSON.stringify(items)}`;
 
-  const res = await callGeminiText({ prompt, keysArray, modelName: cleanModel, generationConfig, timeout: 120000 });
+  const res = await callGeminiText({ prompt, keysArray, modelName: cleanModel, generationConfig, timeout: 60000 });
   if (res.status !== 'ok') return new Map();
   return parseAnnotationCodes(res.text);
 }
 
 // يحلل الفلم كله (أو ينقص منه فقط) ويرجع Map: رقم السطر -> رمز الجنس
+// يحلل فقط الأسطر اللي فيها ضمائر (NEEDS_GENDER)
 async function getAnnotations(cues, keysArray, modelName, cacheKey) {
   const cache = getAnnotationCache(cacheKey);
   const pending = [];
-  cues.forEach((c, i) => { if (!cache.has(i)) pending.push({ id: i, text: c.text }); });
+  let eligible = 0;
+  cues.forEach((c, i) => {
+    if (!NEEDS_GENDER.test(c.text)) return;
+    eligible++;
+    if (!cache.has(i)) pending.push({ id: i, text: c.text });
+  });
 
   // إذا أغلب الأسطر محللة من قبل نكتفي بالموجود
-  if (pending.length <= cues.length * (1 - ANNOTATION_MIN_COVERAGE)) return cache;
+  if (pending.length <= eligible * (1 - ANNOTATION_MIN_COVERAGE)) return cache;
 
   const limit = getFallbackOutputTokenLimit(modelName);
   const maxSlice = limit >= 30000 ? 2500 : 800;
@@ -540,13 +612,13 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey) {
   });
   await runConcurrentPool(tasks, 3);
 
-  console.log(`[تحليل الضمائر] تم تحليل ${cache.size} من ${cues.length} سطر.`);
+  console.log(`[تحليل الضمائر] تم تحليل ${cache.size} من ${eligible} سطر.`);
   return cache;
 }
 
 // يترجم الأسطر اللي ناقصة فقط، ويرجع { texts, missing }
 // texts بنفس ترتيب الأسطر الأصلية بالضبط، وmissing = عدد الأسطر اللي بقت بدون ترجمة
-async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey) {
+async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, imdbId) {
   const CHUNK = getDynamicChunkSize(modelName);
   const cache = getLineCache(cacheKey);
 
@@ -559,6 +631,9 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     toDo.push({ id: i, text: prepCueText(c.text) });
   });
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
+
+  // قائمة الشخصيات وأجناسها من TMDB (إذا فشلت نكمل بدونها مثل السابق)
+  const castHint = toDo.length > 0 ? await getCastHint(imdbId) : '';
 
   // تحليل المتكلم/المخاطَب قبل الترجمة (إذا فشل نكمل بدونه مثل السابق)
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0) {
@@ -590,7 +665,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName);
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, castHint);
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
@@ -618,7 +693,8 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
 
 // ترجع { content, missing, total, failed }
 // failed = true يعني فشل تحميل الملف الأصلي أو استخراج النص (ما تنحفظ كترجمة جاهزة)
-async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
+// imdbId اختياري (مثل tt0421384 أو tt0421384:1:1) لجلب قائمة الشخصيات من TMDB
+async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, imdbId) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
   catch (e) {
@@ -632,7 +708,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)}`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl, imdbId);
 
   let srtOutput = '';
   let counter = 1;
@@ -651,7 +727,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
+async function handleTranslationAssDetailed(subUrl, keysArray, modelName, imdbId) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
   catch (e) {
@@ -663,7 +739,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   }
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, imdbId);
 
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -676,11 +752,11 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
 }
 
 // نسخ قديمة ترجع نص فقط (للتوافق)
-async function handleTranslationSrt(subUrl, keysArray, modelName) {
-  return (await handleTranslationSrtDetailed(subUrl, keysArray, modelName)).content;
+async function handleTranslationSrt(subUrl, keysArray, modelName, imdbId) {
+  return (await handleTranslationSrtDetailed(subUrl, keysArray, modelName, imdbId)).content;
 }
-async function handleTranslationAss(subUrl, keysArray, modelName) {
-  return (await handleTranslationAssDetailed(subUrl, keysArray, modelName)).content;
+async function handleTranslationAss(subUrl, keysArray, modelName, imdbId) {
+  return (await handleTranslationAssDetailed(subUrl, keysArray, modelName, imdbId)).content;
 }
 
 module.exports = {
