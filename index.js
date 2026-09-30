@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrt, handleTranslationAss } = require('./ai');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 
 const app = express();
 app.use(cors());
@@ -57,6 +57,51 @@ class RequestQueue {
 // لحد ما يخلص، وبعدين يجيله اللي بعده فورًا - ده أسرع من تقسيم المفاتيح
 // المحدودة على أكتر من ملف في نفس الوقت
 const globalTranslationQueue = new RequestQueue(1);
+
+// ==========================================
+// 2.5 مشغّل الترجمة بالخلفية (جديد)
+//    - إذا نجحت كاملة: تنحفظ نهائياً.
+//    - إذا نقصت أسطر: تنحفظ الترجمة الحالية فوراً (تطلع للمستخدم) ثم يعيد
+//      ترجمة الأسطر الناقصة فقط بجولات إضافية، ويحدّث الكاش كل ما تحسنت.
+//    - إذا فشل التحميل/الاستخراج كلياً: يمسح الكاش، فالضغطة الجاية تعيد المحاولة
+//      (بدل ما تنحفظ رسالة الفشل وكأنها ترجمة جاهزة).
+// ==========================================
+const MAX_BACKGROUND_ROUNDS = 3;
+const ROUND_PAUSE_MS = 30000;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label }) {
+    translationCache[cacheKey] = { status: 'pending' };
+
+    globalTranslationQueue.add(async () => {
+        try {
+            for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
+                const r = await handler(targetUrl, userKeys, userModel);
+
+                if (r.failed) {
+                    console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
+                    const cur = translationCache[cacheKey];
+                    if (!cur || cur.status !== 'done') delete translationCache[cacheKey];
+                    return;
+                }
+
+                translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
+
+                if (r.missing === 0) {
+                    if (round > 1) console.log(`[${label}] Track ${trackNum}: اكتملت الترجمة بعد ${round} جولات ✅`);
+                    return;
+                }
+
+                console.log(`[${label}] Track ${trackNum}: ناقص ${r.missing} من ${r.total} سطر (جولة ${round}/${MAX_BACKGROUND_ROUNDS}). الترجمة الحالية جاهزة للمستخدم.`);
+                if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
+            }
+        } catch (e) {
+            console.error(`[Background Error - ${label}] Track ${trackNum}:`, e.message);
+            const cur = translationCache[cacheKey];
+            if (!cur || cur.status !== 'done') delete translationCache[cacheKey];
+        }
+    });
+}
 
 // ==========================================
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
@@ -734,17 +779,11 @@ app.all([
     }
 
     if (!translationCache[cacheKey]) {
-        translationCache[cacheKey] = { status: 'pending' };
-
-        globalTranslationQueue.add(async () => {
-            try {
-                const finalContent = await handleTranslationSrt(targetUrl, userKeys, userModel);
-                translationCache[cacheKey] = { status: 'done', content: finalContent };
-            } catch (e) {
-                console.error(`[Background Error] Track ${trackNum}:`, e.message);
-                const errorSub = `1\n00:00:01,000 --> 01:00:00,000\nفشل الترجمة النهائي. حاول مجدداً.\n\n`;
-                translationCache[cacheKey] = { status: 'done', content: errorSub };
-            }
+        startTranslationJob({
+            cacheKey,
+            handler: handleTranslationSrtDetailed,
+            targetUrl, userKeys, userModel, trackNum,
+            label: 'SRT'
         });
     }
 
@@ -787,17 +826,11 @@ app.all([
     }
 
     if (!translationCache[cacheKey]) {
-        translationCache[cacheKey] = { status: 'pending' };
-
-        globalTranslationQueue.add(async () => {
-            try {
-                const finalContent = await handleTranslationAss(targetUrl, userKeys, userModel);
-                translationCache[cacheKey] = { status: 'done', content: finalContent };
-            } catch (e) {
-                console.error(`[Background Error - ASS] Track ${trackNum}:`, e.message);
-                const errorSub = `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,فشل الترجمة النهائي. حاول مجدداً.`;
-                translationCache[cacheKey] = { status: 'done', content: errorSub };
-            }
+        startTranslationJob({
+            cacheKey,
+            handler: handleTranslationAssDetailed,
+            targetUrl, userKeys, userModel, trackNum,
+            label: 'ASS'
         });
     }
 
