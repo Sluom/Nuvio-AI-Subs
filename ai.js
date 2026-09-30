@@ -494,7 +494,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)}`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 3, subUrl);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl);
 
   let srtOutput = '';
   let counter = 1;
