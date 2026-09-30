@@ -3,7 +3,7 @@ async function getCastHint(imdbId) {
   const m = String(imdbId || '').match(/tt\d+/i);
   console.log(`[TMDB] imdbId=${imdbId || 'مفقود'} | key=${apiKey ? 'موجود' : 'مفقود'}`);
   if (!m || !apiKey) return '';
- 
+} 
 const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
