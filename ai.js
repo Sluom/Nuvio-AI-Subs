@@ -64,7 +64,7 @@ function getDynamicChunkSize(modelName) {
   const limit = getFallbackOutputTokenLimit(modelName);
   const safetyMargin = Math.floor(limit * 0.05);
   const available = limit - safetyMargin;
-  if (available >= 60000) return 140;
+  if (available >= 60000) return 120;
   if (available >= 30000) return 100;
   return 80;
 }
@@ -365,7 +365,7 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 5); 
+  const chunkResults = await runConcurrentPool(tasks, 3); 
   const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
   let srtOutput = '';
