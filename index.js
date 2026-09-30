@@ -661,6 +661,10 @@ app.get([
             }
         }
 
+        // [مؤقت] اختبار SubDL بالخلفية: يسجل النتيجة فقط ولا يؤثر على الترجمات
+getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
+    .then(list => console.log(`[SubDL Probe] ${finalTargetId} => ${list.length} ترجمة${list.length === 0 ? ' (السبب بالسطر اللي قبل هذا)' : ' ✅ SubDL شغال'}`))
+    .catch(e => console.log(`[SubDL Probe] ${finalTargetId} => استثناء غير متوقع: ${e.message}`));
         // جلب الترجمة من المحرك الأساسي والموثوق (SRT) وجلب ASS الأصلي من OpenSubtitles.org
         // القديم - الاثنان بالتوازي في نفس الوقت (Promise.all) لتقليل زمن الاستجابة
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
