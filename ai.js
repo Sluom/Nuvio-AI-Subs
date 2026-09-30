@@ -1,13 +1,14 @@
-const axios = require('axios');
-const iconv = require('iconv-lite');
-const AdmZip = require('adm-zip');
-const zlib = require('zlib');
 async function getCastHint(imdbId) {
   const apiKey = String(process.env.TMDB_API_KEY || '').trim();
   const m = String(imdbId || '').match(/tt\d+/i);
   console.log(`[TMDB] imdbId=${imdbId || 'مفقود'} | key=${apiKey ? 'موجود' : 'مفقود'}`);
   if (!m || !apiKey) return '';
-  // ... باقي الكود
+ 
+const axios = require('axios');
+const iconv = require('iconv-lite');
+const AdmZip = require('adm-zip');
+const zlib = require('zlib');
+
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
 
