@@ -27,6 +27,9 @@ const DEFAULT_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta
 const GEMINI_CLIENT_HEADER = 'stremio-submaker/1.4.94';
 const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 
+// عدد مرات إعادة طلب الأسطر الناقصة فقط (بعد الطلب الأول)
+const MAX_MISSING_RETRIES = 3;
+
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ================== نظام 25 مفتاح - تبريد ذكي ==================
@@ -87,7 +90,7 @@ async function acquireKey(keysArray) {
     const wait = bestTime - now;
     if (wait > 0) {
       console.log(`[تبريد جماعي] كل المفاتيح الحية بالتبريد. انتظار ${Math.ceil(wait / 1000)}s...`);
-      // [الحل 1]: إضافة تأخير عشوائي (Jitter) حتى العمال ما يصحون كلهم بنفس اللحظة ويهجمون
+      // تأخير عشوائي (Jitter) حتى العمال ما يصحون كلهم بنفس اللحظة
       await delay(wait + (Math.random() * 3000));
     }
   }
@@ -160,6 +163,7 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
+// (قديمة - تبقى موجودة لأن ملفات ثانية ممكن تستعملها)
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim();
@@ -167,7 +171,7 @@ function parseRobustJsonArray(raw, expectedLength) {
   else if (clean.startsWith('```')) clean = clean.substring(3);
   if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
   clean = clean.trim();
-  
+
   try {
     const parsed = JSON.parse(clean);
     let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
@@ -186,6 +190,48 @@ function parseRobustJsonArray(raw, expectedLength) {
   return null;
 }
 
+// ================== الجديدة: قراءة الرد بالأرقام (id) ==================
+// ترجع Map: رقم السطر -> الترجمة. حتى لو الرد ناقص أو مقطوع، تاخذ اللي سليم منه.
+function parseIdTranslations(raw) {
+  if (!raw) return null;
+  let clean = String(raw).trim();
+  if (clean.startsWith('```json')) clean = clean.substring(7);
+  else if (clean.startsWith('```')) clean = clean.substring(3);
+  if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
+  clean = clean.trim();
+
+  const map = new Map();
+  const fix = s => normalizeLineBreakArtifacts(
+    String(s == null ? '' : s).replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪')
+  ).trim();
+
+  try {
+    const parsed = JSON.parse(clean);
+    const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+    if (Array.isArray(arr)) {
+      for (const o of arr) {
+        if (o && typeof o === 'object' && o.id !== undefined) {
+          const id = Number(o.id);
+          const t = fix(o.text);
+          if (Number.isInteger(id) && t) map.set(id, t);
+        }
+      }
+    }
+    if (map.size) return map;
+  } catch (e) {}
+
+  // إذا الرد مقطوع أو فيه خلل: ننقذ كل سطر سليم لحاله
+  const re = /\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+  let m;
+  while ((m = re.exec(clean)) !== null) {
+    let t;
+    try { t = JSON.parse('"' + m[2] + '"'); } catch (e) { t = m[2]; }
+    t = fix(t);
+    if (t) map.set(Number(m[1]), t);
+  }
+  return map.size ? map : null;
+}
+
 async function runConcurrentPool(tasks, limit = 5) {
   const results = new Array(tasks.length);
   let index = 0;
@@ -200,15 +246,20 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-// ================== الترجمة الأساسية ==================
-async function translateChunkStrict(texts, keysArray, modelName) {
+// ================== الترجمة الأساسية (بالأرقام) ==================
+// items = [{ id: 5, text: "..." }, ...]
+// ترجع: { status, map }  حيث map = رقم السطر -> الترجمة
+async function translateChunkStrict(items, keysArray, modelName) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
 
-  const prompt = `Translate the following subtitles while:
-1. Preserving the timing and structure exactly as given.
+  const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"}.
+Translate the "text" of every entry to Arabic while:
+1. Returning a JSON array of objects in the exact same shape: [{"id": <same number>, "text": "<Arabic translation>"}].
+   - Return exactly ONE object for EVERY input id, using the SAME id. Never merge entries, never split an entry, never skip an entry, never invent ids.
+   - Keep each translation inside its own id, even if a sentence continues in the next entry.
 2. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
 3. Preserving any formatting tags or special characters.
 4. Any text wrapped entirely in square brackets [ ] represents on-screen text or action tags. Translate it accurately and strictly keep the square brackets in the Arabic output.
@@ -216,25 +267,23 @@ async function translateChunkStrict(texts, keysArray, modelName) {
 6. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
 7. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE entry in ONE single pair of quotation marks (one at the start, one at the end). Do not add internal quotes for names if the whole entry is already quoted.
 8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar. Infer the speaker's/listener's gender from the context available within this chunk only (names, titles, dialogue cues). If there is a clear back-and-forth between a male and a female, alternate the Arabic pronouns accordingly. If gender is impossible to determine from the context, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., use passive voice or verbal nouns to avoid explicit أنتَ/أنتِ).
-9. Pay close attention to split sentences (sentences that start in one cue and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential lines without treating them as isolated sentences.
+9. Pay close attention to split sentences (sentences that start in one entry and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential entries, while still keeping each entry's translation under its own id.
 10. Act as an expert cinematic subtitler. Translate idioms/slang naturally into Arabic rather than literally.
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
 11. RELIGIOUS EXCLAMATIONS: Translate words like 'Jesus', 'Christ', or 'Oh my God' contextually as exclamations (e.g., يا إلهي، بحق السماء) and NEVER literally as a person's name.
 12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
 13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
-Translate to Arabic.
 Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
-Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
+Output ONLY A VALID JSON ARRAY OF OBJECTS {"id","text"}, nothing else.
 Content to translate:
-${JSON.stringify(texts)}`;
+${JSON.stringify(items)}`;
 
-  // زدت المحاولات لـ 4 لأن هسة ضفنا تأخير بيناتهن فالسيرفر راح يرتاح
   for (let attempt = 0; attempt < 4; attempt++) {
     const activeKey = await acquireKey(keysArray);
-    if (!activeKey) return { status: 'no_keys' };
-    
+    if (!activeKey) return { status: 'no_keys', map: new Map() };
+
     const cleanKey = String(activeKey).trim();
     const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
 
@@ -255,74 +304,76 @@ ${JSON.stringify(texts)}`;
         maxContentLength: MAX_AI_RESPONSE_BYTES
       });
 
-      const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      const parsedArr = parseRobustJsonArray(responseText, texts.length);
-      
-      if (parsedArr) {
-        if (texts.length >= 80) console.log(`[Success] chunk ${texts.length} via ...${cleanKey.slice(-4)}`);
-        return { status: 'success', data: parsedArr };
+      const parts = r.data?.candidates?.[0]?.content?.parts || [];
+      const responseText = parts.map(p => p?.text || '').join('');
+      const map = parseIdTranslations(responseText);
+
+      if (map) {
+        if (items.length >= 80) console.log(`[Success] chunk ${items.length} via ...${cleanKey.slice(-4)} (${map.size} رجعت)`);
+        return { status: 'ok', map };
       }
-      
-      return { status: 'mismatch' };
+
+      return { status: 'bad_format', map: new Map() };
 
     } catch (e) {
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        continue; 
+        continue;
       }
-      
+
       let cd = 60000;
       if (status === 503 || status === 500 || status === 502) cd = 3000 + Math.random() * 2000;
       else if (status === 429) cd = 60000;
       else if (status === 400) cd = 10000;
-      
+
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status})`);
-      
-      // [الحل 2]: أخذ نفس (Backoff) قبل سحب مفتاح جديد لمنع الرماية السريعة وحرق المفاتيح
+
       if (attempt < 3) {
-        const backoffDelay = 2000 + (Math.random() * 2000); // تأخير بين ثانيتين إلى 4 ثواني
+        const backoffDelay = 2000 + (Math.random() * 2000);
         await delay(backoffDelay);
       }
     }
   }
-  return { status: 'api_exhausted' };
+  return { status: 'api_exhausted', map: new Map() };
 }
 
-async function translateChunkWithRecovery(texts, keysArray, modelName) {
-  if (!texts || texts.length === 0) return [];
+// يترجم الدفعة، وإذا نقصت أسطر يعيد طلب الناقصة فقط (مو الدفعة كلها)
+async function translateItemsWithRecovery(items, keysArray, modelName) {
+  const done = new Map();
+  if (!items || items.length === 0) return done;
 
-  const result = await translateChunkStrict(texts, keysArray, modelName);
+  let pending = items;
 
-  if (result.status === 'success') {
-    return result.data;
-  }
+  for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
+    const result = await translateChunkStrict(pending, keysArray, modelName);
 
-  if (result.status === 'api_exhausted' || result.status === 'no_keys') {
-    console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز الدفعة (${texts.length} سطر) للحفاظ على تزامن الفلم.`);
-    return texts.map(() => null);
-  }
-
-  if (result.status === 'mismatch') {
-    if (texts.length === 1) {
-      console.log(`[تجاوز سطر معند] تم تعويض السطر بنص فارغ للحفاظ على التزامن.`);
-      return [null]; 
+    if (result.status === 'api_exhausted' || result.status === 'no_keys') {
+      console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
+      break;
     }
 
-    const mid = Math.floor(texts.length / 2);
-    const leftHalf = texts.slice(0, mid);
-    const rightHalf = texts.slice(mid);
+    if (result.status === 'ok') {
+      const wanted = new Set(pending.map(it => it.id));
+      for (const [id, text] of result.map) {
+        if (wanted.has(id) && text) done.set(id, text);
+      }
+    }
+    // (bad_format: نعيد الطلب لنفس الأسطر)
 
-    console.log(`[انقسام وتعافي 🛠️] الموديل دمج الأسطر في الدفعة (${texts.length}). جاري تقسيمها إلى (${leftHalf.length}) و (${rightHalf.length})...`);
+    const before = pending.length;
+    pending = pending.filter(it => !done.has(it.id));
 
-    const leftResult = await translateChunkWithRecovery(leftHalf, keysArray, modelName);
-    const rightResult = await translateChunkWithRecovery(rightHalf, keysArray, modelName);
-
-    return [...leftResult, ...rightResult];
+    if (pending.length > 0 && round < MAX_MISSING_RETRIES) {
+      console.log(`[إعادة الناقص 🔁] ناقص ${pending.length} من ${before}. أعيد طلبهم فقط...`);
+    }
   }
 
-  return texts.map(() => null);
+  if (pending.length > 0) {
+    console.log(`[تجاوز سطر] ${pending.length} سطر بقوا بنصهم الأصلي للحفاظ على التزامن.`);
+  }
+  return done;
 }
 
 async function fetchAndExtractSub(subUrl) {
@@ -341,6 +392,40 @@ async function fetchAndExtractSub(subUrl) {
   return fixArabicEncoding(buffer).toString('utf-8');
 }
 
+// يجهز نص السطر قبل الإرسال
+function prepCueText(t) {
+  if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
+  return t;
+}
+
+// يترجم كل الأسطر ويرجع مصفوفة بنفس ترتيب الأسطر الأصلية بالضبط
+async function translateAllCues(cues, keysArray, modelName, concurrency) {
+  const CHUNK = getDynamicChunkSize(modelName);
+
+  const chunks = [];
+  for (let i = 0; i < cues.length; i += CHUNK) {
+    chunks.push(
+      cues.slice(i, i + CHUNK).map((c, k) => ({ id: i + k, text: prepCueText(c.text) }))
+    );
+  }
+
+  const tasks = chunks.map(chunk => async () => {
+    const map = await translateItemsWithRecovery(chunk, keysArray, modelName);
+    return chunk.map(it => map.get(it.id) || cues[it.id].text);
+  });
+
+  const chunkResults = await runConcurrentPool(tasks, concurrency);
+  // إذا دفعة كاملة فشلت (null) نرجع نصوصها الأصلية
+  const out = [];
+  chunks.forEach((chunk, ci) => {
+    const res = chunkResults[ci];
+    chunk.forEach((it, k) => {
+      out.push(normalizeLineBreakArtifacts((res && res[k]) ? res[k] : cues[it.id].text));
+    });
+  });
+  return out;
+}
+
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
@@ -349,24 +434,9 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n";
 
-  const CHUNK = getDynamicChunkSize(modelName);
-  console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${CHUNK} | Model=${normalizeGeminiModelId(modelName)}`);
+  console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)}`);
 
-  const chunks = [];
-  for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
-
-  const tasks = chunks.map(chunk => async () => {
-    const texts = chunk.map(c => {
-      let t = c.text;
-      if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
-      return t;
-    });
-    const translated = await translateChunkWithRecovery(texts, keysArray, modelName);
-    return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
-  });
-
-  const chunkResults = await runConcurrentPool(tasks, 3); 
-  const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
+  const finalTranslations = await translateAllCues(cues, keysArray, modelName, 3);
 
   let srtOutput = '';
   let counter = 1;
@@ -393,22 +463,8 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`;
 
-  const CHUNK = getDynamicChunkSize(modelName);
-  const chunks = [];
-  for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+  const finalTranslations = await translateAllCues(cues, keysArray, modelName, 8);
 
-  const tasks = chunks.map(chunk => async () => {
-    const texts = chunk.map(c => {
-      let t = c.text;
-      if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
-      return t;
-    });
-    const translated = await translateChunkWithRecovery(texts, keysArray, modelName);
-    return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
-  });
-
-  const chunkResults = await runConcurrentPool(tasks, 8); 
-  const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
   const assLines = [];
   cues.forEach((c, idx) => {
     let text = finalTranslations[idx];
@@ -419,4 +475,11 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
   return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
-module.exports = { handleTranslationSrt, handleTranslationAss, normalizeLineBreakArtifacts, parseRobustJsonArray };
+module.exports = {
+  handleTranslationSrt,
+  handleTranslationAss,
+  normalizeLineBreakArtifacts,
+  parseRobustJsonArray,
+  parseIdTranslations,
+  translateItemsWithRecovery
+};
