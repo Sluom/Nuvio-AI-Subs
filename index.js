@@ -2,12 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
+const { getSubDLEnglish } = require('./subdl');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
+
+// للاختبار فقط: ضع FORCE_SUBDL=1 بريندر ليستخدم SubDL حتى لو OpenSubtitles رجّع ترجمات
+// (احذف المتغير بعد ما تتأكد أن SubDL يشتغل)
+const FORCE_SUBDL = process.env.FORCE_SUBDL === '1';
 
 // ==========================================
 // 1. ذاكرة السيرفر (Cache) لتخزين الترجمات الجاهزة
@@ -70,13 +75,14 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label, imdbId }) {
     translationCache[cacheKey] = { status: 'pending' };
 
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel);
+                // imdbId يروح لدالة الترجمة حتى تجيب قائمة الشخصيات من TMDB
+                const r = await handler(targetUrl, userKeys, userModel, imdbId);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -412,7 +418,7 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
 // ==========================================
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.1',
+    version: '1.9.2',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
@@ -660,13 +666,17 @@ app.get([
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
 
+        // إذا فشل طلب OpenSubtitles الرئيسي ما نوقف كل شي، نسجل الخطأ ونكمل (وبعدها نجرب SubDL)
         const [r, assResults] = await Promise.all([
-            axios.get(osUrl, { timeout: 10000 }),
+            axios.get(osUrl, { timeout: 10000 }).catch(e => {
+                console.log(`[Fetch] OpenSubtitles فشل لـ ${finalTargetId}: ${e.message}`);
+                return null;
+            }),
             getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType })
                 .catch(() => [])
         ]);
 
-        if (r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
+        if (r && r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
 
         // assOnly يطلع مرتب مسبقاً (غير SDH أولاً) من getOpenSubtitlesEnglish
@@ -674,8 +684,10 @@ app.get([
         const assHiCount = assOnly.filter(s => isHearingImpairedSub(s)).length;
         console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assHiCount} SDH, pushed to the back)`);
 
+        // === قائمة SRT من OpenSubtitles ===
+        let srtSubs = [];
+
         if (subtitlesData.length > 0) {
-            
             // إضافة اللغات المطلوبة: انجليزي، ياباني، تركي، فارسي، روسي، كوري، فرنسي، اسباني
             const targetLangs = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 
@@ -696,54 +708,71 @@ app.get([
             const cleanCount = sortedSubs.filter(s => !isHearingImpairedSub(s)).length;
             console.log(`[SDH Filter] ${cleanCount}/${sortedSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
 
-            if (sortedSubs.length === 0) {
-                console.log(`[Fetch] No usable subtitles left after language filter for ${finalTargetId}`);
-                return res.json({ subtitles: [] });
-            }
-
             // الفرز لإبقاء SRT واستبعاد أي ملف ASS (نفس المنطق السابق، لكن على القائمة المرتبة)
-            const srtSubs = sortedSubs.filter(s => {
+            srtSubs = sortedSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
                 return !fname.endsWith('.ass') && !fname.endsWith('.ssa') && !url.includes('.ass') && !url.includes('.ssa');
             });
-
-            const transSubs = [];
-            const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
-            const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
-            
-            // إضافة 6 روابط SRT (بدون أي تغيير)
-            if (srtSubs.length > 0) {
-                for (let i = 0; i < 6; i++) {
-                    const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
-                    transSubs.push({
-                        id: `nuvio-ai-srt-${i+1}`,
-                        url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
-                        lang: 'ara',
-                        title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
-                    });
-                }
-            }
-
-            // إضافة روابط ASS (حتى 4) من نتيجة OpenSubtitles.org القديم اللي جُلبت بالتوازي فوق
-            if (assOnly.length > 0) {
-                const maxAss = Math.min(4, assOnly.length);
-                for (let i = 0; i < maxAss; i++) {
-                    transSubs.push({
-                        id: `nuvio-ai-ass-${i+1}`,
-                        url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}`,
-                        lang: 'ara',
-                        title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
-                    });
-                }
-                console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
-            } else {
-                console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
-            }
-
-            return res.json({ subtitles: transSubs });
         }
-        return res.json({ subtitles: [] });
+
+        // === احتياطي: SubDL يشتغل إذا OpenSubtitles ما رجّع ترجمة صالحة (أو FORCE_SUBDL=1 للاختبار) ===
+        if (srtSubs.length === 0 || FORCE_SUBDL) {
+            console.log(FORCE_SUBDL
+                ? `[SubDL] وضع الاختبار FORCE_SUBDL مفعل، أجرب SubDL لـ ${finalTargetId}...`
+                : `[SubDL] OpenSubtitles ما رجّع ترجمة صالحة لـ ${finalTargetId}، أجرب SubDL...`);
+
+            const subdlSubs = await getSubDLEnglish({
+                imdbId: assImdbId,
+                season: assSeason,
+                episode: assEpisode
+            });
+
+            if (subdlSubs.length > 0) {
+                srtSubs = subdlSubs;
+                console.log(`[SubDL] راح أستخدم ${subdlSubs.length} ترجمة من SubDL لـ ${finalTargetId}.`);
+            } else {
+                console.log(`[SubDL] ما لقيت شي بـ SubDL لـ ${finalTargetId}.`);
+            }
+        }
+
+        const transSubs = [];
+        const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
+        const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
+
+        // رقم IMDb يمشي مع الرابط حتى يوصل لدالة الترجمة ويجيب قائمة الشخصيات من TMDB
+        const imdbQuery = assImdbId ? `&imdb=${encodeURIComponent(assImdbId)}` : '';
+
+        // إضافة 6 روابط SRT (بدون أي تغيير)
+        if (srtSubs.length > 0) {
+            for (let i = 0; i < 6; i++) {
+                const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
+                transSubs.push({
+                    id: `nuvio-ai-srt-${i+1}`,
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}${imdbQuery}`,
+                    lang: 'ara',
+                    title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                });
+            }
+        }
+
+        // إضافة روابط ASS (حتى 4) من نتيجة OpenSubtitles.org القديم اللي جُلبت بالتوازي فوق
+        if (assOnly.length > 0) {
+            const maxAss = Math.min(4, assOnly.length);
+            for (let i = 0; i < maxAss; i++) {
+                transSubs.push({
+                    id: `nuvio-ai-ass-${i+1}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}${imdbQuery}`,
+                    lang: 'ara',
+                    title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
+                });
+            }
+            console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
+        } else {
+            console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
+        }
+
+        return res.json({ subtitles: transSubs });
     } catch (err) {
         console.error(`[Subtitles Error] ${targetId} - ${err.message}`);
         return res.json({ subtitles: [] });
@@ -757,6 +786,7 @@ app.all([
     
     const targetUrl = req.query.url;
     const trackNum = req.query.track || '1';
+    const imdbId = String(req.query.imdb || '');
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const cacheKey = `SRT_${targetUrl}`;
@@ -782,7 +812,7 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationSrtDetailed,
-            targetUrl, userKeys, userModel, trackNum,
+            targetUrl, userKeys, userModel, trackNum, imdbId,
             label: 'SRT'
         });
     }
@@ -803,6 +833,7 @@ app.all([
 
     const targetUrl = req.query.url;
     const trackNum = req.query.track || '1';
+    const imdbId = String(req.query.imdb || '');
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     // مفتاح كاش منفصل تماماً عن SRT حتى لو كان نفس الرابط الأصلي بالمصادفة
@@ -829,7 +860,7 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationAssDetailed,
-            targetUrl, userKeys, userModel, trackNum,
+            targetUrl, userKeys, userModel, trackNum, imdbId,
             label: 'ASS'
         });
     }
