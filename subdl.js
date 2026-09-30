@@ -50,6 +50,23 @@ function isHearingImpaired(s, langCode) {
   return false;
 }
 
+async function querySubDL(key, baseParams, extra) {
+  const params = new URLSearchParams({ api_key: key, ...baseParams, ...extra });
+  const res = await axios.get(`${SUBDL_API}?${params.toString()}`, {
+    headers: { 'User-Agent': 'NuvioSubtitles v1.0.0', 'Accept': 'application/json' },
+    timeout: 10000
+  });
+  const data = res.data || {};
+  if (!data.status || !Array.isArray(data.subtitles)) {
+    console.log(`[SubDL] رد غير متوقع: ${data.error || 'بدون تفاصيل'}`);
+    return [];
+  }
+  return data.subtitles;
+}
+
+// رابط بدون ?api_key=... عشان المفتاح ما يوصل للمستخدمين
+const cleanPath = p => String(p).split('?')[0];
+
 async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
   const key = String(apiKey || process.env.SUBDL_API_KEY || '').trim();
 
@@ -65,38 +82,43 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
   const isSeries = season != null && episode != null;
   const wanted = (languages && languages.length ? languages : ALL_LANGS);
 
-  const params = new URLSearchParams({
-    api_key: key,
+  const baseParams = {
     imdb_id: imdbId,
     languages: wanted.join(','),
     type: isSeries ? 'tv' : 'movie',
-    subs_per_page: '30',
-    hi: '1'
-  });
+    subs_per_page: '30'
+  };
   if (isSeries) {
-    params.set('season_number', String(season));
-    params.set('episode_number', String(episode));
+    baseParams.season_number = String(season);
+    baseParams.episode_number = String(episode);
   }
 
   try {
-    const res = await axios.get(`${SUBDL_API}?${params.toString()}`, {
-      headers: { 'User-Agent': 'NuvioSubtitles v1.0.0', 'Accept': 'application/json' },
-      timeout: 10000
-    });
+    // طلب عادي (كل الترجمات) + طلب hi=1 (لمعرفة نسخ SDH فقط) بالتوازي
+    const [normalRes, hiRes] = await Promise.allSettled([
+      querySubDL(key, baseParams, {}),
+      querySubDL(key, baseParams, { hi: '1' })
+    ]);
 
-    const data = res.data || {};
-    if (!data.status || !Array.isArray(data.subtitles)) {
-      console.log(`[SubDL] رد غير متوقع لـ ${imdbId}: ${data.error || 'بدون تفاصيل'}`);
-      return [];
+    const normal = normalRes.status === 'fulfilled' ? normalRes.value : [];
+    const hiList = hiRes.status === 'fulfilled' ? hiRes.value : [];
+
+    if (normalRes.status === 'rejected') {
+      console.log(`[SubDL] فشل الطلب العادي لـ ${imdbId}: ${normalRes.reason.message}`);
     }
-console.log('[SubDL Debug]', JSON.stringify(data.subtitles[0]));
-    const list = data.subtitles
+
+    // روابط نسخ SDH المؤكدة من الحقل الرسمي
+    const hiPaths = new Set(
+      hiList.filter(s => s && s.url && s.hi === true).map(s => cleanPath(s.url))
+    );
+
+    const list = [...normal, ...hiList]
       .filter(s => s && s.url && !s.full_season)
       .map(s => {
         const langCode = detectLang(s);
         if (!langCode || !wanted.includes(langCode)) return null;
 
-        const path = String(s.url);
+        const path = cleanPath(s.url);
         const url = path.startsWith('http') ? path : `${SUBDL_DL}${path.startsWith('/') ? '' : '/'}${path}`;
 
         return {
@@ -104,15 +126,13 @@ console.log('[SubDL Debug]', JSON.stringify(data.subtitles[0]));
           fileName: s.release_name || s.name || 'SubDL',
           lang: SUBDL_LANGS[langCode],
           langCode,
-          hearingImpaired: isHearingImpaired(s, langCode),
+          hearingImpaired: hiPaths.has(path) || isHearingImpaired(s, langCode),
           _source: 'subdl'
         };
       })
       .filter(Boolean);
 
-    // الترتيب الوحيد: العادي أولاً وSDH/HI بالنهاية (sort مستقر، فباقي الترتيب يبقى كما هو)
-    list.sort((a, b) => (a.hearingImpaired ? 1 : 0) - (b.hearingImpaired ? 1 : 0));
-
+    // إزالة التكرار
     const seen = new Set();
     const unique = list.filter(s => {
       if (seen.has(s.url)) return false;
@@ -120,15 +140,15 @@ console.log('[SubDL Debug]', JSON.stringify(data.subtitles[0]));
       return true;
     });
 
+    // الاحترافي أولاً، SDH/HI بالنهاية (sort مستقر)
+    unique.sort((a, b) => (a.hearingImpaired ? 1 : 0) - (b.hearingImpaired ? 1 : 0));
+
     const hiCount = unique.filter(s => s.hearingImpaired).length;
     console.log(`[SubDL] رجّع ${unique.length} ترجمة لـ ${imdbId}${isSeries ? ` (S${season}E${episode})` : ''} (${hiCount} SDH/HI بالنهاية).`);
     return unique;
   } catch (e) {
-    const status = e.response?.status || 0;
-    const msg = e.response?.data?.error || e.message;
-    console.log(`[SubDL] فشل الطلب لـ ${imdbId} (status:${status}) ${msg}`);
+    console.log(`[SubDL] فشل لـ ${imdbId}: ${e.message}`);
     return [];
   }
 }
-
 module.exports = { getSubDLEnglish, SUBDL_LANGS };
