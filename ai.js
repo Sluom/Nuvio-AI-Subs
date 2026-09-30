@@ -30,6 +30,11 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 // عدد مرات إعادة طلب الأسطر الناقصة فقط (بعد الطلب الأول)
 const MAX_MISSING_RETRIES = 3;
 
+// تحليل المتكلم والمخاطَب (المذكر/المؤنث) قبل الترجمة لتحسين الضمائر
+// اجعلها false لإيقافه والرجوع للسلوك القديم
+const ENABLE_GENDER_ANALYSIS = true;
+const ANNOTATION_MIN_COVERAGE = 0.8;
+
 // عدد الجولات الإضافية لإعادة الأسطر اللي انتجاوزت بسبب الخنق (429/503)
 const MAX_RETRY_PASSES = 4;
 
@@ -71,7 +76,7 @@ function getDynamicChunkSize(modelName) {
   const safetyMargin = Math.floor(limit * 0.05);
   const available = limit - safetyMargin;
   if (available >= 60000) return 280;
-  if (available >= 30000) return 180;
+  if (available >= 30000) return 100;
   return 80;
 }
 
@@ -258,7 +263,8 @@ async function translateChunkStrict(items, keysArray, modelName) {
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
 
-  const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"}.
+  const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a two-letter hint code.
+"g" = first letter is the SPEAKER's gender, second letter is the gender of the person being ADDRESSED. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
 Translate the "text" of every entry to Arabic while:
 1. Returning a JSON array of objects in the exact same shape: [{"id": <same number>, "text": "<Arabic translation>"}].
    - Return exactly ONE object for EVERY input id, using the SAME id. Never merge entries, never split an entry, never skip an entry, never invent ids.
@@ -269,7 +275,7 @@ Translate the "text" of every entry to Arabic while:
 5. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
 6. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
 7. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE entry in ONE single pair of quotation marks (one at the start, one at the end). Do not add internal quotes for names if the whole entry is already quoted.
-8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar. Infer the speaker's/listener's gender from the context available within this chunk only (names, titles, dialogue cues). If there is a clear back-and-forth between a male and a female, alternate the Arabic pronouns accordingly. If gender is impossible to determine from the context, formulate the Arabic translation to be naturally GENDER-NEUTRAL whenever possible (e.g., use passive voice or verbal nouns to avoid explicit أنتَ/أنتِ).
+8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar (verbs, adjectives, pronouns, vocatives) for I/me/my/you/your and for anyone referred to. When an entry has "g", use it to pick the correct Arabic gender for the speaker (first letter) and the person addressed (second letter). Treat "g" as a strong hint, but if the text itself clearly contradicts it (explicit names, titles, "he said"/"she said"), trust the text. When "g" is missing or a letter is U or N, infer gender from the dialogue context in this chunk; if it is still impossible to determine, formulate the Arabic to be naturally GENDER-NEUTRAL (passive voice or verbal nouns) instead of guessing.
 9. Pay close attention to split sentences (sentences that start in one entry and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential entries, while still keeping each entry's translation under its own id.
 10. Act as an expert cinematic subtitler. Translate idioms/slang naturally into Arabic rather than literally.
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
@@ -421,6 +427,123 @@ function needsTranslation(text) {
   return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
 }
 
+// ================== تحليل المتكلم والمخاطَب (قبل الترجمة) ==================
+// رابط الترجمة -> Map(رقم السطر -> رمز من حرفين، مثل "FM" = المتكلم أنثى والمخاطَب ذكر)
+const annotationCaches = new Map();
+const MAX_ANNOTATION_CACHES = 40;
+
+function getAnnotationCache(key) {
+  if (!annotationCaches.has(key)) {
+    annotationCaches.set(key, new Map());
+    if (annotationCaches.size > MAX_ANNOTATION_CACHES) annotationCaches.delete(annotationCaches.keys().next().value);
+  }
+  return annotationCaches.get(key);
+}
+
+const SAFETY_SETTINGS_OFF = [
+  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' }
+];
+
+// طلب نصي عام لجيمناي بنفس نظام المفاتيح والتبريد
+async function callGeminiText({ prompt, keysArray, modelName, generationConfig, timeout = 120000, attempts = 4 }) {
+  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const activeKey = await acquireKey(keysArray);
+    if (!activeKey) return { status: 'no_keys', text: '' };
+    const cleanKey = String(activeKey).trim();
+    const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
+    try {
+      const r = await axios.post(url, {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig,
+        safetySettings: SAFETY_SETTINGS_OFF
+      }, {
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey, 'x-goog-api-client': GEMINI_CLIENT_HEADER },
+        timeout,
+        httpAgent, httpsAgent,
+        maxContentLength: MAX_AI_RESPONSE_BYTES
+      });
+      const parts = r.data?.candidates?.[0]?.content?.parts || [];
+      return { status: 'ok', text: parts.map(p => p?.text || '').join('') };
+    } catch (e) {
+      const status = e.response?.status || 0;
+      if (isGeminiAuthFailure(e)) { deadKeys.add(activeKey); continue; }
+      let cd = 60000;
+      if (status === 503 || status === 500 || status === 502) cd = 3000 + Math.random() * 2000;
+      else if (status === 429) cd = 60000;
+      else if (status === 400) cd = 10000;
+      keyCooldowns.set(activeKey, Date.now() + cd);
+      console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status})`);
+      if (attempt < attempts - 1) await delay(2000 + Math.random() * 2000);
+    }
+  }
+  return { status: 'api_exhausted', text: '' };
+}
+
+// يقرأ رد التحليل: كل عنصر بشكل "رقم:حرفين" مثل "45:FM"
+function parseAnnotationCodes(raw) {
+  const map = new Map();
+  if (!raw) return map;
+  const re = /(\d+)\s*[:=]\s*([MFGUNmfgun])\s*([MFGUNmfgun])/g;
+  let m;
+  while ((m = re.exec(String(raw))) !== null) {
+    map.set(Number(m[1]), (m[2] + m[3]).toUpperCase());
+  }
+  return map;
+}
+
+async function annotateSlice(items, keysArray, modelName) {
+  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const generationConfig = { temperature: 0.1, responseMimeType: 'application/json' };
+  if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+
+  const prompt = `You will receive numbered subtitle lines from one film or episode, in order, as a JSON array of {"id","text"}.
+Read the whole story first. Then, for EVERY line, work out WHO IS SPEAKING and WHO IS BEING ADDRESSED, and output only their genders.
+Codes: M = male, F = female, G = group or mixed, U = unknown, N = none (narration, on-screen text, sound effects, or speaking to oneself or the audience).
+Answer with TWO letters per line: first the speaker's gender, then the addressee's gender. Examples: "FM" = a woman speaking to a man, "MG" = a man speaking to a group, "UU" = cannot tell.
+Use the story: character names, titles (sir, ma'am, mother, king...), words like "he said"/"she said", who was just spoken to, and the alternation of dialogue. If a single line contains two speakers (lines starting with "-"), answer "UU". If you are not reasonably sure, answer U for that side. Do not guess randomly.
+Output ONLY a valid JSON array of strings, exactly one string per input id, in the same order, each formatted "<id>:<two letters>", for example ["0:UU","1:FM","2:MF"]. No explanations.
+Lines:
+${JSON.stringify(items)}`;
+
+  const res = await callGeminiText({ prompt, keysArray, modelName: cleanModel, generationConfig, timeout: 120000 });
+  if (res.status !== 'ok') return new Map();
+  return parseAnnotationCodes(res.text);
+}
+
+// يحلل الفلم كله (أو ينقص منه فقط) ويرجع Map: رقم السطر -> رمز الجنس
+async function getAnnotations(cues, keysArray, modelName, cacheKey) {
+  const cache = getAnnotationCache(cacheKey);
+  const pending = [];
+  cues.forEach((c, i) => { if (!cache.has(i)) pending.push({ id: i, text: c.text }); });
+
+  // إذا أغلب الأسطر محللة من قبل نكتفي بالموجود
+  if (pending.length <= cues.length * (1 - ANNOTATION_MIN_COVERAGE)) return cache;
+
+  const limit = getFallbackOutputTokenLimit(modelName);
+  const maxSlice = limit >= 30000 ? 2500 : 800;
+  const sliceCount = Math.ceil(pending.length / maxSlice);
+  const sliceSize = Math.ceil(pending.length / sliceCount);
+
+  const slices = [];
+  for (let i = 0; i < pending.length; i += sliceSize) slices.push(pending.slice(i, i + sliceSize));
+
+  console.log(`[تحليل الضمائر] أحلل ${pending.length} سطر بـ ${slices.length} طلب...`);
+
+  const tasks = slices.map(slice => async () => {
+    const map = await annotateSlice(slice, keysArray, modelName);
+    const wanted = new Set(slice.map(it => it.id));
+    for (const [id, code] of map) if (wanted.has(id)) cache.set(id, code);
+  });
+  await runConcurrentPool(tasks, 3);
+
+  console.log(`[تحليل الضمائر] تم تحليل ${cache.size} من ${cues.length} سطر.`);
+  return cache;
+}
+
 // يترجم الأسطر اللي ناقصة فقط، ويرجع { texts, missing }
 // texts بنفس ترتيب الأسطر الأصلية بالضبط، وmissing = عدد الأسطر اللي بقت بدون ترجمة
 async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey) {
@@ -436,6 +559,21 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     toDo.push({ id: i, text: prepCueText(c.text) });
   });
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
+
+  // تحليل المتكلم/المخاطَب قبل الترجمة (إذا فشل نكمل بدونه مثل السابق)
+  if (ENABLE_GENDER_ANALYSIS && toDo.length > 0) {
+    try {
+      const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey);
+      let attached = 0;
+      for (const it of toDo) {
+        const g = annotations.get(it.id);
+        if (g && /[MFG]/.test(g)) { it.g = g; attached++; }
+      }
+      console.log(`[تحليل الضمائر] أرفقت معلومة الجنس بـ ${attached} من ${toDo.length} سطر.`);
+    } catch (e) {
+      console.log(`[تحليل الضمائر] فشل التحليل (${e.message})، أكمل الترجمة بدونه.`);
+    }
+  }
 
   let pendingChunks = [];
   for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
