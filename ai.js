@@ -87,9 +87,8 @@ async function acquireKey(keysArray) {
     const wait = bestTime - now;
     if (wait > 0) {
       console.log(`[تبريد جماعي] كل المفاتيح الحية بالتبريد. انتظار ${Math.ceil(wait / 1000)}s...`);
-      await delay(wait);
-    } else {
-      return keysArray.find(k => !deadKeys.has(k)) || null;
+      // [الحل 1]: إضافة تأخير عشوائي (Jitter) حتى العمال ما يصحون كلهم بنفس اللحظة ويهجمون
+      await delay(wait + (Math.random() * 3000));
     }
   }
 }
@@ -231,8 +230,8 @@ Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 Content to translate:
 ${JSON.stringify(texts)}`;
 
-  // نحمي الكود بـ 3 محاولات لأخطاء السيرفر (429/503) بدون تقسيم
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // زدت المحاولات لـ 4 لأن هسة ضفنا تأخير بيناتهن فالسيرفر راح يرتاح
+  for (let attempt = 0; attempt < 4; attempt++) {
     const activeKey = await acquireKey(keysArray);
     if (!activeKey) return { status: 'no_keys' };
     
@@ -264,14 +263,13 @@ ${JSON.stringify(texts)}`;
         return { status: 'success', data: parsedArr };
       }
       
-      // هنا فقط (إذا السيرفر جاوب 200 OK بس الموديل دمج الأسطر) ننطي إشارة الانقسام
       return { status: 'mismatch' };
 
     } catch (e) {
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        continue; // مفتاح ميت، نعبر للوراه فوراً
+        continue; 
       }
       
       let cd = 60000;
@@ -281,14 +279,17 @@ ${JSON.stringify(texts)}`;
       
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status})`);
-      // اللوب راح يرجع يرسل نفس الـ 280 سطر بمفتاح جديد، ومستحيل يقسمها
+      
+      // [الحل 2]: أخذ نفس (Backoff) قبل سحب مفتاح جديد لمنع الرماية السريعة وحرق المفاتيح
+      if (attempt < 3) {
+        const backoffDelay = 2000 + (Math.random() * 2000); // تأخير بين ثانيتين إلى 4 ثواني
+        await delay(backoffDelay);
+      }
     }
   }
-  // إذا المحاولات الـ 3 كلها فشلت بسبب السيرفرات، نبلغ دالة التعافي
   return { status: 'api_exhausted' };
 }
 
-// دالة الانقسام والتعافي (تفصل بين خطأ السيرفر وخطأ الذكاء الاصطناعي)
 async function translateChunkWithRecovery(texts, keysArray, modelName) {
   if (!texts || texts.length === 0) return [];
 
@@ -298,14 +299,11 @@ async function translateChunkWithRecovery(texts, keysArray, modelName) {
     return result.data;
   }
 
-  // إذا سيرفر جوجل قفل بوجهنا 3 مرات (بسبب الضغط)، مستحيل نقسم!
-  // نرجع مصفوفة null بنفس العدد حتى النظام يعوضها بالنص الإنجليزي ويحمي التزامن.
   if (result.status === 'api_exhausted' || result.status === 'no_keys') {
     console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز الدفعة (${texts.length} سطر) للحفاظ على تزامن الفلم.`);
     return texts.map(() => null);
   }
 
-  // إذا الموديل هلوس ودمج الأسطر (mismatch)، هنا فقط نتدخل ونقسم بذكاء!
   if (result.status === 'mismatch') {
     if (texts.length === 1) {
       console.log(`[تجاوز سطر معند] تم تعويض السطر بنص فارغ للحفاظ على التزامن.`);
@@ -318,14 +316,13 @@ async function translateChunkWithRecovery(texts, keysArray, modelName) {
 
     console.log(`[انقسام وتعافي 🛠️] الموديل دمج الأسطر في الدفعة (${texts.length}). جاري تقسيمها إلى (${leftHalf.length}) و (${rightHalf.length})...`);
 
-    // إرسال تسلسلي هادئ يمنع الانفجار المتزامن اللي يسبب 429
     const leftResult = await translateChunkWithRecovery(leftHalf, keysArray, modelName);
     const rightResult = await translateChunkWithRecovery(rightHalf, keysArray, modelName);
 
     return [...leftResult, ...rightResult];
   }
 
-  return texts.map(() => null); // حماية نهائية
+  return texts.map(() => null);
 }
 
 async function fetchAndExtractSub(subUrl) {
