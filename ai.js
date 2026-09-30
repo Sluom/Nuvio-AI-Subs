@@ -161,7 +161,6 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
-// الرادار الصارم اللي يصيد الدمج والنقص
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim();
@@ -173,8 +172,6 @@ function parseRobustJsonArray(raw, expectedLength) {
   try {
     const parsed = JSON.parse(clean);
     let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-    
-    // شرط المطابقة الحرفية 1:1
     if (Array.isArray(arr) && arr.length === expectedLength) {
       return arr.map(x => {
         let txt = String(x || '').replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
@@ -183,12 +180,11 @@ function parseRobustJsonArray(raw, expectedLength) {
     }
   } catch (e) {
     const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-    
     if (stringMatches.length === expectedLength) {
       return stringMatches.filter(s => s !== 'translations' && s !== 'data').map(s => normalizeLineBreakArtifacts(s).replace(/âTM./gi, '♪').trim());
     }
   }
-  return null; // فشل الفحص يرجع null
+  return null;
 }
 
 async function runConcurrentPool(tasks, limit = 8) {
@@ -209,11 +205,8 @@ async function runConcurrentPool(tasks, limit = 8) {
 async function translateChunkStrict(texts, keysArray, modelName) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
-
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
-  if (isGemini3) {
-    generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
-  }
+  if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
 
   const prompt = `Translate the following subtitles while:
 1. Preserving the timing and structure exactly as given.
@@ -238,10 +231,11 @@ Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 Content to translate:
 ${JSON.stringify(texts)}`;
 
-  // محاولة واحدة، في حال الفشل سيتم تحويل الأمر للتعافي مباشرة
-  for (let attempt = 0; attempt < 1; attempt++) {
+  // نحمي الكود بـ 3 محاولات لأخطاء السيرفر (429/503) بدون تقسيم
+  for (let attempt = 0; attempt < 3; attempt++) {
     const activeKey = await acquireKey(keysArray);
-    if (!activeKey) return null;
+    if (!activeKey) return { status: 'no_keys' };
+    
     const cleanKey = String(activeKey).trim();
     const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
 
@@ -263,63 +257,75 @@ ${JSON.stringify(texts)}`;
       });
 
       const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      
       const parsedArr = parseRobustJsonArray(responseText, texts.length);
+      
       if (parsedArr) {
-        if (texts.length >= 80) {
-           console.log(`[Success] chunk ${texts.length} via ...${cleanKey.slice(-4)}`);
-        }
-        return parsedArr;
+        if (texts.length >= 80) console.log(`[Success] chunk ${texts.length} via ...${cleanKey.slice(-4)}`);
+        return { status: 'success', data: parsedArr };
       }
       
-      // إرجاع null بهدوء وبدون رمي خطأ عند دمج الأسطر لحماية المفتاح من عقوبة التبريد
-      return null;
+      // هنا فقط (إذا السيرفر جاوب 200 OK بس الموديل دمج الأسطر) ننطي إشارة الانقسام
+      return { status: 'mismatch' };
 
     } catch (e) {
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        continue;
+        continue; // مفتاح ميت، نعبر للوراه فوراً
       }
+      
       let cd = 60000;
       if (status === 503 || status === 500 || status === 502) cd = 3000 + Math.random() * 2000;
       else if (status === 429) cd = 60000;
       else if (status === 400) cd = 10000;
       
       keyCooldowns.set(activeKey, Date.now() + cd);
-      // طباعة التبريد الطارئ فقط للأخطاء الحقيقية من السيرفر
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status})`);
+      // اللوب راح يرجع يرسل نفس الـ 280 سطر بمفتاح جديد، ومستحيل يقسمها
     }
   }
-  return null; 
+  // إذا المحاولات الـ 3 كلها فشلت بسبب السيرفرات، نبلغ دالة التعافي
+  return { status: 'api_exhausted' };
 }
 
-// دالة الانقسام والتعافي (بنظام التسلسل الآمن)
+// دالة الانقسام والتعافي (تفصل بين خطأ السيرفر وخطأ الذكاء الاصطناعي)
 async function translateChunkWithRecovery(texts, keysArray, modelName) {
   if (!texts || texts.length === 0) return [];
 
   const result = await translateChunkStrict(texts, keysArray, modelName);
 
-  if (result && result.length === texts.length) {
-    return result;
+  if (result.status === 'success') {
+    return result.data;
   }
 
-  if (texts.length === 1) {
-    console.log(`[تجاوز سطر معند] تم تعويض السطر بنص فارغ للحفاظ على التزامن.`);
-    return [null]; 
+  // إذا سيرفر جوجل قفل بوجهنا 3 مرات (بسبب الضغط)، مستحيل نقسم!
+  // نرجع مصفوفة null بنفس العدد حتى النظام يعوضها بالنص الإنجليزي ويحمي التزامن.
+  if (result.status === 'api_exhausted' || result.status === 'no_keys') {
+    console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز الدفعة (${texts.length} سطر) للحفاظ على تزامن الفلم.`);
+    return texts.map(() => null);
   }
 
-  const mid = Math.floor(texts.length / 2);
-  const leftHalf = texts.slice(0, mid);
-  const rightHalf = texts.slice(mid);
+  // إذا الموديل هلوس ودمج الأسطر (mismatch)، هنا فقط نتدخل ونقسم بذكاء!
+  if (result.status === 'mismatch') {
+    if (texts.length === 1) {
+      console.log(`[تجاوز سطر معند] تم تعويض السطر بنص فارغ للحفاظ على التزامن.`);
+      return [null]; 
+    }
 
-  console.log(`[انقسام وتعافي 🛠️] الموديل دمج الأسطر أو فشل في (${texts.length}) سطر. جاري تقسيمها...`);
+    const mid = Math.floor(texts.length / 2);
+    const leftHalf = texts.slice(0, mid);
+    const rightHalf = texts.slice(mid);
 
-  // التنفيذ التسلسلي: ننتظر القسم الأول يكمل، يلا نبدأ بالثاني (يمنع الانفجار المتزامن)
-  const leftResult = await translateChunkWithRecovery(leftHalf, keysArray, modelName);
-  const rightResult = await translateChunkWithRecovery(rightHalf, keysArray, modelName);
+    console.log(`[انقسام وتعافي 🛠️] الموديل دمج الأسطر في الدفعة (${texts.length}). جاري تقسيمها إلى (${leftHalf.length}) و (${rightHalf.length})...`);
 
-  return [...leftResult, ...rightResult];
+    // إرسال تسلسلي هادئ يمنع الانفجار المتزامن اللي يسبب 429
+    const leftResult = await translateChunkWithRecovery(leftHalf, keysArray, modelName);
+    const rightResult = await translateChunkWithRecovery(rightHalf, keysArray, modelName);
+
+    return [...leftResult, ...rightResult];
+  }
+
+  return texts.map(() => null); // حماية نهائية
 }
 
 async function fetchAndExtractSub(subUrl) {
