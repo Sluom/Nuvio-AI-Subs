@@ -60,11 +60,6 @@ function isGeminiAuthFailure(e) {
   return msg.includes('api key') && (msg.includes('invalid') || msg.includes('not valid') || msg.includes('permission'));
 }
 
-function estimateTokenCount(text) {
-  if (!text) return 0;
-  return Math.ceil(Math.ceil(String(text).length / 3) * 1.1);
-}
-
 function getDynamicChunkSize(modelName) {
   const limit = getFallbackOutputTokenLimit(modelName);
   const safetyMargin = Math.floor(limit * 0.05);
@@ -166,6 +161,7 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
+// [تعديل صارم]: الرادار اللي يصيد أي نقص أو زيادة بالأسطر
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim();
@@ -173,22 +169,29 @@ function parseRobustJsonArray(raw, expectedLength) {
   else if (clean.startsWith('```')) clean = clean.substring(3);
   if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
   clean = clean.trim();
+  
   try {
     const parsed = JSON.parse(clean);
     let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-    if (Array.isArray(arr) && arr.length > 0) {
+    
+    // شرط المطابقة الحرفية (1:1) - إذا العدد اختلف نرفض النتيجة
+    if (Array.isArray(arr) && arr.length === expectedLength) {
       return arr.map(x => {
         let txt = String(x || '').replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
         return normalizeLineBreakArtifacts(txt).trim();
       });
+    } else if (Array.isArray(arr)) {
+      console.log(`[رادار التزامن] اكتشاف دمج بالأسطر: مطلوب ${expectedLength}، الموديل أرجع ${arr.length}. يتم الرفض للانقسام.`);
     }
   } catch (e) {
     const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-    if (stringMatches.length >= expectedLength * 0.5) {
+    
+    // المطابقة 1:1 حتى في محاولة الاستخراج الطارئة
+    if (stringMatches.length === expectedLength) {
       return stringMatches.filter(s => s !== 'translations' && s !== 'data').map(s => normalizeLineBreakArtifacts(s).replace(/âTM./gi, '♪').trim());
     }
   }
-  return null;
+  return null; // الرفض يعني بدء عملية "الانقسام والتعافي"
 }
 
 async function runConcurrentPool(tasks, limit = 8) {
@@ -238,7 +241,8 @@ Output ONLY A VALID JSON ARRAY OF STRINGS, nothing else.
 Content to translate:
 ${JSON.stringify(texts)}`;
 
-  for (let attempt = 0; attempt < keysArray.length; attempt++) {
+  // الدالة تحاول مرتين فقط لتجنب استنزاف الوقت، لأن التعافي سيأخذ دوره إذا فشلت
+  for (let attempt = 0; attempt < Math.min(2, keysArray.length); attempt++) {
     const activeKey = await acquireKey(keysArray);
     if (!activeKey) return null;
     const cleanKey = String(activeKey).trim();
@@ -262,18 +266,22 @@ ${JSON.stringify(texts)}`;
       });
 
       const responseText = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      // نرسل texts.length لدالة الفحص الصارمة
       const parsedArr = parseRobustJsonArray(responseText, texts.length);
-      if (parsedArr && parsedArr.length > 0) {
-        console.log(`[Success] chunk ${texts.length} via ...${cleanKey.slice(-4)} | ${cleanModel}`);
+      if (parsedArr) {
+        // إذا نجح الفحص الصارم
+        if (texts.length >= 80) {
+           console.log(`[Success] chunk ${texts.length} via ...${cleanKey.slice(-4)}`);
+        }
         return parsedArr;
       }
-      throw new Error('Empty parse');
+      throw new Error('Mismatch or empty parse');
 
     } catch (e) {
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        console.log(`[مفتاح ميت نهائي] ...${cleanKey.slice(-4)} (401/403) لن نستخدمه مجدداً`);
         continue;
       }
       let cd = 60000;
@@ -281,10 +289,45 @@ ${JSON.stringify(texts)}`;
       else if (status === 429) cd = 60000;
       else if (status === 400) cd = 10000;
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد] ...${cleanKey.slice(-4)} -> ${cd / 1000}s (status:${status})`);
+      // لا نطبع الأخطاء هنا لتجنب التشويش في اللوغ أثناء الانقسام
     }
   }
-  return null;
+  return null; // إذا فشلت المحاولات، نرسل null لدالة التعافي
+}
+
+// [الإضافة الجديدة]: دالة الانقسام والتعافي الذكية
+async function translateChunkWithRecovery(texts, keysArray, modelName) {
+  if (!texts || texts.length === 0) return [];
+
+  // المحاولة الأولى: ترجمة الدفعة ككتلة واحدة
+  const result = await translateChunkStrict(texts, keysArray, modelName);
+
+  // إذا رجعت النتيجة مطابقة 100%، نعبر
+  if (result && result.length === texts.length) {
+    return result;
+  }
+
+  // إذا فشلت ووصلنا لسطر واحد مستحيل نقسمه بعد (حالة نادرة)، نرجع null كخط دفاع أخير للحفاظ على التزامن
+  if (texts.length === 1) {
+    console.log(`[فشل نهائي للسطر] تجاوزنا سطر واحد للحفاظ على التزامن.`);
+    return [null]; 
+  }
+
+  // بدأ الانقسام!
+  const mid = Math.floor(texts.length / 2);
+  const leftHalf = texts.slice(0, mid);
+  const rightHalf = texts.slice(mid);
+
+  console.log(`[انقسام وتعافي 🛠️] الموديل دمج الأسطر أو فشل في (${texts.length}) سطر. جاري تقسيمها إلى (${leftHalf.length}) و (${rightHalf.length})...`);
+
+  // نضرب القسمين بوقت واحد (التزامن الداخلي) حتى نعوض الثواني الضايعة
+  const [leftResult, rightResult] = await Promise.all([
+    translateChunkWithRecovery(leftHalf, keysArray, modelName),
+    translateChunkWithRecovery(rightHalf, keysArray, modelName)
+  ]);
+
+  // ندمج النتيجتين ونرجعها كأنما نجحت الدفعة من البداية!
+  return [...leftResult, ...rightResult];
 }
 
 async function fetchAndExtractSub(subUrl) {
@@ -323,11 +366,12 @@ async function handleTranslationSrt(subUrl, keysArray, modelName) {
       if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
       return t;
     });
-    const translated = await translateChunkStrict(texts, keysArray, modelName);
+    // تم التبديل لاستخدام دالة التعافي الذكية
+    const translated = await translateChunkWithRecovery(texts, keysArray, modelName);
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 8); // التزامن ارتفع لـ 8
+  const chunkResults = await runConcurrentPool(tasks, 8); 
   const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
 
   let srtOutput = '';
@@ -365,11 +409,12 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
       if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
       return t;
     });
-    const translated = await translateChunkStrict(texts, keysArray, modelName);
+    // تم التبديل لاستخدام دالة التعافي الذكية
+    const translated = await translateChunkWithRecovery(texts, keysArray, modelName);
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : chunk[idx].text);
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 8); // التزامن ارتفع لـ 8
+  const chunkResults = await runConcurrentPool(tasks, 8); 
   const finalTranslations = chunkResults.flat().map(t => normalizeLineBreakArtifacts(t));
   const assLines = [];
   cues.forEach((c, idx) => {
