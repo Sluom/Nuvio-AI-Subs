@@ -64,7 +64,7 @@ class RequestQueue {
 const globalTranslationQueue = new RequestQueue(1);
 
 // ==========================================
-// 2.5 مشغّل الترجمة بالخلفية (جديد)
+// 2.5 مشغّل الترجمة بالخلفية
 //    - إذا نجحت كاملة: تنحفظ نهائياً.
 //    - إذا نقصت أسطر: تنحفظ الترجمة الحالية فوراً (تطلع للمستخدم) ثم يعيد
 //      ترجمة الأسطر الناقصة فقط بجولات إضافية، ويحدّث الكاش كل ما تحسنت.
@@ -75,14 +75,13 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label, imdbId }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label }) {
     translationCache[cacheKey] = { status: 'pending' };
 
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                // imdbId يروح لدالة الترجمة حتى تجيب قائمة الشخصيات من TMDB
-                const r = await handler(targetUrl, userKeys, userModel, imdbId);
+                const r = await handler(targetUrl, userKeys, userModel);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -662,9 +661,10 @@ app.get([
         }
 
         // [مؤقت] اختبار SubDL بالخلفية: يسجل النتيجة فقط ولا يؤثر على الترجمات
-getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
-    .then(list => console.log(`[SubDL Probe] ${finalTargetId} => ${list.length} ترجمة${list.length === 0 ? ' (السبب بالسطر اللي قبل هذا)' : ' ✅ SubDL شغال'}`))
-    .catch(e => console.log(`[SubDL Probe] ${finalTargetId} => استثناء غير متوقع: ${e.message}`));
+        getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
+            .then(list => console.log(`[SubDL Probe] ${finalTargetId} => ${list.length} ترجمة${list.length === 0 ? ' (السبب بالسطر اللي قبل هذا)' : ' ✅ SubDL شغال'}`))
+            .catch(e => console.log(`[SubDL Probe] ${finalTargetId} => استثناء غير متوقع: ${e.message}`));
+
         // جلب الترجمة من المحرك الأساسي والموثوق (SRT) وجلب ASS الأصلي من OpenSubtitles.org
         // القديم - الاثنان بالتوازي في نفس الوقت (Promise.all) لتقليل زمن الاستجابة
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
@@ -744,16 +744,13 @@ getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
 
-        // رقم IMDb يمشي مع الرابط حتى يوصل لدالة الترجمة ويجيب قائمة الشخصيات من TMDB
-        const imdbQuery = assImdbId ? `&imdb=${encodeURIComponent(assImdbId)}` : '';
-
         // إضافة 6 روابط SRT (بدون أي تغيير)
         if (srtSubs.length > 0) {
             for (let i = 0; i < 6; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
                 transSubs.push({
                     id: `nuvio-ai-srt-${i+1}`,
-                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}${imdbQuery}`,
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
                     lang: 'ara',
                     title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -766,7 +763,7 @@ getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}${imdbQuery}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}`,
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -790,7 +787,6 @@ app.all([
     
     const targetUrl = req.query.url;
     const trackNum = req.query.track || '1';
-    const imdbId = String(req.query.imdb || '');
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const cacheKey = `SRT_${targetUrl}`;
@@ -816,7 +812,7 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationSrtDetailed,
-            targetUrl, userKeys, userModel, trackNum, imdbId,
+            targetUrl, userKeys, userModel, trackNum,
             label: 'SRT'
         });
     }
@@ -829,7 +825,7 @@ app.all([
     res.send(fakeSub);
 });
 
-// === جديد: مسار بث ترجمات ASS مترجمة - نفس منطق SRT تماماً لكن بدون أي تحويل نوع ===
+// === مسار بث ترجمات ASS مترجمة - نفس منطق SRT تماماً لكن بدون أي تحويل نوع ===
 app.all([
     '/stream-ai.ass', '/:config/stream-ai.ass'
 ], async (req, res) => {
@@ -837,7 +833,6 @@ app.all([
 
     const targetUrl = req.query.url;
     const trackNum = req.query.track || '1';
-    const imdbId = String(req.query.imdb || '');
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     // مفتاح كاش منفصل تماماً عن SRT حتى لو كان نفس الرابط الأصلي بالمصادفة
@@ -864,7 +859,7 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationAssDetailed,
-            targetUrl, userKeys, userModel, trackNum, imdbId,
+            targetUrl, userKeys, userModel, trackNum,
             label: 'ASS'
         });
     }
