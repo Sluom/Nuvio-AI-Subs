@@ -7,7 +7,7 @@ const ANILIST_URL = 'https://graphql.anilist.co';
 const KITSU_URL = 'https://kitsu.io/api/edge';
 const ARM_URL = 'https://arm.haglund.dev/api/v2/ids';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const NEG_TTL_MS = 60 * 60 * 1000;
+const NEG_TTL_MS = 60 * 60 * 1000; // كاش "مو أنمي" لساعة حتى ما نكرر الطلب
 const MAX_CAST = 40;
 const cache = new Map();
 
@@ -46,45 +46,32 @@ async function resolveKitsu(kitsuId) {
   return out;
 }
 
-// ====== التكتيك الجديد: تهريب معرّف IMDb عبر Cinemeta ======
-async function getCinemetaExternalIds(imdbId) {
-  const out = { tvdbId: null, tmdbId: null };
+// ====== التهريبة النووية: جلب اسم العمل من Cinemeta مباشرة ======
+async function getTitleFromCinemeta(imdbId) {
   try {
-    // نسأل قاعدة بيانات Stremio المفتوحة (بدون أي مفتاح)
     let r = await axios.get(`https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`, { timeout: 6000 });
-    let meta = r.data && r.data.meta;
-    if (!meta) {
-      r = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`, { timeout: 6000 });
-      meta = r.data && r.data.meta;
-    }
-    if (meta) {
-      if (meta.tvdb_id) out.tvdbId = meta.tvdb_id;
-      if (meta.moviedb_id) out.tmdbId = meta.moviedb_id;
-    }
-  } catch (e) {}
-  return out;
+    if (r.data && r.data.meta && r.data.meta.name) return r.data.meta.name;
+  } catch(e) {}
+  try {
+    let r = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`, { timeout: 6000 });
+    if (r.data && r.data.meta && r.data.meta.name) return r.data.meta.name;
+  } catch(e) {}
+  return null;
 }
 
-// تحويل المعرفات الخارجية (المهربة) إلى AniList
+// IMDb / TVDB -> رقم AniList + MAL (عن طريق ARM)
 async function resolveExternal({ imdbId, tvdbId }) {
   const out = { anilistId: null, malId: null, notFound: false, error: null };
   const attempts = [];
-
-  // إذا عدنا TVDB جاهز، نضيفه
-  if (tvdbId) attempts.push({ source: 'thetvdb', id: tvdbId });
-
-  // إذا عدنا IMDb، نحوله إلى TVDB و TMDB عبر التهريبة وندخله لـ ARM
-  if (imdbId) {
-    const cinemeta = await getCinemetaExternalIds(imdbId);
-    if (cinemeta.tvdbId) attempts.push({ source: 'thetvdb', id: cinemeta.tvdbId });
-    if (cinemeta.tmdbId) attempts.push({ source: 'themoviedb', id: cinemeta.tmdbId });
-  }
+  if (imdbId) attempts.push({ source: 'imdb', id: imdbId });
+  if (tvdbId) attempts.push({ source: 'tvdb', id: tvdbId });
 
   let sawError = false;
-  for (const params of attempts) {
+  for (const param of attempts) {
     try {
-      const r = await axios.get(ARM_URL, {
-        params,
+      // التعديل الأول: تركيب الرابط يدوياً لمنع أي خطأ بالبارامترات من Axios
+      const fetchUrl = `${ARM_URL}?source=${param.source}&id=${param.id}`;
+      const r = await axios.get(fetchUrl, {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
             'Accept': 'application/json'
@@ -137,7 +124,18 @@ async function getAnilistCast({ kitsuId, malId, imdbId, tvdbId, title } = {}) {
       const x = await resolveExternal({ imdbId, tvdbId });
       anilistId = x.anilistId;
       mal = x.malId;
-      if (!anilistId && !mal) {
+
+      // ====== التعديل الثاني (الخطة ب): إذا فشل ARM، نبحث بالاسم ======
+      if (!anilistId && !mal && imdbId) {
+        const cinemetaTitle = await getTitleFromCinemeta(imdbId);
+        if (cinemetaTitle) {
+          search = cinemetaTitle; // لقينا الاسم، راح نبحث بي مباشرة
+          x.notFound = false;     // نلغي فكرة إنه مو أنمي
+          x.error = null;
+        }
+      }
+
+      if (!anilistId && !mal && !search) {
         const data = {
           ok: false,
           reason: x.notFound ? 'غير موجود بقاعدة ARM (غالباً ليس أنمي)' : `ARM فشل: ${x.error}`,
@@ -193,22 +191,3 @@ async function getAnilistCast({ kitsuId, malId, imdbId, tvdbId, title } = {}) {
 }
 
 module.exports = { getAnilistCast };
-
-// ---------- اختبار مباشر ----------
-if (require.main === module) {
-  (async () => {
-    const arg = process.argv.slice(2).join(' ').trim();
-    if (!arg) { console.log('مثال: node anilist.js imdb:tt0388629'); process.exit(1); }
-    const input = arg.startsWith('kitsu:') ? { kitsuId: arg.slice(6) }
-      : arg.startsWith('mal:') ? { malId: arg.slice(4) }
-      : arg.startsWith('imdb:') ? { imdbId: arg.slice(5) }
-      : arg.startsWith('tvdb:') ? { tvdbId: arg.slice(5) }
-      : { title: arg };
-    const t0 = Date.now();
-    const r = await getAnilistCast(input);
-    console.log(`النتيجة: ${r.ok ? 'نجح' : 'فشل'} | ${r.title || ''} | ${Date.now() - t0}ms`);
-    if (!r.ok) console.log('السبب:', r.reason);
-    r.cast.forEach(c => console.log(`  ${c.character}  ->  ${c.gender}`));
-    console.log('\n--- النص اللي يروح للذكاء الاصطناعي ---\n' + r.promptBlock);
-  })();
-}
