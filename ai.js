@@ -3,7 +3,8 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 const { applyVocativeRules } = require('./genderRules');
-const { getTmdbCast } = require('./tmdb'); // 1. استدعاء ملف TMDB
+const { getTmdbCast } = require('./tmdb'); // استدعاء TMDB
+const { getAnilistCast } = require('./anilist'); // استدعاء AniList
 
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
@@ -284,8 +285,7 @@ async function runConcurrentPool(tasks, limit = 5) {
 }
 
 // ================== الترجمة الأساسية ==================
-// 2. حقن tmdbPromptBlock بدالة الترجمة
-async function translateChunkStrict(items, keysArray, modelName, tmdbPromptBlock = '') {
+async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -311,7 +311,7 @@ Translate the "text" of every entry to Arabic while:
 12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
 13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
-${tmdbPromptBlock ? '\n' + tmdbPromptBlock + '\n' : ''}
+${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
 Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
 Output ONLY A VALID JSON ARRAY OF OBJECTS {"id","text"}, nothing else.
@@ -374,14 +374,14 @@ ${JSON.stringify(items)}`;
   return { status: 'api_exhausted', map: new Map() };
 }
 
-async function translateItemsWithRecovery(items, keysArray, modelName, tmdbPromptBlock = '') {
+async function translateItemsWithRecovery(items, keysArray, modelName, castPromptBlock = '') {
   const done = new Map();
   if (!items || items.length === 0) return done;
 
   let pending = items;
 
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await translateChunkStrict(pending, keysArray, modelName, tmdbPromptBlock); // تمرير المتغير
+    const result = await translateChunkStrict(pending, keysArray, modelName, castPromptBlock);
 
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
@@ -525,8 +525,7 @@ function cleanForAnalysis(t) {
     .trim();
 }
 
-// 3. حقن tmdbPromptBlock بدالة تحليل الجنس
-async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1, tmdbPromptBlock = '') {
+async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1, castPromptBlock = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature, responseMimeType: 'application/json' };
   if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
@@ -536,7 +535,7 @@ Read the whole story first. Then, for EVERY line, work out WHO IS SPEAKING and W
 Codes: M = male, F = female, G = group or mixed, U = unknown, N = none (narration, on-screen text, sound effects, or speaking to oneself or the audience).
 Answer with TWO letters per line: first the speaker's gender, then the addressee's gender. Examples: "FM" = a woman speaking to a man, "MG" = a man speaking to a group, "UU" = cannot tell.
 Use the story: character names, titles (sir, ma'am, mother, king...), words like "he said"/"she said", who was just spoken to, and the alternation of dialogue. If a single line contains two speakers (lines starting with "-"), answer "UU". If you are not reasonably sure, answer U for that side. Do not guess randomly.
-${tmdbPromptBlock ? '\n' + tmdbPromptBlock + '\n' : ''}
+${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
 Output ONLY a valid JSON array of strings, exactly one string per input id, in the same order, each formatted "<id>:<two letters>", for example ["0:UU","1:FM","2:MF"]. No explanations.
 Lines:
 ${JSON.stringify(items)}`;
@@ -594,7 +593,7 @@ function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
   return { map, stats };
 }
 
-async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tmdbPromptBlock = '') {
+async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '') {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
 
@@ -633,7 +632,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tm
       const slices = makeSlices(pending, perSlice, offset);
       return slices.map((slice, si) => async () => {
         const label = `جولة ${pass} دفعة ${r + 1}/${RUNS} شريحة ${si + 1}/${slices.length}`;
-        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r], tmdbPromptBlock); // تمرير المتغير
+        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r], castPromptBlock);
         const wanted = new Set(slice.map(it => it.id));
         for (const [id, code] of map) if (wanted.has(id)) runMaps[r].set(id, code);
       });
@@ -685,7 +684,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tm
   return cache;
 }
 
-async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, tmdbPromptBlock = '') {
+async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, castPromptBlock = '') {
   const tStart = Date.now();
   const CHUNK = getDynamicChunkSize(modelName);
   const cache = getLineCache(cacheKey);
@@ -710,7 +709,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       try {
         const tA = Date.now();
         const deadline = Date.now() + ANNOTATION_BUDGET_MS;
-        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tmdbPromptBlock); // تمرير المتغير
+        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock);
         let attached = 0;
         for (const it of toDo) {
           const g = annotations.get(it.id);
@@ -750,7 +749,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, tmdbPromptBlock); // تمرير المتغير
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, castPromptBlock);
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
@@ -777,20 +776,29 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   };
 }
 
-// 4. دالة SRT الأساسية - سحب الشخصيات وطباعة اللوغ
-async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId) {
-  let tmdbPromptBlock = '';
-  if (targetId) {
+async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+  let castPromptBlock = '';
+  
+  if (kitsuId) {
+    console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
+    const aniRes = await getAnilistCast({ kitsuId });
+    if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
+        console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || kitsuId}).`);
+        castPromptBlock = aniRes.promptBlock;
+    } else {
+        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
+    }
+  } else if (targetId) {
     console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
     const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
     if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
         console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
-        tmdbPromptBlock = tmdbRes.promptBlock;
+        castPromptBlock = tmdbRes.promptBlock;
     } else {
         console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
     }
   } else {
-    console.log(`[TMDB] لم يتم تمرير targetId للعمل، سيتم تجاوز جلب الشخصيات.`);
+    console.log(`[شخصيات] لم يتم تمرير targetId أو kitsuId، سيتم تجاوز جلب الشخصيات.`);
   }
 
   let originalText = "";
@@ -808,7 +816,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl, tmdbPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl, castPromptBlock);
 
   let srtOutput = '';
   let counter = 1;
@@ -827,20 +835,29 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-// 5. دالة ASS الأساسية - سحب الشخصيات وطباعة اللوغ
-async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId) {
-  let tmdbPromptBlock = '';
-  if (targetId) {
+async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+  let castPromptBlock = '';
+  
+  if (kitsuId) {
+    console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
+    const aniRes = await getAnilistCast({ kitsuId });
+    if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
+        console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || kitsuId}).`);
+        castPromptBlock = aniRes.promptBlock;
+    } else {
+        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
+    }
+  } else if (targetId) {
     console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
     const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
     if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
         console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
-        tmdbPromptBlock = tmdbRes.promptBlock;
+        castPromptBlock = tmdbRes.promptBlock;
     } else {
         console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
     }
   } else {
-    console.log(`[TMDB] لم يتم تمرير targetId للعمل، سيتم تجاوز جلب الشخصيات.`);
+    console.log(`[شخصيات] لم يتم تمرير targetId أو kitsuId، سيتم تجاوز جلب الشخصيات.`);
   }
 
   let originalText = "";
@@ -858,7 +875,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
 
   console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, tmdbPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, castPromptBlock);
 
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -870,7 +887,6 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
 }
 
-// التوافقية القديمة
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
   return (await handleTranslationSrtDetailed(subUrl, keysArray, modelName)).content;
 }
