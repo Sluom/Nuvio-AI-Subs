@@ -3,8 +3,10 @@
 //   const { getAnilistCast } = require('./anilist');
 //   await getAnilistCast({ kitsuId: 7442 });      // رقم Kitsu (يتحول لرقم MAL تلقائياً)
 //   await getAnilistCast({ malId: 16498 });
+//   await getAnilistCast({ imdbId: 'tt0388629' }); // رقم IMDb (يتحول عبر ARM)
+//   await getAnilistCast({ tvdbId: 81797 });       // رقم TVDB (يتحول عبر ARM)
 //   await getAnilistCast({ title: 'Attack on Titan' });
-// الاختبار لحاله:  node anilist.js kitsu:7442   |   node anilist.js mal:16498   |   node anilist.js "Attack on Titan"
+// الاختبار لحاله:  node anilist.js kitsu:7442 | mal:16498 | imdb:tt0388629 | tvdb:81797 | "Attack on Titan"
 
 const axios = require('axios');
 let httpAgent, httpsAgent;
@@ -12,13 +14,15 @@ try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (
 
 const ANILIST_URL = 'https://graphql.anilist.co';
 const KITSU_URL = 'https://kitsu.io/api/edge';
+const ARM_URL = 'https://arm.haglund.dev/api/v2/ids'; // تحويل IMDb / TVDB -> AniList / MAL
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const NEG_TTL_MS = 60 * 60 * 1000; // كاش "مو أنمي" لساعة حتى ما نكرر الطلب
 const MAX_CAST = 40;
 const cache = new Map();
 
 const QUERY = `
-query ($search: String, $idMal: Int) {
-  Media(search: $search, idMal: $idMal, type: ANIME) {
+query ($search: String, $idMal: Int, $id: Int) {
+  Media(search: $search, idMal: $idMal, id: $id, type: ANIME) {
     id
     title { romaji english }
     characters(sort: [ROLE, FAVOURITES_DESC], perPage: 30) {
@@ -51,6 +55,32 @@ async function resolveKitsu(kitsuId) {
   return out;
 }
 
+// IMDb / TVDB -> رقم AniList + MAL (عن طريق ARM)
+// notFound=true يعني ARM رد وما لقى العمل (غالباً مو أنمي)، error يعني فشل الاتصال
+async function resolveExternal({ imdbId, tvdbId }) {
+  const out = { anilistId: null, malId: null, notFound: false, error: null };
+  const attempts = [];
+  if (imdbId) attempts.push({ source: 'imdb', id: imdbId });
+  if (tvdbId) attempts.push({ source: 'thetvdb', id: tvdbId });
+  let sawError = false;
+  for (const params of attempts) {
+    try {
+      const r = await axios.get(ARM_URL, { params, timeout: 8000, httpAgent, httpsAgent });
+      let d = r.data || {};
+      if (Array.isArray(d)) d = d[0] || {};
+      const al = parseInt(d.anilist, 10);
+      const mal = parseInt(d.myanimelist, 10);
+      if (al) out.anilistId = al;
+      if (mal) out.malId = mal;
+      if (out.anilistId || out.malId) return out;
+    } catch (e) {
+      if (!(e.response && e.response.status === 404)) { sawError = true; out.error = e.message; }
+    }
+  }
+  out.notFound = !sawError;
+  return out;
+}
+
 function genderLetter(g) {
   const s = String(g || '').toLowerCase();
   if (s === 'male') return 'M';
@@ -58,22 +88,43 @@ function genderLetter(g) {
   return null;
 }
 
-async function getAnilistCast({ kitsuId, malId, title } = {}) {
-  const cacheKey = `${kitsuId || ''}|${malId || ''}|${title || ''}`;
+async function getAnilistCast({ kitsuId, malId, imdbId, tvdbId, title } = {}) {
+  const cacheKey = `${kitsuId || ''}|${malId || ''}|${imdbId || ''}|${tvdbId || ''}|${title || ''}`;
   const hit = cache.get(cacheKey);
-  if (hit && Date.now() - hit.t < CACHE_TTL_MS) return hit.data;
+  if (hit && Date.now() - hit.t < (hit.ttl || CACHE_TTL_MS)) return hit.data;
 
   try {
     let mal = malId ? parseInt(malId, 10) : null;
+    let anilistId = null;
     let search = title || '';
+
     if (kitsuId && !mal) {
       const k = await resolveKitsu(kitsuId);
       mal = k.malId;
       if (!mal) search = k.title;
     }
-    if (!mal && !search) return { ok: false, reason: 'ما قدرت أحدد الأنمي', cast: [], promptBlock: '' };
 
-    const variables = mal ? { idMal: mal } : { search };
+    if (!mal && !anilistId && (imdbId || tvdbId)) {
+      const x = await resolveExternal({ imdbId, tvdbId });
+      anilistId = x.anilistId;
+      mal = x.malId;
+      if (!anilistId && !mal) {
+        const data = {
+          ok: false,
+          reason: x.notFound ? 'غير موجود بقاعدة ARM (غالباً ليس أنمي)' : `ARM فشل: ${x.error}`,
+          cast: [], promptBlock: ''
+        };
+        if (x.notFound) {
+          cache.set(cacheKey, { t: Date.now(), ttl: NEG_TTL_MS, data });
+          if (cache.size > 200) cache.delete(cache.keys().next().value);
+        }
+        return data;
+      }
+    }
+
+    if (!mal && !anilistId && !search) return { ok: false, reason: 'ما قدرت أحدد الأنمي', cast: [], promptBlock: '' };
+
+    const variables = anilistId ? { id: anilistId } : (mal ? { idMal: mal } : { search });
     const r = await axios.post(ANILIST_URL, { query: QUERY, variables }, {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       timeout: 10000, httpAgent, httpsAgent
@@ -118,9 +169,11 @@ module.exports = { getAnilistCast };
 if (require.main === module) {
   (async () => {
     const arg = process.argv.slice(2).join(' ').trim();
-    if (!arg) { console.log('مثال: node anilist.js kitsu:7442  أو  node anilist.js mal:16498  أو  node anilist.js "Attack on Titan"'); process.exit(1); }
+    if (!arg) { console.log('مثال: node anilist.js kitsu:7442  أو  mal:16498  أو  imdb:tt0388629  أو  tvdb:81797  أو  "Attack on Titan"'); process.exit(1); }
     const input = arg.startsWith('kitsu:') ? { kitsuId: arg.slice(6) }
       : arg.startsWith('mal:') ? { malId: arg.slice(4) }
+      : arg.startsWith('imdb:') ? { imdbId: arg.slice(5) }
+      : arg.startsWith('tvdb:') ? { tvdbId: arg.slice(5) }
       : { title: arg };
     const t0 = Date.now();
     const r = await getAnilistCast(input);
