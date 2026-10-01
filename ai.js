@@ -3,6 +3,8 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 const { applyVocativeRules } = require('./genderRules');
+const { getTmdbCast } = require('./tmdb'); // 1. استدعاء ملف TMDB
+
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
 
@@ -30,27 +32,22 @@ const DEFAULT_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta
 const GEMINI_CLIENT_HEADER = 'stremio-submaker/1.4.94';
 const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 
-// عدد مرات إعادة طلب الأسطر الناقصة فقط (بعد الطلب الأول)
 const MAX_MISSING_RETRIES = 3;
-// عدد الجولات الإضافية لإعادة الأسطر اللي انتجاوزت بسبب الخنق (429/503)
 const MAX_RETRY_PASSES = 4;
 
-// ---------- تحليل الضمائر (مصدر الأجناس الوحيد) ----------
 const ENABLE_GENDER_ANALYSIS = true;
-const ANNOTATION_MIN_COVERAGE = 0.95;         // إذا 80% من الأسطر محللة نكتفي
-const ANNOTATION_BUDGET_MS = 30000;          // أقصى وقت للتحليل كله، بعده نكمل الترجمة بالموجود
-const ANNOTATION_SLICE_SIZE = 300;           // أقصى عدد أسطر بالطلب الواحد
-const ANNOTATION_MIN_SLICE = 150;            // أقل عدد أسطر بالطلب (حتى يبقى فيه سياق كافي)
-const ANNOTATION_MAX_CONCURRENCY = 6;        // أقصى عدد طلبات تحليل بنفس الوقت (كانت 6، الآن عندنا 3 دفعات)
-const ANNOTATION_PASSES = 3;                 // جولة أساسية + جولة إعادة للناقص
-const ANNOTATION_REQUEST_TIMEOUT_MS = 30000; // مهلة الطلب الواحد
+const ANNOTATION_MIN_COVERAGE = 0.95;
+const ANNOTATION_BUDGET_MS = 30000;
+const ANNOTATION_SLICE_SIZE = 300;
+const ANNOTATION_MIN_SLICE = 150;
+const ANNOTATION_MAX_CONCURRENCY = 6;
+const ANNOTATION_PASSES = 3;
+const ANNOTATION_REQUEST_TIMEOUT_MS = 30000;
 const ANNOTATION_ATTEMPTS = 3;
 
-// ---------- التصويت (3 دفعات تحليل) ----------
-// لتعطيل التصويت والرجوع لدفعة وحدة: خل عنصر واحد بالمصفوفتين، مثلاً [0.1] و [0]
-const ANNOTATION_RUN_TEMPS = [0.1, 0.1, 0.1];            // حرارة كل دفعة (عدد العناصر = عدد الدفعات)
-const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];   // إزاحة حدود الشرائح لكل دفعة
-const ANNOTATION_VOTE_MIN_AGREE = 2;                     // أقل عدد دفعات لازم تتفق على الحرف، وإلا يصير U
+const ANNOTATION_RUN_TEMPS = [0.1, 0.1, 0.1];
+const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];
+const ANNOTATION_VOTE_MIN_AGREE = 2;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -98,7 +95,6 @@ function aliveKeyCount(keysArray) {
   return (keysArray || []).filter(k => !deadKeys.has(k)).length;
 }
 
-// maxWaitMs: أقصى انتظار مسموح للتبريد. إذا أطول منه نرجع null بدل ما نعلّق.
 async function acquireKey(keysArray, maxWaitMs = Infinity) {
   if (!keysArray || keysArray.length === 0) return null;
   while (true) {
@@ -118,18 +114,16 @@ async function acquireKey(keysArray, maxWaitMs = Infinity) {
     if (wait > maxWaitMs) return null;
     if (wait > 0) {
       console.log(`[تبريد جماعي] كل المفاتيح الحية بالتبريد. انتظار ${Math.ceil(wait / 1000)}s...`);
-      // تأخير عشوائي (Jitter) حتى العمال ما يصحون كلهم بنفس اللحظة
       await delay(wait + (Math.random() * 3000));
     }
   }
 }
 
-// يحسب مدة التبريد حسب حالة الخطأ
 function cooldownForStatus(status) {
   if (status === 503 || status === 500 || status === 502) return 3000 + Math.random() * 2000;
   if (status === 429) return 60000;
   if (status === 400) return 10000;
-  if (status === 0) return 2000; // مهلة/شبكة: المفتاح سليم، لا نبرّده دقيقة
+  if (status === 0) return 2000;
   return 60000;
 }
 
@@ -205,7 +199,6 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
-// (قديمة - تبقى موجودة لأن ملفات ثانية ممكن تستعملها)
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim();
@@ -233,7 +226,6 @@ function parseRobustJsonArray(raw, expectedLength) {
 }
 
 // ================== قراءة الرد بالأرقام (id) ==================
-// ترجع Map: رقم السطر -> الترجمة. حتى لو الرد ناقص أو مقطوع، تاخذ اللي سليم منه.
 function parseIdTranslations(raw) {
   if (!raw) return null;
   let clean = String(raw).trim();
@@ -262,7 +254,6 @@ function parseIdTranslations(raw) {
     if (map.size) return map;
   } catch (e) {}
 
-  // إذا الرد مقطوع أو فيه خلل: ننقذ كل سطر سليم لحاله
   const re = /\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
   let m;
   while ((m = re.exec(clean)) !== null) {
@@ -292,10 +283,9 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-// ================== الترجمة الأساسية (بالأرقام) ==================
-// items = [{ id: 5, text: "..." }, ...]
-// ترجع: { status, map }  حيث map = رقم السطر -> الترجمة
-async function translateChunkStrict(items, keysArray, modelName) {
+// ================== الترجمة الأساسية ==================
+// 2. حقن tmdbPromptBlock بدالة الترجمة
+async function translateChunkStrict(items, keysArray, modelName, tmdbPromptBlock = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -321,6 +311,7 @@ Translate the "text" of every entry to Arabic while:
 12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
 13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
+${tmdbPromptBlock ? '\n' + tmdbPromptBlock + '\n' : ''}
 Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
 Output ONLY A VALID JSON ARRAY OF OBJECTS {"id","text"}, nothing else.
@@ -383,15 +374,14 @@ ${JSON.stringify(items)}`;
   return { status: 'api_exhausted', map: new Map() };
 }
 
-// يترجم الدفعة، وإذا نقصت أسطر يعيد طلب الناقصة فقط (مو الدفعة كلها)
-async function translateItemsWithRecovery(items, keysArray, modelName) {
+async function translateItemsWithRecovery(items, keysArray, modelName, tmdbPromptBlock = '') {
   const done = new Map();
   if (!items || items.length === 0) return done;
 
   let pending = items;
 
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await translateChunkStrict(pending, keysArray, modelName);
+    const result = await translateChunkStrict(pending, keysArray, modelName, tmdbPromptBlock); // تمرير المتغير
 
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
@@ -404,7 +394,6 @@ async function translateItemsWithRecovery(items, keysArray, modelName) {
         if (wanted.has(id) && text) done.set(id, text);
       }
     }
-    // (bad_format: نعيد الطلب لنفس الأسطر)
 
     const before = pending.length;
     pending = pending.filter(it => !done.has(it.id));
@@ -436,15 +425,12 @@ async function fetchAndExtractSub(subUrl) {
   return fixArabicEncoding(buffer).toString('utf-8');
 }
 
-// يجهز نص السطر قبل الإرسال
 function prepCueText(t) {
   if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
   return t;
 }
 
-// ================== كاش الأسطر (يحفظ كل سطر ترجم) ==================
-// رابط الترجمة -> Map(رقم السطر -> الترجمة)
-// إذا المحاولة الأولى نقصت أسطر، المحاولة الثانية تترجم الناقصة فقط
+// ================== كاش الأسطر ==================
 const lineCaches = new Map();
 const MAX_LINE_CACHES = 40;
 
@@ -456,14 +442,12 @@ function getLineCache(key) {
   return lineCaches.get(key);
 }
 
-// الأسطر اللي فيها رموز أو أرقام أو وسوم بس (مثل ♪ أو {\an8}) ما تحتاج ترجمة
 function needsTranslation(text) {
   const t = String(text || '').replace(/<[^>]*>|\{[^}]*\}|\\N|\\n/g, '');
   return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
 }
 
 // ================== تحليل المتكلم والمخاطَب ==================
-// رابط الترجمة -> Map(رقم السطر -> رمز من حرفين، مثل "FM" = المتكلم أنثى والمخاطَب ذكر)
 const annotationCaches = new Map();
 const MAX_ANNOTATION_CACHES = 40;
 
@@ -475,7 +459,6 @@ function getAnnotationCache(key) {
   return annotationCaches.get(key);
 }
 
-// الأسطر اللي فيها أنا/أنت/نحن/هو/هي فقط هي اللي تحتاج تحليل جنس (الباقي مثل "Okay." تنتجاوز)
 const NEEDS_GENDER = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
 
 const SAFETY_SETTINGS_OFF = [
@@ -485,7 +468,6 @@ const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' }
 ];
 
-// طلب نصي عام لجيمناي بنفس نظام المفاتيح والتبريد، مع مهلة كلية (deadline)
 async function callGeminiText({ prompt, keysArray, modelName, generationConfig, timeout = 120000, attempts = 4, deadline = Infinity }) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -524,7 +506,6 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
   return { status: 'api_exhausted', text: '' };
 }
 
-// يقرأ رد التحليل: كل عنصر بشكل "رقم:حرفين" مثل "45:FM"
 function parseAnnotationCodes(raw) {
   const map = new Map();
   if (!raw) return map;
@@ -536,7 +517,6 @@ function parseAnnotationCodes(raw) {
   return map;
 }
 
-// نص السطر للتحليل: بدون وسوم، و\N تصير مسافة (الشرطات "-" تبقى عشان نعرف المتكلمين)
 function cleanForAnalysis(t) {
   return String(t || '')
     .replace(/\{[^}]*\}|<[^>]*>/g, '')
@@ -545,9 +525,8 @@ function cleanForAnalysis(t) {
     .trim();
 }
 
-// إذا فشلت الشريحة (مهلة/خنق) نرجع Map فاضية، والباقي يكمل بالموجود بس
-// temperature: حرارة الدفعة (كل دفعة تصويت لها حرارة)
-async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1) {
+// 3. حقن tmdbPromptBlock بدالة تحليل الجنس
+async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1, tmdbPromptBlock = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature, responseMimeType: 'application/json' };
   if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
@@ -557,6 +536,7 @@ Read the whole story first. Then, for EVERY line, work out WHO IS SPEAKING and W
 Codes: M = male, F = female, G = group or mixed, U = unknown, N = none (narration, on-screen text, sound effects, or speaking to oneself or the audience).
 Answer with TWO letters per line: first the speaker's gender, then the addressee's gender. Examples: "FM" = a woman speaking to a man, "MG" = a man speaking to a group, "UU" = cannot tell.
 Use the story: character names, titles (sir, ma'am, mother, king...), words like "he said"/"she said", who was just spoken to, and the alternation of dialogue. If a single line contains two speakers (lines starting with "-"), answer "UU". If you are not reasonably sure, answer U for that side. Do not guess randomly.
+${tmdbPromptBlock ? '\n' + tmdbPromptBlock + '\n' : ''}
 Output ONLY a valid JSON array of strings, exactly one string per input id, in the same order, each formatted "<id>:<two letters>", for example ["0:UU","1:FM","2:MF"]. No explanations.
 Lines:
 ${JSON.stringify(items)}`;
@@ -575,8 +555,6 @@ ${JSON.stringify(items)}`;
   return map;
 }
 
-// يقسّم الأسطر إلى شرائح. offset = طول الشريحة الأولى (يزحزح كل الحدود بعدها).
-// الشريحة الأخيرة إذا طلعت صغيرة جداً تندمج مع اللي قبلها.
 function makeSlices(items, perSlice, offset) {
   const slices = [];
   let start = 0;
@@ -593,9 +571,6 @@ function makeSlices(items, perSlice, offset) {
   return slices;
 }
 
-// التصويت: كل حرف (المتكلم ثم المخاطَب) يتصوّت عليه لحاله.
-// إذا ما وصل لـ minAgree دفعات متفقة يصير U (فتطلع الترجمة محايدة).
-// إذا سطر رجع من دفعة وحدة بس، نقبله كما هو (ما فيه تصويت ممكن).
 function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
   const map = new Map();
   const stats = { unanimous: 0, split: 0, lettersToU: 0, lone: 0 };
@@ -619,9 +594,7 @@ function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
   return { map, stats };
 }
 
-// يحلل الأسطر اللي فيها ضمائر ويرجع Map: رقم السطر -> رمز الجنس
-// ٣ دفعات بحدود شرائح مختلفة وحرارة مختلفة، ثم تصويت. تشتغل كلها بمجمّع واحد متوازي.
-async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
+async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tmdbPromptBlock = '') {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
 
@@ -632,7 +605,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
   });
   const eligible = eligibleItems.length;
 
-  // اللي انصوّت عليه قبل (بالكاش) ما نعيده
   const todo = eligibleItems.filter(it => !cache.has(it.id));
 
   const RUNS = ANNOTATION_RUN_TEMPS.length;
@@ -654,7 +626,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
       break;
     }
 
-    // مهام كل دفعة لحالها
     const taskLists = pendingPerRun.map((pending, r) => {
       if (pending.length === 0) return [];
       const perSlice = Math.min(ANNOTATION_SLICE_SIZE, Math.max(ANNOTATION_MIN_SLICE, Math.ceil(pending.length / concPerRun)));
@@ -662,13 +633,12 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
       const slices = makeSlices(pending, perSlice, offset);
       return slices.map((slice, si) => async () => {
         const label = `جولة ${pass} دفعة ${r + 1}/${RUNS} شريحة ${si + 1}/${slices.length}`;
-        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r]);
+        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r], tmdbPromptBlock); // تمرير المتغير
         const wanted = new Set(slice.map(it => it.id));
         for (const [id, code] of map) if (wanted.has(id)) runMaps[r].set(id, code);
       });
     });
 
-    // ندمجها بالتناوب (دفعة1، دفعة2، دفعة3، ...) حتى لو انقطع الوقت تكون كل دفعة أخذت نصيبها
     const tasks = [];
     const maxLen = Math.max(...taskLists.map(l => l.length));
     for (let i = 0; i < maxLen; i++) for (const l of taskLists) if (l[i]) tasks.push(l[i]);
@@ -677,7 +647,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
     await runConcurrentPool(tasks, conc);
   }
 
-  // التصويت وحفظ النتيجة بالكاش
   if (todo.length > 0) {
     const { map: voted, stats } = voteCodes(runMaps);
     for (const [id, code] of voted) cache.set(id, code);
@@ -692,7 +661,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
     console.log(`[اختلاف الدفعات] ${diffs.length} سطر. عينة: ${diffs.filter((_, i) => i % stepD === 0).slice(0, 8).join(' | ')}`);
   }
 
-  // إحصائيات للمراجعة في اللوغ
   const dist = new Map();
   let covered = 0;
   for (const it of eligibleItems) {
@@ -704,7 +672,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
   const distStr = [...dist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}:${v}`).join(' ');
   console.log(`[تحليل الضمائر] النتيجة: ${covered}/${eligible} سطر محلل في ${Date.now() - tStart}ms | التوزيع: ${distStr || 'لا شيء'}`);
 
-  // عينة موزعة على الفلم كله للمراجعة اليدوية
   const sampled = eligibleItems.filter(it => cache.has(it.id));
   if (sampled.length > 0) {
     const step = Math.max(1, Math.floor(sampled.length / 6));
@@ -718,14 +685,12 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
   return cache;
 }
 
-// يترجم الأسطر اللي ناقصة فقط، ويرجع { texts, missing }
-// texts بنفس ترتيب الأسطر الأصلية بالضبط، وmissing = عدد الأسطر اللي بقت بدون ترجمة
-async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey) {
+async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, tmdbPromptBlock = '') {
   const tStart = Date.now();
   const CHUNK = getDynamicChunkSize(modelName);
   const cache = getLineCache(cacheKey);
 
-  const results = new Array(cues.length).fill(null); // رقم السطر -> الترجمة
+  const results = new Array(cues.length).fill(null);
   const toDo = [];
   let fromCache = 0;
   cues.forEach((c, i) => {
@@ -735,7 +700,6 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   });
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
 
-  // 1) تحليل الضمائر: مصدر الأجناس الوحيد. أي شريحة تفشل تنتخطى ونكمل بالموجود.
   let annotationSummary = 'لم يُستخدم';
   if (toDo.length > 0) {
     if (!ENABLE_GENDER_ANALYSIS) {
@@ -746,7 +710,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       try {
         const tA = Date.now();
         const deadline = Date.now() + ANNOTATION_BUDGET_MS;
-        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline);
+        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, tmdbPromptBlock); // تمرير المتغير
         let attached = 0;
         for (const it of toDo) {
           const g = annotations.get(it.id);
@@ -760,7 +724,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       }
     }
   }
-// قواعد الألقاب (Mom/Dad/Sir/Ma'am...): تصحح أو تكمل جنس المخاطَب بدون أي طلب
+
   if (toDo.length > 0) {
     let ruleFixes = 0;
     for (const it of toDo) {
@@ -769,7 +733,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
     if (ruleFixes > 0) console.log(`[قواعد الألقاب] عدّلت أو أضفت معلومة الجنس لـ ${ruleFixes} سطر.`);
   }
-  // 2) الترجمة نفسها
+
   const tTrans = Date.now();
   let pendingChunks = [];
   for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
@@ -786,14 +750,13 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName);
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, tmdbPromptBlock); // تمرير المتغير
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
       }
     });
 
-    // بالجولات الإضافية نخفف الضغط: دفعتين بنفس الوقت بالأكثر
     await runConcurrentPool(tasks, pass === 0 ? concurrency : Math.min(2, concurrency));
 
     pendingChunks = pendingChunks
@@ -814,9 +777,22 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   };
 }
 
-// ترجع { content, missing, total, failed }
-// failed = true يعني فشل تحميل الملف الأصلي أو استخراج النص (ما تنحفظ كترجمة جاهزة)
-async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
+// 4. دالة SRT الأساسية - سحب الشخصيات وطباعة اللوغ
+async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId) {
+  let tmdbPromptBlock = '';
+  if (targetId) {
+    console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
+    const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
+    if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
+        console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
+        tmdbPromptBlock = tmdbRes.promptBlock;
+    } else {
+        console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+    }
+  } else {
+    console.log(`[TMDB] لم يتم تمرير targetId للعمل، سيتم تجاوز جلب الشخصيات.`);
+  }
+
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
   catch (e) {
@@ -832,7 +808,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl, tmdbPromptBlock);
 
   let srtOutput = '';
   let counter = 1;
@@ -851,7 +827,22 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName) {
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
+// 5. دالة ASS الأساسية - سحب الشخصيات وطباعة اللوغ
+async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId) {
+  let tmdbPromptBlock = '';
+  if (targetId) {
+    console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
+    const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
+    if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
+        console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
+        tmdbPromptBlock = tmdbRes.promptBlock;
+    } else {
+        console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+    }
+  } else {
+    console.log(`[TMDB] لم يتم تمرير targetId للعمل، سيتم تجاوز جلب الشخصيات.`);
+  }
+
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
   catch (e) {
@@ -867,7 +858,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
 
   console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, tmdbPromptBlock);
 
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -879,7 +870,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName) {
   return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
 }
 
-// نسخ قديمة ترجع نص فقط (للتوافق)
+// التوافقية القديمة
 async function handleTranslationSrt(subUrl, keysArray, modelName) {
   return (await handleTranslationSrtDetailed(subUrl, keysArray, modelName)).content;
 }
