@@ -683,6 +683,13 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
     for (const [id, code] of voted) cache.set(id, code);
     const perRun = runMaps.map(m => m.size).join('/');
     console.log(`[تصويت الضمائر] رجعت لكل دفعة ${perRun} سطر | إجماع=${stats.unanimous} اختلاف=${stats.split} دفعة وحيدة=${stats.lone} | حروف تحولت U=${stats.lettersToU}`);
+    const diffs = [];
+    for (const it of todo) {
+      const codes = runMaps.map(m => m.get(it.id) || '--');
+      if (new Set(codes.filter(c => c !== '--')).size > 1) diffs.push(`#${it.id} "${it.text.slice(0, 40)}" -> ${codes.join('/')} => ${cache.get(it.id)}`);
+    }
+    const stepD = Math.max(1, Math.floor(diffs.length / 8));
+    console.log(`[اختلاف الدفعات] ${diffs.length} سطر. عينة: ${diffs.filter((_, i) => i % stepD === 0).slice(0, 8).join(' | ')}`);
   }
 
   // إحصائيات للمراجعة في اللوغ
