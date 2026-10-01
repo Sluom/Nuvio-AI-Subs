@@ -44,7 +44,6 @@ class RequestQueue {
     }
 
     processNext() {
-        // يشغّل مهام جديدة طالما فيه سعة فاضية (حتى عدد الـ concurrency) ومهام في الطابور
         while (this.activeCount < this.concurrency && this.queue.length > 0) {
             const task = this.queue.shift();
             this.activeCount++;
@@ -58,9 +57,7 @@ class RequestQueue {
         }
     }
 }
-// طابور الملفات: ملف واحد بيشتغل عليه كل المفاتيح مع بعض بالتوازي (جوه ai.js)
-// لحد ما يخلص، وبعدين يجيله اللي بعده فورًا - ده أسرع من تقسيم المفاتيح
-// المحدودة على أكتر من ملف في نفس الوقت
+
 const globalTranslationQueue = new RequestQueue(1);
 
 // ==========================================
@@ -70,14 +67,14 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label, targetId }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label, targetId, kitsuId }) {
     translationCache[cacheKey] = { status: 'pending' };
 
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                // نمرر مفتاح TMDB والـ ID للـ handler 
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId);
+                // تمرير kitsuId للـ handler
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -108,7 +105,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
 // ==========================================
 const armCache = new Map();
-const ARM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 ساعة
+const ARM_CACHE_TTL = 24 * 60 * 60 * 1000;
 
 async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const cached = armCache.get(kitsuId);
@@ -193,7 +190,7 @@ async function mapKitsuToImdb(targetId) {
 }
 
 // ==========================================
-// 3.5 كاشف ترجمات الصم وضعاف السمع (SDH / Hearing-Impaired)
+// 3.5 كاشف ترجمات الصم وضعاف السمع (SDH)
 // ==========================================
 function isHearingImpairedSub(sub) {
     if (!sub) return false;
@@ -216,7 +213,7 @@ function isHearingImpairedSub(sub) {
 }
 
 // ==========================================
-// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org
+// 4. جلب ترجمات ASS/SSA الأصلية
 // ==========================================
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
@@ -610,8 +607,12 @@ app.get([
         let subtitlesData = [];
         let finalTargetId = targetId;
         let finalType = type;
+        
+        let originalKitsuId = null;
 
         if (targetId.startsWith('kitsu')) {
+            originalKitsuId = targetId.split(':')[1]; // نستخرج رقم الأنمي قبل التحويل
+            
             const mapped = await mapKitsuToImdb(targetId);
             if (mapped) {
                 finalTargetId = mapped;
@@ -708,12 +709,15 @@ app.get([
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
 
+        let extraParams = `&id=${finalTargetId}`;
+        if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
+
         if (srtSubs.length > 0) {
             for (let i = 0; i < 6; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; 
                 transSubs.push({
                     id: `nuvio-ai-srt-${i+1}`,
-                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}&id=${finalTargetId}`,
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}${extraParams}`,
                     lang: 'ara',
                     title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -725,7 +729,7 @@ app.get([
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}&id=${finalTargetId}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}${extraParams}`,
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -749,6 +753,7 @@ app.all([
     
     const targetUrl = req.query.url;
     const targetId = req.query.id || ''; 
+    const kitsuId = req.query.kitsu || '';
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
@@ -780,7 +785,8 @@ app.all([
             handler: handleTranslationSrtDetailed,
             targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
             label: 'SRT',
-            targetId 
+            targetId,
+            kitsuId
         });
     }
 
@@ -799,6 +805,7 @@ app.all([
 
     const targetUrl = req.query.url;
     const targetId = req.query.id || ''; 
+    const kitsuId = req.query.kitsu || '';
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
@@ -830,7 +837,8 @@ app.all([
             handler: handleTranslationAssDetailed,
             targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
             label: 'ASS',
-            targetId 
+            targetId,
+            kitsuId
         });
     }
 
