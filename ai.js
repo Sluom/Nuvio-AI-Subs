@@ -776,10 +776,25 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   };
 }
 
+// ================== استخراج معرفات tt / tvdb من targetId ==================
+// أمثلة: "tt0388629:1:160" -> imdbId=tt0388629 | "tvdb:81797:1:160" -> tvdbId=81797
+function parseExternalIds(targetId) {
+  const s = String(targetId || '').trim();
+  const out = { imdbId: null, tvdbId: null };
+  const tt = s.match(/tt\d+/i);
+  if (tt) out.imdbId = tt[0].toLowerCase();
+  const tv = s.match(/^(?:tvdb|thetvdb)[:_-]?(\d+)/i);
+  if (tv) out.tvdbId = tv[1];
+  return out;
+}
+
 async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
   let castPromptBlock = '';
-  
+  const { imdbId, tvdbId } = parseExternalIds(targetId);
+
+  // ===== فحص الأولوية: (1) Kitsu -> AniList  (2) tt/tvdb -> AniList  (3) TMDB =====
   if (kitsuId) {
+    // الأولوية 1: معرف Kitsu
     console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
     const aniRes = await getAnilistCast({ kitsuId });
     if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
@@ -789,13 +804,28 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
-    console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
-    const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
-    if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
-        console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
-        castPromptBlock = tmdbRes.promptBlock;
-    } else {
-        console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+    // الأولوية 2: معرف tt أو tvdb -> نجرب AniList أولاً (يتحول عبر ARM)
+    if (imdbId || tvdbId) {
+      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
+      const aniRes = await getAnilistCast({ imdbId, tvdbId });
+      if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
+          console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || imdbId || tvdbId}).`);
+          castPromptBlock = aniRes.promptBlock;
+      } else {
+          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId || tvdbId} | السبب: ${aniRes.reason || 'غير معروف'}`);
+      }
+    }
+
+    // الأولوية 3: TMDB (فقط إذا AniList ما رجع شخصيات)
+    if (!castPromptBlock) {
+      console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
+      const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
+      if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
+          console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
+          castPromptBlock = tmdbRes.promptBlock;
+      } else {
+          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+      }
     }
   } else {
     console.log(`[شخصيات] لم يتم تمرير targetId أو kitsuId، سيتم تجاوز جلب الشخصيات.`);
@@ -837,8 +867,11 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
 
 async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
   let castPromptBlock = '';
-  
+  const { imdbId, tvdbId } = parseExternalIds(targetId);
+
+  // ===== فحص الأولوية: (1) Kitsu -> AniList  (2) tt/tvdb -> AniList  (3) TMDB =====
   if (kitsuId) {
+    // الأولوية 1: معرف Kitsu
     console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
     const aniRes = await getAnilistCast({ kitsuId });
     if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
@@ -848,13 +881,28 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
-    console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
-    const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
-    if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
-        console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
-        castPromptBlock = tmdbRes.promptBlock;
-    } else {
-        console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+    // الأولوية 2: معرف tt أو tvdb -> نجرب AniList أولاً (يتحول عبر ARM)
+    if (imdbId || tvdbId) {
+      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
+      const aniRes = await getAnilistCast({ imdbId, tvdbId });
+      if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
+          console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || imdbId || tvdbId}).`);
+          castPromptBlock = aniRes.promptBlock;
+      } else {
+          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId || tvdbId} | السبب: ${aniRes.reason || 'غير معروف'}`);
+      }
+    }
+
+    // الأولوية 3: TMDB (فقط إذا AniList ما رجع شخصيات)
+    if (!castPromptBlock) {
+      console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
+      const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
+      if (tmdbRes.ok && tmdbRes.cast && tmdbRes.cast.length > 0) {
+          console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
+          castPromptBlock = tmdbRes.promptBlock;
+      } else {
+          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
+      }
     }
   } else {
     console.log(`[شخصيات] لم يتم تمرير targetId أو kitsuId، سيتم تجاوز جلب الشخصيات.`);
