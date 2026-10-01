@@ -37,7 +37,7 @@ const MAX_RETRY_PASSES = 4;
 
 // ---------- تحليل الضمائر (مصدر الأجناس الوحيد) ----------
 const ENABLE_GENDER_ANALYSIS = true;
-const ANNOTATION_MIN_COVERAGE = 0.8;         // إذا 80% من الأسطر محللة نكتفي
+const ANNOTATION_MIN_COVERAGE = 0.95;         // إذا 80% من الأسطر محللة نكتفي
 const ANNOTATION_BUDGET_MS = 30000;          // أقصى وقت للتحليل كله، بعده نكمل الترجمة بالموجود
 const ANNOTATION_SLICE_SIZE = 300;           // أقصى عدد أسطر بالطلب الواحد
 const ANNOTATION_MIN_SLICE = 150;            // أقل عدد أسطر بالطلب (حتى يبقى فيه سياق كافي)
