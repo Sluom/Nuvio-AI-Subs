@@ -5,9 +5,9 @@ try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (
 
 const ANILIST_URL = 'https://graphql.anilist.co';
 const KITSU_URL = 'https://kitsu.io/api/edge';
-const ARM_URL = 'https://arm.haglund.dev/api/v2/ids'; // تحويل IMDb / TVDB -> AniList / MAL
+const ARM_URL = 'https://arm.haglund.dev/api/v2/ids';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const NEG_TTL_MS = 60 * 60 * 1000; // كاش "مو أنمي" لساعة حتى ما نكرر الطلب
+const NEG_TTL_MS = 60 * 60 * 1000;
 const MAX_CAST = 40;
 const cache = new Map();
 
@@ -46,19 +46,45 @@ async function resolveKitsu(kitsuId) {
   return out;
 }
 
-// IMDb / TVDB -> رقم AniList + MAL (عن طريق ARM)
+// ====== التكتيك الجديد: تهريب معرّف IMDb عبر Cinemeta ======
+async function getCinemetaExternalIds(imdbId) {
+  const out = { tvdbId: null, tmdbId: null };
+  try {
+    // نسأل قاعدة بيانات Stremio المفتوحة (بدون أي مفتاح)
+    let r = await axios.get(`https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`, { timeout: 6000 });
+    let meta = r.data && r.data.meta;
+    if (!meta) {
+      r = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`, { timeout: 6000 });
+      meta = r.data && r.data.meta;
+    }
+    if (meta) {
+      if (meta.tvdb_id) out.tvdbId = meta.tvdb_id;
+      if (meta.moviedb_id) out.tmdbId = meta.moviedb_id;
+    }
+  } catch (e) {}
+  return out;
+}
+
+// تحويل المعرفات الخارجية (المهربة) إلى AniList
 async function resolveExternal({ imdbId, tvdbId }) {
   const out = { anilistId: null, malId: null, notFound: false, error: null };
   const attempts = [];
-  if (imdbId) attempts.push({ source: 'imdb', id: imdbId });
+
+  // إذا عدنا TVDB جاهز، نضيفه
   if (tvdbId) attempts.push({ source: 'thetvdb', id: tvdbId });
-  
+
+  // إذا عدنا IMDb، نحوله إلى TVDB و TMDB عبر التهريبة وندخله لـ ARM
+  if (imdbId) {
+    const cinemeta = await getCinemetaExternalIds(imdbId);
+    if (cinemeta.tvdbId) attempts.push({ source: 'thetvdb', id: cinemeta.tvdbId });
+    if (cinemeta.tmdbId) attempts.push({ source: 'themoviedb', id: cinemeta.tmdbId });
+  }
+
   let sawError = false;
   for (const params of attempts) {
     try {
       const r = await axios.get(ARM_URL, {
         params,
-        // التعديل الأول: إضافة الهيدرات الأساسية اللي تمنع رفض الطلب بخطأ 400
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
             'Accept': 'application/json'
@@ -75,7 +101,6 @@ async function resolveExternal({ imdbId, tvdbId }) {
     } catch (e) {
       if (!(e.response && e.response.status === 404)) {
         sawError = true;
-        // التعديل الثاني: استخراج رسالة الخطأ الحقيقية من السيرفر وعرضها بدل كلمة status 400
         const serverMsg = e.response && e.response.data ? JSON.stringify(e.response.data) : e.message;
         out.error = serverMsg;
       }
@@ -173,7 +198,7 @@ module.exports = { getAnilistCast };
 if (require.main === module) {
   (async () => {
     const arg = process.argv.slice(2).join(' ').trim();
-    if (!arg) { console.log('مثال: node anilist.js kitsu:7442  أو  mal:16498  أو  imdb:tt0388629  أو  tvdb:81797  أو  "Attack on Titan"'); process.exit(1); }
+    if (!arg) { console.log('مثال: node anilist.js imdb:tt0388629'); process.exit(1); }
     const input = arg.startsWith('kitsu:') ? { kitsuId: arg.slice(6) }
       : arg.startsWith('mal:') ? { malId: arg.slice(4) }
       : arg.startsWith('imdb:') ? { imdbId: arg.slice(5) }
