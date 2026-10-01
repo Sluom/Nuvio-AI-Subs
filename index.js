@@ -70,14 +70,14 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label, targetId }) {
     translationCache[cacheKey] = { status: 'pending' };
 
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                // نمرر مفتاح TMDB للـ handler 
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey);
+                // نمرر مفتاح TMDB والـ ID للـ handler 
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -536,7 +536,7 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                 const model = document.getElementById('model-select').value;
                 
                 const config = { keys: keys, model: model };
-                if (tmdbKey) config.tmdbKey = tmdbKey; // إضافة مفتاح TMDB للرابط اذا موجود
+                if (tmdbKey) config.tmdbKey = tmdbKey; 
                 
                 return encodeURIComponent(JSON.stringify(config));
             }
@@ -713,7 +713,7 @@ app.get([
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; 
                 transSubs.push({
                     id: `nuvio-ai-srt-${i+1}`,
-                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}&id=${finalTargetId}`, // ضفت الـ id حتى نستخدمه لـ tmdb
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}&id=${finalTargetId}`,
                     lang: 'ara',
                     title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -725,7 +725,7 @@ app.get([
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}&id=${finalTargetId}`, // ضفت الـ id حتى نستخدمه لـ tmdb
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}&id=${finalTargetId}`,
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -748,7 +748,7 @@ app.all([
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     
     const targetUrl = req.query.url;
-    const targetId = req.query.id || ''; // سحبنا الايدي حتى نمرره للـ AI
+    const targetId = req.query.id || ''; 
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
@@ -770,7 +770,7 @@ app.all([
             const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
             if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
             if (decodedConfig.model) userModel = decodedConfig.model;
-            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; // سحب مفتاح TMDB من الرابط
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; 
         } catch (e) { }
     }
 
@@ -778,9 +778,9 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationSrtDetailed,
-            targetUrl, userKeys, userModel, userTmdbKey, trackNum, // مررناه هنا
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
             label: 'SRT',
-            targetId // ضفته حتى ملف ai.js يعرف رقم الفلم/المسلسل
+            targetId 
         });
     }
 
@@ -798,7 +798,7 @@ app.all([
     if (req.method === 'OPTIONS') return res.sendStatus(200);
 
     const targetUrl = req.query.url;
-    const targetId = req.query.id || ''; // سحبنا الايدي حتى نمرره للـ AI
+    const targetId = req.query.id || ''; 
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
@@ -820,7 +820,7 @@ app.all([
             const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
             if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
             if (decodedConfig.model) userModel = decodedConfig.model;
-            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; // سحب مفتاح TMDB من الرابط
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; 
         } catch (e) { }
     }
 
@@ -828,9 +828,9 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationAssDetailed,
-            targetUrl, userKeys, userModel, userTmdbKey, trackNum, // مررناه هنا
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
             label: 'ASS',
-            targetId // ضفته حتى ملف ai.js يعرف رقم الفلم/المسلسل
+            targetId 
         });
     }
 
