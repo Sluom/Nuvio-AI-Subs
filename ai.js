@@ -41,14 +41,14 @@ const ANNOTATION_MIN_COVERAGE = 0.8;         // إذا 80% من الأسطر م�
 const ANNOTATION_BUDGET_MS = 30000;          // أقصى وقت للتحليل كله، بعده نكمل الترجمة بالموجود
 const ANNOTATION_SLICE_SIZE = 300;           // أقصى عدد أسطر بالطلب الواحد
 const ANNOTATION_MIN_SLICE = 150;            // أقل عدد أسطر بالطلب (حتى يبقى فيه سياق كافي)
-const ANNOTATION_MAX_CONCURRENCY = 9;        // أقصى عدد طلبات تحليل بنفس الوقت (كانت 6، الآن عندنا 3 دفعات)
-const ANNOTATION_PASSES = 2;                 // جولة أساسية + جولة إعادة للناقص
+const ANNOTATION_MAX_CONCURRENCY = 6;        // أقصى عدد طلبات تحليل بنفس الوقت (كانت 6، الآن عندنا 3 دفعات)
+const ANNOTATION_PASSES = 3;                 // جولة أساسية + جولة إعادة للناقص
 const ANNOTATION_REQUEST_TIMEOUT_MS = 30000; // مهلة الطلب الواحد
-const ANNOTATION_ATTEMPTS = 2;
+const ANNOTATION_ATTEMPTS = 3;
 
 // ---------- التصويت (3 دفعات تحليل) ----------
 // لتعطيل التصويت والرجوع لدفعة وحدة: خل عنصر واحد بالمصفوفتين، مثلاً [0.1] و [0]
-const ANNOTATION_RUN_TEMPS = [0.1, 0.5, 0.5];            // حرارة كل دفعة (عدد العناصر = عدد الدفعات)
+const ANNOTATION_RUN_TEMPS = [0.1, 0.1, 0.1];            // حرارة كل دفعة (عدد العناصر = عدد الدفعات)
 const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];   // إزاحة حدود الشرائح لكل دفعة
 const ANNOTATION_VOTE_MIN_AGREE = 2;                     // أقل عدد دفعات لازم تتفق على الحرف، وإلا يصير U
 
