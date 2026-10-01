@@ -41,10 +41,16 @@ const ANNOTATION_MIN_COVERAGE = 0.8;         // إذا 80% من الأسطر م�
 const ANNOTATION_BUDGET_MS = 30000;          // أقصى وقت للتحليل كله، بعده نكمل الترجمة بالموجود
 const ANNOTATION_SLICE_SIZE = 300;           // أقصى عدد أسطر بالطلب الواحد
 const ANNOTATION_MIN_SLICE = 150;            // أقل عدد أسطر بالطلب (حتى يبقى فيه سياق كافي)
-const ANNOTATION_MAX_CONCURRENCY = 6;        // أقصى عدد طلبات تحليل بنفس الوقت
+const ANNOTATION_MAX_CONCURRENCY = 9;        // أقصى عدد طلبات تحليل بنفس الوقت (كانت 6، الآن عندنا 3 دفعات)
 const ANNOTATION_PASSES = 2;                 // جولة أساسية + جولة إعادة للناقص
 const ANNOTATION_REQUEST_TIMEOUT_MS = 30000; // مهلة الطلب الواحد
 const ANNOTATION_ATTEMPTS = 2;
+
+// ---------- التصويت (3 دفعات تحليل) ----------
+// لتعطيل التصويت والرجوع لدفعة وحدة: خل عنصر واحد بالمصفوفتين، مثلاً [0.1] و [0]
+const ANNOTATION_RUN_TEMPS = [0.1, 0.5, 0.5];            // حرارة كل دفعة (عدد العناصر = عدد الدفعات)
+const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];   // إزاحة حدود الشرائح لكل دفعة
+const ANNOTATION_VOTE_MIN_AGREE = 2;                     // أقل عدد دفعات لازم تتفق على الحرف، وإلا يصير U
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -540,9 +546,10 @@ function cleanForAnalysis(t) {
 }
 
 // إذا فشلت الشريحة (مهلة/خنق) نرجع Map فاضية، والباقي يكمل بالموجود بس
-async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel) {
+// temperature: حرارة الدفعة (كل دفعة تصويت لها حرارة)
+async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  const generationConfig = { temperature: 0.1, responseMimeType: 'application/json' };
+  const generationConfig = { temperature, responseMimeType: 'application/json' };
   if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
 
   const prompt = `You will receive numbered subtitle lines from one film or episode, in order, as a JSON array of {"id","text"}. Some lines of the story are not included; that is expected.
@@ -568,8 +575,52 @@ ${JSON.stringify(items)}`;
   return map;
 }
 
-// يحلل الأسطر اللي فيها ضمائر فقط ويرجع Map: رقم السطر -> رمز الجنس
-// بطلبات متوازية + جولة إعادة للناقص + مهلة كلية. أي شريحة تفشل تتخطى، ونكمل بما تحلل.
+// يقسّم الأسطر إلى شرائح. offset = طول الشريحة الأولى (يزحزح كل الحدود بعدها).
+// الشريحة الأخيرة إذا طلعت صغيرة جداً تندمج مع اللي قبلها.
+function makeSlices(items, perSlice, offset) {
+  const slices = [];
+  let start = 0;
+  let len = offset > 0 ? offset : perSlice;
+  while (start < items.length) {
+    slices.push(items.slice(start, start + len));
+    start += len;
+    len = perSlice;
+  }
+  if (slices.length > 1 && slices[slices.length - 1].length < ANNOTATION_MIN_SLICE / 2) {
+    const tail = slices.pop();
+    slices[slices.length - 1] = slices[slices.length - 1].concat(tail);
+  }
+  return slices;
+}
+
+// التصويت: كل حرف (المتكلم ثم المخاطَب) يتصوّت عليه لحاله.
+// إذا ما وصل لـ minAgree دفعات متفقة يصير U (فتطلع الترجمة محايدة).
+// إذا سطر رجع من دفعة وحدة بس، نقبله كما هو (ما فيه تصويت ممكن).
+function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
+  const map = new Map();
+  const stats = { unanimous: 0, split: 0, lettersToU: 0, lone: 0 };
+  const ids = new Set(maps.flatMap(m => [...m.keys()]));
+  for (const id of ids) {
+    const codes = maps.map(m => m.get(id)).filter(Boolean);
+    if (codes.length === 0) continue;
+    if (codes.length === 1) { map.set(id, codes[0]); stats.lone++; continue; }
+
+    let code = '';
+    for (let i = 0; i < 2; i++) {
+      const counts = new Map();
+      for (const c of codes) counts.set(c[i], (counts.get(c[i]) || 0) + 1);
+      const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (n >= minAgree) code += best;
+      else { code += 'U'; stats.lettersToU++; }
+    }
+    map.set(id, code);
+    if (codes.every(c => c === code)) stats.unanimous++; else stats.split++;
+  }
+  return { map, stats };
+}
+
+// يحلل الأسطر اللي فيها ضمائر ويرجع Map: رقم السطر -> رمز الجنس
+// ٣ دفعات بحدود شرائح مختلفة وحرارة مختلفة، ثم تصويت. تشتغل كلها بمجمّع واحد متوازي.
 async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
@@ -581,15 +632,21 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
   });
   const eligible = eligibleItems.length;
 
+  // اللي انصوّت عليه قبل (بالكاش) ما نعيده
+  const todo = eligibleItems.filter(it => !cache.has(it.id));
+
+  const RUNS = ANNOTATION_RUN_TEMPS.length;
+  const runMaps = Array.from({ length: RUNS }, () => new Map());
   const alive = aliveKeyCount(keysArray);
   const conc = Math.max(1, Math.min(alive, ANNOTATION_MAX_CONCURRENCY));
+  const concPerRun = Math.max(1, Math.floor(conc / RUNS));
 
-  for (let pass = 1; pass <= ANNOTATION_PASSES; pass++) {
-    const pending = eligibleItems.filter(it => !cache.has(it.id));
+  for (let pass = 1; todo.length > 0 && pass <= ANNOTATION_PASSES; pass++) {
+    const pendingPerRun = runMaps.map(m => todo.filter(it => !m.has(it.id)));
+    const worst = Math.max(...pendingPerRun.map(p => p.length));
 
-    if (pending.length === 0) break;
-    if (pending.length <= eligible * (1 - ANNOTATION_MIN_COVERAGE)) {
-      console.log(`[تحليل الضمائر] التغطية كافية (باقي ${pending.length} من ${eligible}), أكتفي بالموجود.`);
+    if (worst <= todo.length * (1 - ANNOTATION_MIN_COVERAGE)) {
+      console.log(`[تحليل الضمائر] التغطية كافية بكل الدفعات (أسوأ دفعة ناقصها ${worst} من ${todo.length}), أكتفي بالموجود.`);
       break;
     }
     if (deadline - Date.now() <= 3000) {
@@ -597,19 +654,35 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline) {
       break;
     }
 
-    // نقسم على قد التزامن، لكن ما ننزل عن أقل حجم يحفظ السياق ولا نتعدى الأقصى
-    const perSlice = Math.min(ANNOTATION_SLICE_SIZE, Math.max(ANNOTATION_MIN_SLICE, Math.ceil(pending.length / conc)));
-    const slices = [];
-    for (let i = 0; i < pending.length; i += perSlice) slices.push(pending.slice(i, i + perSlice));
-
-    console.log(`[تحليل الضمائر] جولة ${pass}/${ANNOTATION_PASSES}: ${pending.length} سطر مؤهل (من ${eligible}) → ${slices.length} طلب (تزامن ${Math.min(conc, slices.length)}، مفاتيح حية ${alive}).`);
-
-    const tasks = slices.map((slice, si) => async () => {
-      const map = await annotateSlice(slice, keysArray, modelName, deadline, `جولة ${pass} شريحة ${si + 1}/${slices.length}`);
-      const wanted = new Set(slice.map(it => it.id));
-      for (const [id, code] of map) if (wanted.has(id)) cache.set(id, code);
+    // مهام كل دفعة لحالها
+    const taskLists = pendingPerRun.map((pending, r) => {
+      if (pending.length === 0) return [];
+      const perSlice = Math.min(ANNOTATION_SLICE_SIZE, Math.max(ANNOTATION_MIN_SLICE, Math.ceil(pending.length / concPerRun)));
+      const offset = Math.round(perSlice * ANNOTATION_RUN_OFFSET_FRACS[r]);
+      const slices = makeSlices(pending, perSlice, offset);
+      return slices.map((slice, si) => async () => {
+        const label = `جولة ${pass} دفعة ${r + 1}/${RUNS} شريحة ${si + 1}/${slices.length}`;
+        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r]);
+        const wanted = new Set(slice.map(it => it.id));
+        for (const [id, code] of map) if (wanted.has(id)) runMaps[r].set(id, code);
+      });
     });
+
+    // ندمجها بالتناوب (دفعة1، دفعة2، دفعة3، ...) حتى لو انقطع الوقت تكون كل دفعة أخذت نصيبها
+    const tasks = [];
+    const maxLen = Math.max(...taskLists.map(l => l.length));
+    for (let i = 0; i < maxLen; i++) for (const l of taskLists) if (l[i]) tasks.push(l[i]);
+
+    console.log(`[تحليل الضمائر] جولة ${pass}/${ANNOTATION_PASSES}: ${todo.length} سطر مؤهل × ${RUNS} دفعات → ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${alive}).`);
     await runConcurrentPool(tasks, conc);
+  }
+
+  // التصويت وحفظ النتيجة بالكاش
+  if (todo.length > 0) {
+    const { map: voted, stats } = voteCodes(runMaps);
+    for (const [id, code] of voted) cache.set(id, code);
+    const perRun = runMaps.map(m => m.size).join('/');
+    console.log(`[تصويت الضمائر] رجعت لكل دفعة ${perRun} سطر | إجماع=${stats.unanimous} اختلاف=${stats.split} دفعة وحيدة=${stats.lone} | حروف تحولت U=${stats.lettersToU}`);
   }
 
   // إحصائيات للمراجعة في اللوغ
