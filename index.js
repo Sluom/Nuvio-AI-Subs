@@ -190,6 +190,68 @@ async function mapKitsuToImdb(targetId) {
 }
 
 // ==========================================
+// 3.4 تحويل ترقيم tt:S:E (مواسم) إلى الترقيم المطلق tt:1:ABS
+// مثال: One Piece tt0388629:9:17 -> tt0388629:1:160
+// (مواقع الترجمة تخزّن بعض الأنمي بالرقم المطلق، فلو ما حولنا ترجع النتيجة فارغة)
+// ==========================================
+const absCache = new Map();
+const ABS_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+async function osCount(id) {
+    try {
+        const r = await axios.get(`https://opensubtitles-v3.strem.io/subtitles/series/${id}.json`, { timeout: 8000 });
+        return (r.data && Array.isArray(r.data.subtitles)) ? r.data.subtitles.length : 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
+// يرجع معرف بديل بالترقيم المطلق (tt:1:ABS) أو null إذا ما احتاج/ما لقى
+async function resolveAbsoluteTtId(ttId) {
+    const cached = absCache.get(ttId);
+    if (cached && (Date.now() - cached.time) < ABS_CACHE_TTL) return cached.value;
+
+    const [imdbId, s, e] = ttId.split(':');
+    const season = parseInt(s, 10);
+    const episode = parseInt(e, 10);
+    if (!imdbId || isNaN(season) || isNaN(episode) || season <= 1) return null;
+
+    let result = null;
+    try {
+        // إذا OpenSubtitles عنده ترجمات للترقيم الأصلي، لا نغيّر شي
+        const direct = await osCount(ttId);
+        if (direct > 0) {
+            absCache.set(ttId, { time: Date.now(), value: null });
+            return null;
+        }
+
+        // نحسب الرقم المطلق = عدد حلقات المواسم السابقة + رقم الحلقة
+        const meta = await axios.get(`https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`, {
+            timeout: 8000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const videos = (meta.data && meta.data.meta && meta.data.meta.videos) || [];
+        const before = videos.filter(v => v.season > 0 && v.season < season).length;
+
+        if (before > 0) {
+            const absolute = before + episode;
+            const candidate = `${imdbId}:1:${absolute}`;
+            const n = await osCount(candidate);
+            console.log(`[TT Remap] ${ttId}: حلقات قبل الموسم=${before} -> ${candidate} (OpenSubtitles: ${n} ترجمة)`);
+            if (n > 0) result = candidate;
+        } else {
+            console.log(`[TT Remap] ${ttId}: Cinemeta ما رجّع مواسم سابقة، ما أقدر أحسب الرقم المطلق`);
+        }
+    } catch (err) {
+        console.error(`[TT Remap] فشل لـ ${ttId}: ${err.message}`);
+        return null; // لا نخزّن الفشل
+    }
+
+    absCache.set(ttId, { time: Date.now(), value: result });
+    return result;
+}
+
+// ==========================================
 // 3.5 كاشف ترجمات الصم وضعاف السمع (SDH)
 // ==========================================
 function isHearingImpairedSub(sub) {
@@ -620,6 +682,16 @@ app.get([
                 console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
             } else {
                 console.log(`[Anime Mapper] No mapping found for ${targetId}, using it as-is.`);
+            }
+        }
+
+        // تحويل tt:S:E (ترقيم المواسم) إلى الترقيم المطلق إذا مواقع الترجمة ما تعرف الرقم الأصلي
+        if (!originalKitsuId && /^tt\d+:\d+:\d+$/.test(finalTargetId)) {
+            const alt = await resolveAbsoluteTtId(finalTargetId);
+            if (alt) {
+                console.log(`[TT Remap] Using absolute numbering: ${finalTargetId} -> ${alt}`);
+                finalTargetId = alt;
+                finalType = 'series';
             }
         }
 
