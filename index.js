@@ -65,23 +65,19 @@ const globalTranslationQueue = new RequestQueue(1);
 
 // ==========================================
 // 2.5 مشغّل الترجمة بالخلفية
-//    - إذا نجحت كاملة: تنحفظ نهائياً.
-//    - إذا نقصت أسطر: تنحفظ الترجمة الحالية فوراً (تطلع للمستخدم) ثم يعيد
-//      ترجمة الأسطر الناقصة فقط بجولات إضافية، ويحدّث الكاش كل ما تحسنت.
-//    - إذا فشل التحميل/الاستخراج كلياً: يمسح الكاش، فالضغطة الجاية تعيد المحاولة
-//      (بدل ما تنحفظ رسالة الفشل وكأنها ترجمة جاهزة).
 // ==========================================
 const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, trackNum, label }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label }) {
     translationCache[cacheKey] = { status: 'pending' };
 
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel);
+                // نمرر مفتاح TMDB للـ handler 
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -110,12 +106,10 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
 
 // ==========================================
 // 3. محوّل معرفات الأنمي (Kitsu -> IMDb)
-//    الطريقة 1: خدمة ARM   |   الطريقة 2 (احتياطية): إضافة Kitsu القديمة
 // ==========================================
 const armCache = new Map();
 const ARM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 ساعة
 
-// الطريقة 1: خدمة ARM (arm.haglund.dev)
 async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const cached = armCache.get(kitsuId);
     let data;
@@ -129,7 +123,6 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' }
         });
         data = r.data;
-        // نخزن فقط النتائج المفيدة (التي فيها رقم IMDb)
         if (data && data.imdb) armCache.set(kitsuId, { time: Date.now(), data });
     }
 
@@ -138,7 +131,6 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const imdbId = Array.isArray(data.imdb) ? data.imdb[0] : data.imdb;
     if (!imdbId) return null;
 
-    // الموسم: إن لم تُرجع الخدمة موسماً (مثل ون بيس) نستخدم 1
     let season = data['thetvdb-season'];
     if (season === null || season === undefined) season = data['themoviedb-season'];
     if (season === null || season === undefined) season = 1;
@@ -146,7 +138,6 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     return `${imdbId}:${season}:${kitsuEp}`;
 }
 
-// الطريقة 2 (احتياطية): إضافة Kitsu القديمة
 async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     const kitsuMetaUrl = `https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`;
     const metaRes = await axios.get(kitsuMetaUrl, {
@@ -166,7 +157,6 @@ async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     return null;
 }
 
-// الدالة الرئيسية: تجرّب الطريقة 1 ثم 2، وترجع null إذا فشلتا
 async function mapKitsuToImdb(targetId) {
     const parts = targetId.split(':');
     if (parts.length !== 3) return null;
@@ -204,10 +194,6 @@ async function mapKitsuToImdb(targetId) {
 
 // ==========================================
 // 3.5 كاشف ترجمات الصم وضعاف السمع (SDH / Hearing-Impaired)
-//    يفحص كل الحقول المحتملة (title, id, url, اسم الملف) + الحقل الرسمي
-//    SubHearingImpaired لو كان متوفر أصلاً بالبيانات القادمة من المصدر.
-//    نستخدمه للترتيب (غير SDH أولاً) وليس للاستبعاد النهائي، حتى ما نرجّع
-//    قائمة فاضية لو كل النسخ المتاحة كانت SDH.
 // ==========================================
 function isHearingImpairedSub(sub) {
     if (!sub) return false;
@@ -230,10 +216,7 @@ function isHearingImpairedSub(sub) {
 }
 
 // ==========================================
-// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org (القديم)
-//    منقول حرفياً من نسخة سابقة من نفس الإضافة كانت تنجح فعلياً في جلب ASS.
-//    نفس الآلية بالضبط (fetch العادي، sublanguageid=eng فقط، نفس الـ headers)
-//    بدون أي إضافة أو تخمين، وتعمل بالتوازي مع طلب SRT الرئيسي.
+// 4. جلب ترجمات ASS/SSA الأصلية من OpenSubtitles.org
 // ==========================================
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
@@ -278,7 +261,6 @@ async function fetchLegacyData(url) {
             const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
             const finalExt = isAss ? 'ass' : 'srt';
 
-            // الحقل الرسمي من OpenSubtitles لتحديد نسخ الصم وضعاف السمع - أدق مصدر متوفر
             const isHi = entry.SubHearingImpaired === '1' || entry.SubHearingImpaired === 1 || entry.SubHearingImpaired === true;
 
             results.push({
@@ -356,8 +338,6 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
                 const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
                 const format = isAss ? 'ass' : 'srt';
 
-                // المرآة لا ترجع دائمًا الحقل الرسمي؛ لو موجود نستخدمه، وإلا نعتمد على
-                // فحص نصي على اسم/رابط الملف كخط دفاع ثاني
                 const isHi = s.SubHearingImpaired === '1' || s.SubHearingImpaired === 1 || s.SubHearingImpaired === true
                     || /\bsdh\b/.test(rawName) || /\bhi\b/.test(rawName) || /hearing[\s_-]*impaired/.test(rawName)
                     || /\bsdh\b/.test(rawUrl) || /\bhi\b/.test(rawUrl);
@@ -401,8 +381,6 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
         uniqueSubs.push(sub);
     }
 
-    // ترتيب: النسخ غير SDH تطلع أولاً، وSDH يُستخدم فقط كاحتياطي لو النسخ
-    // النظيفة مش كافية لملء عدد المسارات المطلوب (لا نحذفها نهائيًا)
     uniqueSubs.sort((a, b) => {
         const aHi = isHearingImpairedSub(a) ? 1 : 0;
         const bHi = isHearingImpairedSub(b) ? 1 : 0;
@@ -439,21 +417,21 @@ function getBaseUrl(req) {
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
-    // لو فيه config بالرابط (يعني جاي من زر الإعدادات ⚙️ بإضافة مثبتة مسبقًا)،
-    // نفك تشفيره عشان نعبّي الحقول تلقائيًا بدل ما يبدأ المستخدم من الصفر.
     let existingKeys = [];
     let existingModel = 'gemini-3.1-flash-lite';
+    let existingTmdbKey = '';
+
     if (req.params.config) {
         try {
             const decoded = JSON.parse(decodeURIComponent(req.params.config));
             if (Array.isArray(decoded.keys)) existingKeys = decoded.keys;
             if (decoded.model) existingModel = decoded.model;
+            if (decoded.tmdbKey) existingTmdbKey = decoded.tmdbKey;
         } catch (e) {
             console.error('[Configure] Failed to parse existing config:', e.message);
         }
     }
 
-    // نبني صفوف حقول المفاتيح الموجودة كـ HTML جاهز (أول واحد بدون زر حذف، الباقي معهم زر حذف)
     let keyRowsHtml = '';
     if (existingKeys.length > 0) {
         keyRowsHtml = existingKeys.map((key, i) => {
@@ -504,6 +482,11 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
             
             <div class="input-group" style="margin-top: 20px;">
+                <label>مفتاح TMDB API (اختياري - لمعرفة أسماء وجنس الشخصيات)</label>
+                <input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="${existingTmdbKey.replace(/"/g, '&quot;')}">
+            </div>
+
+            <div class="input-group" style="margin-top: 20px;">
                 <label>نموذج الترجمة (Translation Model)</label>
                 <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
                     <option value="gemini-3.1-flash-lite" ${existingModel === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash Lite</option>
@@ -512,7 +495,6 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                     <option value="gemini-3.6-flash" ${existingModel === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash (beta)</option>
                     <option value="gemini-3.5-flash" ${existingModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (beta)</option>
                     <option value="gemini-2.5-flash" ${existingModel === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash</option>
-
                 </select>
             </div>
 
@@ -550,8 +532,12 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                     return null;
                 }
 
+                const tmdbKey = document.getElementById('tmdb-key').value.trim();
                 const model = document.getElementById('model-select').value;
+                
                 const config = { keys: keys, model: model };
+                if (tmdbKey) config.tmdbKey = tmdbKey; // إضافة مفتاح TMDB للرابط اذا موجود
+                
                 return encodeURIComponent(JSON.stringify(config));
             }
 
@@ -560,11 +546,9 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                 if (!configStr) return;
                 const host = window.location.host;
 
-                // رابط التثبيت المباشر في نوفيو (زي ما كان بالظبط)
                 const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
-
-                // رابط https عادي لنفس الـ config، لعرضه ونسخه يدويًا للفحص (مش بيتنقل ليه تلقائي)
                 const testUrl = window.location.origin + '/' + configStr + '/manifest.json';
+                
                 document.getElementById('test-link-input').value = testUrl;
                 document.getElementById('test-link-box').style.display = 'block';
 
@@ -603,7 +587,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // ==========================================
-// مسار جلب الترجمات (SRT + ASS مع دعم لغات متعددة)
+// مسار جلب الترجمات
 // ==========================================
 app.get([
   '/subtitles/:type/:reqId(*)', 
@@ -613,9 +597,6 @@ app.get([
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    // Express بيفك تشفير req.params.config تلقائيًا (decodeURIComponent)، فلازم نرجّع نشفّره
-    // تاني قبل ما نحطه جوه روابط stream-ai.srt/ass، وإلا الرابط الناتج بيطلع فيه
-    // أحرف JSON خام ({ " : ,) غير مشفّرة وبيبقى رابط مكسور
     const configParamRaw = req.params.config || '';
     const configParam = configParamRaw ? encodeURIComponent(configParamRaw) : '';
     
@@ -630,7 +611,6 @@ app.get([
         let finalTargetId = targetId;
         let finalType = type;
 
-        // === دعم الأنمي: تحويل معرّف Kitsu إلى معرّف IMDb (ARM أولاً ثم الطريقة القديمة) ===
         if (targetId.startsWith('kitsu')) {
             const mapped = await mapKitsuToImdb(targetId);
             if (mapped) {
@@ -642,14 +622,10 @@ app.get([
             }
         }
 
-        // === توحيد النوع: OpenSubtitles يعرف movie و series فقط ===
-        // إذا وصل معرّف tt بنوع anime أو other نحوّله للنوع الصحيح
         if (/^tt\d+/.test(finalTargetId) && finalType !== 'movie' && finalType !== 'series') {
             finalType = finalTargetId.includes(':') ? 'series' : 'movie';
         }
-        // ==========================================================
 
-        // === تجهيز imdbId/season/episode لاستخدامها في جلب ASS بالتوازي مع طلب SRT ===
         let assImdbId = null, assSeason = null, assEpisode = null;
         const idParts = finalTargetId.split(':');
         if (idParts[0] && idParts[0].startsWith('tt')) {
@@ -660,17 +636,13 @@ app.get([
             }
         }
 
-        // [مؤقت] اختبار SubDL بالخلفية: يسجل النتيجة فقط ولا يؤثر على الترجمات
         getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
             .then(list => console.log(`[SubDL Probe] ${finalTargetId} => ${list.length} ترجمة${list.length === 0 ? ' (السبب بالسطر اللي قبل هذا)' : ' ✅ SubDL شغال'}`))
             .catch(e => console.log(`[SubDL Probe] ${finalTargetId} => استثناء غير متوقع: ${e.message}`));
 
-        // جلب الترجمة من المحرك الأساسي والموثوق (SRT) وجلب ASS الأصلي من OpenSubtitles.org
-        // القديم - الاثنان بالتوازي في نفس الوقت (Promise.all) لتقليل زمن الاستجابة
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
 
-        // إذا فشل طلب OpenSubtitles الرئيسي ما نوقف كل شي، نسجل الخطأ ونكمل (وبعدها نجرب SubDL)
         const [r, assResults] = await Promise.all([
             axios.get(osUrl, { timeout: 10000 }).catch(e => {
                 console.log(`[Fetch] OpenSubtitles فشل لـ ${finalTargetId}: ${e.message}`);
@@ -683,16 +655,13 @@ app.get([
         if (r && r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
         console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
 
-        // assOnly يطلع مرتب مسبقاً (غير SDH أولاً) من getOpenSubtitlesEnglish
         const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
         const assHiCount = assOnly.filter(s => isHearingImpairedSub(s)).length;
         console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assHiCount} SDH, pushed to the back)`);
 
-        // === قائمة SRT من OpenSubtitles ===
         let srtSubs = [];
 
         if (subtitlesData.length > 0) {
-            // إضافة اللغات المطلوبة: انجليزي، ياباني، تركي، فارسي، روسي، كوري، فرنسي، اسباني
             const targetLangs = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 
             const validSubs = subtitlesData.filter(s => {
@@ -700,9 +669,6 @@ app.get([
                 return targetLangs.some(l => lang === l || lang.startsWith(l));
             });
 
-            // ترتيب أولوية: النسخ غير SDH أولاً، ونسخ SDH تتنزل لآخر القائمة بدل ما تتشال
-            // نهائيًا - كده لو مفيش نسخ نظيفة كفاية لملء العدد المطلوب، بنستخدم SDH
-            // كحل احتياطي بدل ما نرجّع مسارات فاضية للمستخدم
             const sortedSubs = [...validSubs].sort((a, b) => {
                 const aHi = isHearingImpairedSub(a) ? 1 : 0;
                 const bHi = isHearingImpairedSub(b) ? 1 : 0;
@@ -712,7 +678,6 @@ app.get([
             const cleanCount = sortedSubs.filter(s => !isHearingImpairedSub(s)).length;
             console.log(`[SDH Filter] ${cleanCount}/${sortedSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
 
-            // الفرز لإبقاء SRT واستبعاد أي ملف ASS (نفس المنطق السابق، لكن على القائمة المرتبة)
             srtSubs = sortedSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
@@ -720,7 +685,6 @@ app.get([
             });
         }
 
-        // === احتياطي: SubDL يشتغل إذا OpenSubtitles ما رجّع ترجمة صالحة (أو FORCE_SUBDL=1 للاختبار) ===
         if (srtSubs.length === 0 || FORCE_SUBDL) {
             console.log(FORCE_SUBDL
                 ? `[SubDL] وضع الاختبار FORCE_SUBDL مفعل، أجرب SubDL لـ ${finalTargetId}...`
@@ -744,26 +708,24 @@ app.get([
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
 
-        // إضافة 6 روابط SRT (بدون أي تغيير)
         if (srtSubs.length > 0) {
             for (let i = 0; i < 6; i++) {
-                const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; // تكرار الأخير إذا العدد أقل من 6
+                const sub = srtSubs[i] || srtSubs[srtSubs.length - 1]; 
                 transSubs.push({
                     id: `nuvio-ai-srt-${i+1}`,
-                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}`,
+                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i+1}&id=${finalTargetId}`, // ضفت الـ id حتى نستخدمه لـ tmdb
                     lang: 'ara',
                     title: `Nuvio AI SRT ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
             }
         }
 
-        // إضافة روابط ASS (حتى 4) من نتيجة OpenSubtitles.org القديم اللي جُلبت بالتوازي فوق
         if (assOnly.length > 0) {
             const maxAss = Math.min(4, assOnly.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}&id=${finalTargetId}`, // ضفت الـ id حتى نستخدمه لـ tmdb
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
@@ -786,6 +748,7 @@ app.all([
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     
     const targetUrl = req.query.url;
+    const targetId = req.query.id || ''; // سحبنا الايدي حتى نمرره للـ AI
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
@@ -800,11 +763,14 @@ app.all([
 
     let userKeys = [];
     let userModel = 'gemini-3.1-flash-lite'; 
+    let userTmdbKey = '';
+
     if (req.params.config) {
         try {
             const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
             if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
             if (decodedConfig.model) userModel = decodedConfig.model;
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; // سحب مفتاح TMDB من الرابط
         } catch (e) { }
     }
 
@@ -812,8 +778,9 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationSrtDetailed,
-            targetUrl, userKeys, userModel, trackNum,
-            label: 'SRT'
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, // مررناه هنا
+            label: 'SRT',
+            targetId // ضفته حتى ملف ai.js يعرف رقم الفلم/المسلسل
         });
     }
 
@@ -825,17 +792,16 @@ app.all([
     res.send(fakeSub);
 });
 
-// === مسار بث ترجمات ASS مترجمة - نفس منطق SRT تماماً لكن بدون أي تحويل نوع ===
 app.all([
     '/stream-ai.ass', '/:config/stream-ai.ass'
 ], async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
 
     const targetUrl = req.query.url;
+    const targetId = req.query.id || ''; // سحبنا الايدي حتى نمرره للـ AI
     const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
-    // مفتاح كاش منفصل تماماً عن SRT حتى لو كان نفس الرابط الأصلي بالمصادفة
     const cacheKey = `ASS_${targetUrl}`;
 
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
@@ -847,11 +813,14 @@ app.all([
 
     let userKeys = [];
     let userModel = 'gemini-3.1-flash-lite';
+    let userTmdbKey = '';
+
     if (req.params.config) {
         try {
             const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
             if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
             if (decodedConfig.model) userModel = decodedConfig.model;
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; // سحب مفتاح TMDB من الرابط
         } catch (e) { }
     }
 
@@ -859,8 +828,9 @@ app.all([
         startTranslationJob({
             cacheKey,
             handler: handleTranslationAssDetailed,
-            targetUrl, userKeys, userModel, trackNum,
-            label: 'ASS'
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, // مررناه هنا
+            label: 'ASS',
+            targetId // ضفته حتى ملف ai.js يعرف رقم الفلم/المسلسل
         });
     }
 
