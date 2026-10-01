@@ -306,9 +306,15 @@ async function fetchLegacyData(url) {
             }
         });
 
+        // [DEBUG-1] رمز رد السيرفر القديم
+        console.log(`[Legacy] ${response.status} <- ${url}`);
+
         if (!response.ok) return [];
         const data = await response.json();
         if (!Array.isArray(data)) return [];
+
+        // [DEBUG-2] عدد النتائج وعدد ملفات ASS منها
+        console.log(`[Legacy] رجع ${data.length} نتيجة، منها ASS: ${data.filter(e => /^(ass|ssa)$/i.test(e.SubFormat || '') || /\.(ass|ssa)/i.test(e.SubFileName || '')).length}`);
 
         const results = [];
         data.forEach(entry => {
@@ -337,6 +343,8 @@ async function fetchLegacyData(url) {
         });
         return results;
     } catch (e) {
+        // [DEBUG-3] سبب الفشل
+        console.log('[Legacy] خطأ:', e.message);
         return [];
     }
 }
