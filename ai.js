@@ -2,7 +2,7 @@ const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
-
+const { applyVocativeRules } = require('./genderRules');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
 
