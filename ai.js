@@ -680,7 +680,15 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       }
     }
   }
-
+// قواعد الألقاب (Mom/Dad/Sir/Ma'am...): تصحح أو تكمل جنس المخاطَب بدون أي طلب
+  if (toDo.length > 0) {
+    let ruleFixes = 0;
+    for (const it of toDo) {
+      const adj = applyVocativeRules(cues[it.id].text, it.g);
+      if (adj && adj !== it.g) { it.g = adj; ruleFixes++; }
+    }
+    if (ruleFixes > 0) console.log(`[قواعد الألقاب] عدّلت أو أضفت معلومة الجنس لـ ${ruleFixes} سطر.`);
+  }
   // 2) الترجمة نفسها
   const tTrans = Date.now();
   let pendingChunks = [];
