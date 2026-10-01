@@ -328,8 +328,11 @@ async function fetchLegacyData(url) {
 
             const isHi = entry.SubHearingImpaired === '1' || entry.SubHearingImpaired === 1 || entry.SubHearingImpaired === true;
 
+            // الخدعة السحرية: تحويل الرابط المضغوط إلى نص مباشر حتى يفهمه الذكاء الاصطناعي
+            const directUrl = downloadLink.replace(/\.gz$/i, '') + '.' + finalExt;
+
             results.push({
-                url: downloadLink,
+                url: directUrl,
                 lang: 'eng',
                 format: finalExt,
                 ext: finalExt,
