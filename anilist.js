@@ -1,13 +1,4 @@
-// anilist.js — يجيب أسماء شخصيات الأنمي وأجناسهم من AniList (بدون مفتاح)
-// الاستخدام داخل الكود:
-//   const { getAnilistCast } = require('./anilist');
-//   await getAnilistCast({ kitsuId: 7442 });      // رقم Kitsu (يتحول لرقم MAL تلقائياً)
-//   await getAnilistCast({ malId: 16498 });
-//   await getAnilistCast({ imdbId: 'tt0388629' }); // رقم IMDb (يتحول عبر ARM)
-//   await getAnilistCast({ tvdbId: 81797 });       // رقم TVDB (يتحول عبر ARM)
-//   await getAnilistCast({ title: 'Attack on Titan' });
-// الاختبار لحاله:  node anilist.js kitsu:7442 | mal:16498 | imdb:tt0388629 | tvdb:81797 | "Attack on Titan"
-
+// anilist.js — يجيب أسماء شخصيات الأنمي وأجناسهم من AniList
 const axios = require('axios');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
@@ -56,16 +47,24 @@ async function resolveKitsu(kitsuId) {
 }
 
 // IMDb / TVDB -> رقم AniList + MAL (عن طريق ARM)
-// notFound=true يعني ARM رد وما لقى العمل (غالباً مو أنمي)، error يعني فشل الاتصال
 async function resolveExternal({ imdbId, tvdbId }) {
   const out = { anilistId: null, malId: null, notFound: false, error: null };
   const attempts = [];
   if (imdbId) attempts.push({ source: 'imdb', id: imdbId });
   if (tvdbId) attempts.push({ source: 'thetvdb', id: tvdbId });
+  
   let sawError = false;
   for (const params of attempts) {
     try {
-      const r = await axios.get(ARM_URL, { params, timeout: 8000, httpAgent, httpsAgent });
+      const r = await axios.get(ARM_URL, {
+        params,
+        // التعديل الأول: إضافة الهيدرات الأساسية اللي تمنع رفض الطلب بخطأ 400
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept': 'application/json'
+        },
+        timeout: 8000, httpAgent, httpsAgent
+      });
       let d = r.data || {};
       if (Array.isArray(d)) d = d[0] || {};
       const al = parseInt(d.anilist, 10);
@@ -74,7 +73,12 @@ async function resolveExternal({ imdbId, tvdbId }) {
       if (mal) out.malId = mal;
       if (out.anilistId || out.malId) return out;
     } catch (e) {
-      if (!(e.response && e.response.status === 404)) { sawError = true; out.error = e.message; }
+      if (!(e.response && e.response.status === 404)) {
+        sawError = true;
+        // التعديل الثاني: استخراج رسالة الخطأ الحقيقية من السيرفر وعرضها بدل كلمة status 400
+        const serverMsg = e.response && e.response.data ? JSON.stringify(e.response.data) : e.message;
+        out.error = serverMsg;
+      }
     }
   }
   out.notFound = !sawError;
