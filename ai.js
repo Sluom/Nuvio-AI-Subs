@@ -3,8 +3,17 @@ const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
 const { applyVocativeRules } = require('./genderRules');
-const { getTmdbCast } = require('./tmdb'); // استدعاء TMDB
-const { getAnilistCast } = require('./anilist'); // استدعاء AniList
+const { getTmdbCast } = require('./tmdb'); 
+const { getAnilistCast } = require('./anilist'); 
+
+// ================== استدعاء مكاتب التحليل المحلي (النقطة 1 و 2) ==================
+let nlp, genderDetect;
+try {
+  nlp = require('compromise');
+  genderDetect = require('gender-detection');
+} catch (e) {
+  console.log("[تنبيه] مكتبات (compromise) أو (gender-detection) غير منصبة. تعمل الترجمة بدون التحليل المحلي.");
+}
 
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
@@ -26,9 +35,6 @@ const ASS_DEFAULT_HEADER = [
   ''
 ].join('\n');
 
-// ==================================================================
-// كل المتغيرات (الثوابت) في مكان واحد
-// ==================================================================
 const DEFAULT_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_CLIENT_HEADER = 'stremio-submaker/1.4.94';
 const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
@@ -52,7 +58,6 @@ const ANNOTATION_VOTE_MIN_AGREE = 2;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// ================== نظام المفاتيح - تبريد ذكي ==================
 const keyCooldowns = new Map();
 const deadKeys = new Set();
 let currentKeyIndex = 0;
@@ -133,7 +138,6 @@ function shortErr(e) {
   return String(m).replace(/\s+/g, ' ').slice(0, 140);
 }
 
-// ================== دوال المعالجة ==================
 function fixArabicEncoding(buffer) {
   if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
@@ -226,7 +230,6 @@ function parseRobustJsonArray(raw, expectedLength) {
   return null;
 }
 
-// ================== قراءة الرد بالأرقام (id) ==================
 function parseIdTranslations(raw) {
   if (!raw) return null;
   let clean = String(raw).trim();
@@ -284,7 +287,6 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-// ================== الترجمة الأساسية ==================
 async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
@@ -412,8 +414,6 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
 async function fetchAndExtractSub(subUrl) {
   const decodedUrl = decodeURIComponent(subUrl);
 
-  // روابط OpenSubtitles.org القديمة: نرسل نفس هوية VLSub اللي ينجح بها البحث.
-  // باقي المصادر (SRT / SubDL ...) تبقى بالهوية القديمة بدون أي تغيير.
   const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
   const headers = isOsOrg
     ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
@@ -446,7 +446,6 @@ function prepCueText(t) {
   return t;
 }
 
-// ================== كاش الأسطر ==================
 const lineCaches = new Map();
 const MAX_LINE_CACHES = 40;
 
@@ -463,7 +462,6 @@ function needsTranslation(text) {
   return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
 }
 
-// ================== تحليل المتكلم والمخاطَب ==================
 const annotationCaches = new Map();
 const MAX_ANNOTATION_CACHES = 40;
 
@@ -609,7 +607,8 @@ function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
   return { map, stats };
 }
 
-async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '') {
+// ================== إضافة المحلولات محلياً كفلتر لدالة جلب الضمائر ==================
+async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', localResolved = new Map()) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
 
@@ -620,7 +619,8 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   });
   const eligible = eligibleItems.length;
 
-  const todo = eligibleItems.filter(it => !cache.has(it.id));
+  // استبعاد الأسطر اللي انحسمت محلياً من الإرسال للـ AI لتوفير الـ Tokens والوقت
+  const todo = eligibleItems.filter(it => !cache.has(it.id) && !localResolved.has(it.id));
 
   const RUNS = ANNOTATION_RUN_TEMPS.length;
   const runMaps = Array.from({ length: RUNS }, () => new Map());
@@ -679,7 +679,8 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   const dist = new Map();
   let covered = 0;
   for (const it of eligibleItems) {
-    const code = cache.get(it.id);
+    // الأولوية للمحلول محلياً، ثم للكاش
+    const code = localResolved.get(it.id) || cache.get(it.id);
     if (!code) continue;
     covered++;
     dist.set(code, (dist.get(code) || 0) + 1);
@@ -687,16 +688,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   const distStr = [...dist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}:${v}`).join(' ');
   console.log(`[تحليل الضمائر] النتيجة: ${covered}/${eligible} سطر محلل في ${Date.now() - tStart}ms | التوزيع: ${distStr || 'لا شيء'}`);
 
-  const sampled = eligibleItems.filter(it => cache.has(it.id));
-  if (sampled.length > 0) {
-    const step = Math.max(1, Math.floor(sampled.length / 6));
-    const lines = [];
-    for (let i = 0; i < sampled.length && lines.length < 6; i += step) {
-      const it = sampled[i];
-      lines.push(`#${it.id} "${it.text.slice(0, 45)}" -> ${cache.get(it.id)}`);
-    }
-    console.log(`[تحليل الضمائر] عينة للمراجعة: ${lines.join(' | ')}`);
-  }
   return cache;
 }
 
@@ -715,6 +706,69 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   });
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
 
+  let enhancedCastPrompt = castPromptBlock || '';
+  const localResolved = new Map();
+
+  // ================== تطبيق النقطة 1 و 2 (التحليل النحوي وتخمين الأسماء) ==================
+  if (ENABLE_GENDER_ANALYSIS && toDo.length > 0 && nlp && genderDetect) {
+    const known = new Map();
+    const lines = enhancedCastPrompt.split('\n');
+    for (const l of lines) {
+      const m = l.match(/^(.+?)\s*=\s*(M|F)$/i);
+      if (m) known.set(m[1].trim().toLowerCase(), m[2].toUpperCase());
+    }
+
+    const dynamicNames = new Map();
+    for (const it of toDo) {
+      if (!NEEDS_GENDER.test(it.text)) continue;
+
+      const doc = nlp(it.text);
+      const people = doc.people().out('array');
+
+      // النقطة 2: تخمين أسماء الشخصيات الجانبية الجديدة أوفلاين
+      for (let p of people) {
+        const cleanP = p.replace(/[^\w\s]/g, '').trim().toLowerCase();
+        if (cleanP && cleanP.length > 2 && !known.has(cleanP) && !dynamicNames.has(cleanP)) {
+           const first = cleanP.split(' ')[0];
+           const g = genderDetect.detect(first);
+           if (g === 'male') dynamicNames.set(cleanP, 'M');
+           else if (g === 'female') dynamicNames.set(cleanP, 'F');
+        }
+      }
+
+      // النقطة 1: التحليل النحوي الداخلي لحسم الضمائر مباشرة
+      const hasYou = doc.match('(you|your|yours|yourself)').found;
+      const hasI = doc.match('(i|me|my|mine|myself|i am|im)').found;
+      let addresseeG = 'U', speakerG = 'U';
+
+      // نعالج الجملة فقط إذا احتوت على اسم شخص واحد لضمان عدم الخلط
+      if (people.length === 1) {
+         const pName = people[0].replace(/[^\w\s]/g, '').trim().toLowerCase();
+         const pGen = known.get(pName) || dynamicNames.get(pName);
+         if (pGen) {
+            // إذا الجملة فيها "أنت" وما بيها "أنا" وقصيرة، الاحتمال الأكبر أن الاسم هو للمخاطب (Vocative)
+            if (hasYou && !hasI && it.text.length < 60) addresseeG = pGen;
+            // إذا الجملة "أنا فلان" أو "اسمي فلان"، المتحدث هو الاسم
+            if (doc.match('(i am|im|my name is) #Person').found) speakerG = pGen;
+         }
+      }
+
+      // إذا انحسم أي طرف محلياً، نخزنه حتى نستثنيه من التصويت
+      if (speakerG !== 'U' || addresseeG !== 'U') {
+         localResolved.set(it.id, speakerG + addresseeG);
+      }
+    }
+
+    if (dynamicNames.size > 0) {
+      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (NLP):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
+      console.log(`[تخمين الأسماء] تم تخمين جنس ${dynamicNames.size} أسماء جانبية وإضافتها لسياق الـ AI.`);
+    }
+    if (localResolved.size > 0) {
+      console.log(`[التحليل النحوي] تم حسم الضمائر محلياً لـ ${localResolved.size} سطر واستثنائها من التصويت.`);
+    }
+  }
+  // =====================================================================================
+
   let annotationSummary = 'لم يُستخدم';
   if (toDo.length > 0) {
     if (!ENABLE_GENDER_ANALYSIS) {
@@ -725,10 +779,12 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       try {
         const tA = Date.now();
         const deadline = Date.now() + ANNOTATION_BUDGET_MS;
-        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock);
+        // نمرر الـ Prompt المحسن والمحلولات محلياً لدالة التصويت
+        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, enhancedCastPrompt, localResolved);
+        
         let attached = 0;
         for (const it of toDo) {
-          const g = annotations.get(it.id);
+          const g = localResolved.get(it.id) || annotations.get(it.id);
           if (g && /[MFG]/.test(g)) { it.g = g; attached++; }
         }
         annotationSummary = `أُرفق بـ ${attached} من ${toDo.length} سطر (${Date.now() - tA}ms)`;
@@ -765,7 +821,8 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, castPromptBlock);
+      // نرسل البرومبت المحسن (اللي يحتوي على الأسماء الجانبية) للترجمة النهائية أيضاً
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt);
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
@@ -792,8 +849,6 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   };
 }
 
-// ================== استخراج معرفات tt / tvdb من targetId ==================
-// أمثلة: "tt0388629:1:160" -> imdbId=tt0388629 | "tvdb:81797:1:160" -> tvdbId=81797
 function parseExternalIds(targetId) {
   const s = String(targetId || '').trim();
   const out = { imdbId: null, tvdbId: null };
@@ -808,9 +863,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   let castPromptBlock = '';
   const { imdbId, tvdbId } = parseExternalIds(targetId);
 
-  // ===== فحص الأولوية: (1) Kitsu -> AniList  (2) tt/tvdb -> AniList  (3) TMDB =====
   if (kitsuId) {
-    // الأولوية 1: معرف Kitsu
     console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
     const aniRes = await getAnilistCast({ kitsuId });
     if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
@@ -820,7 +873,6 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
-    // الأولوية 2: معرف tt أو tvdb -> نجرب AniList أولاً (يتحول عبر ARM)
     if (imdbId || tvdbId) {
       console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
       const aniRes = await getAnilistCast({ imdbId, tvdbId });
@@ -832,7 +884,6 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
       }
     }
 
-    // الأولوية 3: TMDB (فقط إذا AniList ما رجع شخصيات)
     if (!castPromptBlock) {
       console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
       const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
@@ -885,9 +936,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   let castPromptBlock = '';
   const { imdbId, tvdbId } = parseExternalIds(targetId);
 
-  // ===== فحص الأولوية: (1) Kitsu -> AniList  (2) tt/tvdb -> AniList  (3) TMDB =====
   if (kitsuId) {
-    // الأولوية 1: معرف Kitsu
     console.log(`[AniList] جاري جلب بيانات الشخصيات للأنمي (Kitsu ID: ${kitsuId})...`);
     const aniRes = await getAnilistCast({ kitsuId });
     if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
@@ -897,7 +946,6 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
-    // الأولوية 2: معرف tt أو tvdb -> نجرب AniList أولاً (يتحول عبر ARM)
     if (imdbId || tvdbId) {
       console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
       const aniRes = await getAnilistCast({ imdbId, tvdbId });
@@ -909,7 +957,6 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
       }
     }
 
-    // الأولوية 3: TMDB (فقط إذا AniList ما رجع شخصيات)
     if (!castPromptBlock) {
       console.log(`[TMDB] جاري جلب بيانات الشخصيات للعمل: ${targetId}...`);
       const tmdbRes = await getTmdbCast(targetId, userTmdbKey);
