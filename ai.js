@@ -409,45 +409,11 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
   return done;
 }
 
-// ================== تحميل مسبق لملفات OpenSubtitles الأصلية ==================
-// روابط dl.opensubtitles.org (فيها vrf) تنتهي بسرعة، فنحمّل الملف فوراً عند ظهور القائمة
-// ونخزنه بالذاكرة، وعند الضغطة نستخدم النسخة المخزنة بدل الرابط المنتهي.
-const OS_PROXY = 'https://os-proxy-seven.vercel.app/download?url=';
-const rawSubCache = new Map();
-const RAW_CACHE_TTL = 30 * 60 * 1000;
-const RAW_CACHE_MAX = 50;
-
-function getRawFromCache(decodedUrl) {
-  const hit = rawSubCache.get(decodedUrl);
-  if (hit && (Date.now() - hit.time) < RAW_CACHE_TTL) return hit.data;
-  if (hit) rawSubCache.delete(decodedUrl);
-  return null;
-}
-
-async function prefetchRawSub(subUrl) {
-  try {
-    const decodedUrl = decodeURIComponent(subUrl);
-    if (!/^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl)) return true;
-    if (getRawFromCache(decodedUrl)) return true;
-
-    const r = await axios.get(OS_PROXY + encodeURIComponent(decodedUrl), {
-      responseType: 'arraybuffer', timeout: 20000
-    });
-    rawSubCache.set(decodedUrl, { time: Date.now(), data: r.data });
-    if (rawSubCache.size > RAW_CACHE_MAX) rawSubCache.delete(rawSubCache.keys().next().value);
-    console.log(`[Prefetch] ✅ ${decodedUrl}`);
-    return true;
-  } catch (e) {
-    console.log(`[Prefetch] ❌ ${e.response?.status || e.code || 'ERR'} <- ${subUrl}`);
-    return false;
-  }
-}
-
 async function fetchAndExtractSub(subUrl) {
   const decodedUrl = decodeURIComponent(subUrl);
 
-  // روابط OpenSubtitles.org القديمة: نمررها عبر فيرسال (os-proxy) لتجنب حظر 403 من ريندر.
-  // باقي المصادر (SRT / SubDL ...) تبقى مباشرة بدون أي تغيير.
+  // روابط OpenSubtitles.org القديمة: نرسل نفس هوية VLSub اللي ينجح بها البحث.
+  // باقي المصادر (SRT / SubDL ...) تبقى بالهوية القديمة بدون أي تغيير.
   const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
   const headers = isOsOrg
     ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
@@ -455,26 +421,15 @@ async function fetchAndExtractSub(subUrl) {
 
   let response;
   try {
-    const cachedRaw = isOsOrg ? getRawFromCache(decodedUrl) : null;
-    if (cachedRaw) {
-      // نسخة محمّلة مسبقاً (الرابط الأصلي قد يكون انتهى)
-      response = { status: 200, data: cachedRaw };
-      console.log(`[Download] من الكاش (محمّل مسبقاً) <- ${decodedUrl}`);
-    } else if (isOsOrg) {
-      // نمرر التحميل عبر فيرسال
-      response = await axios.get(OS_PROXY + encodeURIComponent(decodedUrl), {
-        responseType: 'arraybuffer', timeout: 20000
-      });
-      console.log(`[Download] ${response.status} (Vercel Proxy) <- ${decodedUrl}`);
-    } else {
-      response = await axios.get(decodedUrl, {
-        responseType: 'arraybuffer', timeout: 15000, headers
-      });
-    }
+    response = await axios.get(decodedUrl, {
+      responseType: 'arraybuffer', timeout: 15000,
+      headers
+    });
   } catch (e) {
-    console.log(`[Download] ${e.response?.status || e.code || 'ERR'} ${isOsOrg ? '(Vercel Proxy)' : ''} <- ${decodedUrl}`);
+    if (isOsOrg) console.log(`[Download] ${e.response?.status || e.code || 'ERR'} (VLSub) <- ${decodedUrl}`);
     throw e;
   }
+  if (isOsOrg) console.log(`[Download] ${response.status} (VLSub) <- ${decodedUrl}`);
 
   let buffer = Buffer.from(response.data);
   if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
@@ -1011,6 +966,5 @@ module.exports = {
   normalizeLineBreakArtifacts,
   parseRobustJsonArray,
   parseIdTranslations,
-  translateItemsWithRecovery,
-  prefetchRawSub
+  translateItemsWithRecovery
 };
