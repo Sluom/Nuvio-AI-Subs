@@ -427,8 +427,8 @@ function getRawFromCache(decodedUrl) {
 async function prefetchRawSub(subUrl) {
   try {
     const decodedUrl = decodeURIComponent(subUrl);
-    if (!/^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl)) return;
-    if (getRawFromCache(decodedUrl)) return;
+    if (!/^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl)) return true;
+    if (getRawFromCache(decodedUrl)) return true;
 
     const r = await axios.get(OS_PROXY + encodeURIComponent(decodedUrl), {
       responseType: 'arraybuffer', timeout: 20000
@@ -436,8 +436,10 @@ async function prefetchRawSub(subUrl) {
     rawSubCache.set(decodedUrl, { time: Date.now(), data: r.data });
     if (rawSubCache.size > RAW_CACHE_MAX) rawSubCache.delete(rawSubCache.keys().next().value);
     console.log(`[Prefetch] ✅ ${decodedUrl}`);
+    return true;
   } catch (e) {
     console.log(`[Prefetch] ❌ ${e.response?.status || e.code || 'ERR'} <- ${subUrl}`);
+    return false;
   }
 }
 
