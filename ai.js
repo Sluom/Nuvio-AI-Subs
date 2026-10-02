@@ -47,7 +47,7 @@ const ENABLE_GENDER_ANALYSIS = true;
 
 // موديل التحليل (أقوى من موديل الترجمة). تقدر تغيره من Environment بمتغير ANNOTATION_MODEL.
 // إذا الموديل غير صالح يرجع تلقائياً لموديل الترجمة.
-const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || 'gemini-flash-latest').trim();
+const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || 'gemini-3.1-flash-lite').trim();
 const ANNOTATION_BUDGET_MS = 75000;          // الميزانية الزمنية الكلية للتحليل (طلب أول + إعادة U)
 const ANNOTATION_SLICE_SIZE = 200;           // أسطر "الجوهر" بكل طلب
 const ANNOTATION_OVERLAP = 8;                // أسطر سياق قراءة فقط قبل وبعد كل شريحة
