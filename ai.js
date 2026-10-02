@@ -56,6 +56,9 @@ const ANNOTATION_RUN_TEMPS = [0.1, 0.1, 0.1];
 const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];
 const ANNOTATION_VOTE_MIN_AGREE = 2;
 
+// عدد أسطر السياق (للقراءة فقط) قبل وبعد كل دفعة ترجمة
+const CONTEXT_LINES = 4;
+
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const keyCooldowns = new Map();
@@ -287,11 +290,40 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '') {
+// ================== سياق الدفعة (قراءة فقط): أسطر قبل وبعد الدفعة من الملف الأصلي ==================
+function buildChunkContext(cues, chunk) {
+  if (!chunk || !chunk.length) return { before: [], after: [] };
+  const first = chunk[0].id;
+  const last = chunk[chunk.length - 1].id;
+  const grab = (from, to) => {
+    const out = [];
+    for (let i = Math.max(0, from); i < Math.min(cues.length, to); i++) {
+      const t = cleanForAnalysis(cues[i].text);
+      if (t) out.push(t);
+    }
+    return out;
+  };
+  return {
+    before: grab(first - CONTEXT_LINES, first),
+    after: grab(last + 1, last + 1 + CONTEXT_LINES)
+  };
+}
+
+async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '', ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
+
+  const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
+    ? `
+15. CONTEXT (READ-ONLY): The lines below are NOT part of the content to translate. Use them ONLY to understand sentences that continue across entries, who is speaking, and references to people/places/objects.
+   - NEVER translate, modify, or output any context line.
+   - Do NOT apply any formatting rule (parentheses, quotation marks, brackets, narration quotes) to context lines.
+context_before: ${JSON.stringify(ctx.before)}
+context_after: ${JSON.stringify(ctx.after)}
+`
+    : '';
 
   const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a two-letter hint code.
 "g" = first letter is the SPEAKER's gender, second letter is the gender of the person being ADDRESSED. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
@@ -313,7 +345,7 @@ Translate the "text" of every entry to Arabic while:
 12. EPILOGUES & LONG TEXTS: Never ignore, skip, or summarize long blocks of on-screen text. Translate them completely and accurately.
 13. FOREIGN LANGUAGES: If dialogue is in a third language or has a tag (e.g., [speaks Spanish]), translate BOTH the tag and the actual meaning entirely into Arabic (e.g., [يتحدث الإسبانية] يا صديقي). Leave NO English or foreign text behind.
 14. PROFANITY: Translate swear words into standard cinematic Arabic equivalents without literal awkwardness.
-${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
+${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}${ctxBlock}
 Do NOT overthink. Do NOT overplan.
 Do NOT include acknowledgements, explanations, notes or alternative translations.
 Output ONLY A VALID JSON ARRAY OF OBJECTS {"id","text"}, nothing else.
@@ -376,14 +408,14 @@ ${JSON.stringify(items)}`;
   return { status: 'api_exhausted', map: new Map() };
 }
 
-async function translateItemsWithRecovery(items, keysArray, modelName, castPromptBlock = '') {
+async function translateItemsWithRecovery(items, keysArray, modelName, castPromptBlock = '', ctx = null) {
   const done = new Map();
   if (!items || items.length === 0) return done;
 
   let pending = items;
 
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await translateChunkStrict(pending, keysArray, modelName, castPromptBlock);
+    const result = await translateChunkStrict(pending, keysArray, modelName, castPromptBlock, ctx);
 
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
@@ -821,8 +853,10 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
+      // سياق قراءة فقط (قبل/بعد الدفعة) من الملف الأصلي لحل الجمل المقطوعة بين الدفعات
+      const ctx = buildChunkContext(cues, chunk);
       // نرسل البرومبت المحسن (اللي يحتوي على الأسماء الجانبية) للترجمة النهائية أيضاً
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt);
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx);
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
