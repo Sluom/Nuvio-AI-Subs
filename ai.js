@@ -411,10 +411,26 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
 
 async function fetchAndExtractSub(subUrl) {
   const decodedUrl = decodeURIComponent(subUrl);
-  const response = await axios.get(decodedUrl, {
-    responseType: 'arraybuffer', timeout: 15000,
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' }
-  });
+
+  // روابط OpenSubtitles.org القديمة: نرسل نفس هوية VLSub اللي ينجح بها البحث.
+  // باقي المصادر (SRT / SubDL ...) تبقى بالهوية القديمة بدون أي تغيير.
+  const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
+  const headers = isOsOrg
+    ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
+    : { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' };
+
+  let response;
+  try {
+    response = await axios.get(decodedUrl, {
+      responseType: 'arraybuffer', timeout: 15000,
+      headers
+    });
+  } catch (e) {
+    if (isOsOrg) console.log(`[Download] ${e.response?.status || e.code || 'ERR'} (VLSub) <- ${decodedUrl}`);
+    throw e;
+  }
+  if (isOsOrg) console.log(`[Download] ${response.status} (VLSub) <- ${decodedUrl}`);
+
   let buffer = Buffer.from(response.data);
   if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
