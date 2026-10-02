@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed, prefetchRawSub } = require('./ai');
 const { getSubDLEnglish } = require('./subdl');
 
 const app = express();
@@ -815,6 +815,9 @@ app.get([
                 });
             }
             console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
+
+            // تحميل مسبق: نحمّل ملفات ASS الأصلية بالخلفية فوراً (روابط OpenSubtitles تنتهي بسرعة)
+            for (let i = 0; i < maxAss; i++) prefetchRawSub(assOnly[i].url);
         } else {
             console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
         }
@@ -928,6 +931,34 @@ app.all([
     res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-ASS.ass"`);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(fakeSub);
+});
+
+// ==========================================
+// مسار فحص بالمتصفح (بدون Nuvio): يفتح مسار ASS رقم n لحلقة معينة
+// مثال: /{config}/test-ass/tt2560140:1:1?n=1
+// ==========================================
+app.get('/:config/test-ass/:id', async (req, res) => {
+    try {
+        const n = parseInt(req.query.n || '1', 10);
+        const host = req.headers['x-forwarded-host'] || req.headers.host;
+        const proto = req.headers['x-forwarded-proto'] || 'https';
+        const listUrl = `http://127.0.0.1:${PORT}/${encodeURIComponent(req.params.config)}/subtitles/series/${encodeURIComponent(req.params.id)}.json`;
+
+        const r = await axios.get(listUrl, {
+            timeout: 30000,
+            headers: { 'x-forwarded-host': host, 'x-forwarded-proto': proto }
+        });
+        const list = (r.data && r.data.subtitles) || [];
+        const sub = list.find(s => s.id === `nuvio-ai-ass-${n}`);
+        if (!sub) {
+            return res.status(404).send(`ما لقيت مسار ASS رقم ${n} لهذه الحلقة (عدد مسارات ASS المتوفرة: ${list.filter(s => /ass/.test(s.id)).length})`);
+        }
+        console.log(`[Test-ASS] ${req.params.id} n=${n} -> redirect`);
+        return res.redirect(sub.url);
+    } catch (e) {
+        console.error('[Test-ASS] خطأ:', e.message);
+        return res.status(500).send('Test failed: ' + e.message);
+    }
 });
 
 app.listen(PORT, () => {
