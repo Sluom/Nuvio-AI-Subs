@@ -261,7 +261,8 @@ function matchEpisode(fileName, targetEpisode) {
 async function fetchLegacyData(url) {
     try {
         // ⚠️⚠️⚠️ انتباه: حط رابط Vercel مالتك اللي نسخته هنا بمكان هذا الرابط ⚠️⚠️⚠️
-        const VERCEL_APP_URL = 'https://os-proxy-seven.vercel.app
+        const VERCEL_APP_URL = 'https://os-proxy-seven.vercel.app';
+ 
         
         // 1. نطلب البحث عبر مسار /search ببروكسي Vercel
         const proxySearchUrl = `${VERCEL_APP_URL}/search?url=${encodeURIComponent(url)}`;
