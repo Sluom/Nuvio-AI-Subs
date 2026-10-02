@@ -42,19 +42,23 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_MISSING_RETRIES = 3;
 const MAX_RETRY_PASSES = 4;
 
+// ================== إعدادات تحليل الجنس (Patch 1) ==================
 const ENABLE_GENDER_ANALYSIS = true;
-const ANNOTATION_MIN_COVERAGE = 0.95;
-const ANNOTATION_BUDGET_MS = 30000;
-const ANNOTATION_SLICE_SIZE = 300;
-const ANNOTATION_MIN_SLICE = 150;
-const ANNOTATION_MAX_CONCURRENCY = 6;
-const ANNOTATION_PASSES = 3;
-const ANNOTATION_REQUEST_TIMEOUT_MS = 30000;
-const ANNOTATION_ATTEMPTS = 3;
 
-const ANNOTATION_RUN_TEMPS = [0.1, 0.1, 0.1];
-const ANNOTATION_RUN_OFFSET_FRACS = [0, 1 / 3, 2 / 3];
-const ANNOTATION_VOTE_MIN_AGREE = 2;
+// موديل التحليل (أقوى من موديل الترجمة). تقدر تغيره من Environment بمتغير ANNOTATION_MODEL.
+// إذا الموديل غير صالح يرجع تلقائياً لموديل الترجمة.
+const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || 'gemini-flash-latest').trim();
+const ANNOTATION_BUDGET_MS = 75000;          // الميزانية الزمنية الكلية للتحليل (طلب أول + إعادة U)
+const ANNOTATION_SLICE_SIZE = 200;           // أسطر "الجوهر" بكل طلب
+const ANNOTATION_OVERLAP = 8;                // أسطر سياق قراءة فقط قبل وبعد كل شريحة
+const ANNOTATION_MAX_CONCURRENCY = 8;
+const ANNOTATION_REQUEST_TIMEOUT_MS = 60000;
+const ANNOTATION_ATTEMPTS = 3;
+const ANNOTATION_TEMPERATURE = 0.1;
+const SCENE_BREAK_SECONDS = 4;               // فجوة أكبر من هذا = غالباً مشهد جديد
+const RESCUE_CONTEXT = 10;                   // ±10 أسطر لإعادة الأسطر اللي رجعت U
+const RESCUE_MAX_ASK = 80;                   // أقصى عدد أسطر مطلوبة بطلب إعادة واحد
+const RESCUE_MAX_SPAN = 250;                 // أقصى امتداد (بالأسطر) لنافذة إعادة واحدة
 
 // عدد أسطر السياق (للقراءة فقط) قبل وبعد كل دفعة ترجمة
 const CONTEXT_LINES = 4;
@@ -64,6 +68,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const keyCooldowns = new Map();
 const deadKeys = new Set();
 let currentKeyIndex = 0;
+let annotationModelBroken = false;
 
 function normalizeGeminiModelId(m) {
   return String(m || '').trim().replace(/^models\//, '');
@@ -89,6 +94,15 @@ function isGeminiAuthFailure(e) {
   if (s !== 400) return false;
   const msg = String(e?.response?.data?.error?.message || '').toLowerCase();
   return msg.includes('api key') && (msg.includes('invalid') || msg.includes('not valid') || msg.includes('permission'));
+}
+
+// خطأ إعداد (موديل غير موجود / معامل thinking غير مدعوم): ما نبرّد المفتاح، ونرجع للموديل الاحتياطي
+function isGeminiConfigError(e) {
+  const s = e?.response?.status;
+  if (s === 404) return true;
+  if (s !== 400) return false;
+  const msg = String(e?.response?.data?.error?.message || '').toLowerCase();
+  return /thinking|thought|model|unsupported|not supported|not found/.test(msg);
 }
 
 function getDynamicChunkSize(modelName) {
@@ -325,8 +339,8 @@ context_after: ${JSON.stringify(ctx.after)}
 `
     : '';
 
-  const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a two-letter hint code.
-"g" = first letter is the SPEAKER's gender, second letter is the gender of the person being ADDRESSED. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
+  const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a hint code.
+"g" = two letters: the first letter is the SPEAKER's gender, the second letter is the gender of the person being ADDRESSED. If the entry holds several speaker turns (lines starting with "-"), "g" has one two-letter code per turn, separated by "/", in the same order as the turns (for example "FM/MF"): apply each code only to its own turn. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
 Translate the "text" of every entry to Arabic while:
 1. Returning a JSON array of objects in the exact same shape: [{"id": <same number>, "text": "<Arabic translation>"}].
    - Return exactly ONE object for EVERY input id, using the SAME id. Never merge entries, never split an entry, never skip an entry, never invent ids.
@@ -505,7 +519,8 @@ function getAnnotationCache(key) {
   return annotationCaches.get(key);
 }
 
-const NEEDS_GENDER = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
+// الفلتر القديم (ضمائر إنجليزية): ما عاد يتحكم بتحليل الـ AI. يبقى فقط للتحليل النحوي المحلي لأنه إنجليزي.
+const ENGLISH_PRONOUNS = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
 
 const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
@@ -543,6 +558,10 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
         console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status}) ${shortErr(e)}`);
         continue;
       }
+      if (isGeminiConfigError(e)) {
+        console.log(`[إعداد موديل] ${cleanModel} (status:${status}) ${shortErr(e)}`);
+        return { status: 'config_error', text: '' };
+      }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErr(e)}`);
@@ -550,17 +569,6 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
     }
   }
   return { status: 'api_exhausted', text: '' };
-}
-
-function parseAnnotationCodes(raw) {
-  const map = new Map();
-  if (!raw) return map;
-  const re = /(\d+)\s*[:=]\s*([MFGUNmfgun])\s*([MFGUNmfgun])/g;
-  let m;
-  while ((m = re.exec(String(raw))) !== null) {
-    map.set(Number(m[1]), (m[2] + m[3]).toUpperCase());
-  }
-  return map;
 }
 
 function cleanForAnalysis(t) {
@@ -571,154 +579,295 @@ function cleanForAnalysis(t) {
     .trim();
 }
 
-async function annotateSlice(items, keysArray, modelName, deadline, sliceLabel, temperature = 0.1, castPromptBlock = '') {
-  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  const generationConfig = { temperature, responseMimeType: 'application/json' };
-  if (isGemini3Model(cleanModel)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
+// ==================================================================================
+// ================== Patch 1: تحليل الضمائر على كل الأسطر وبأي لغة ==================
+// ==================================================================================
 
-  const prompt = `You will receive numbered subtitle lines from one film or episode, in order, as a JSON array of {"id","text"}. Some lines of the story are not included; that is expected.
-Read the whole story first. Then, for EVERY line, work out WHO IS SPEAKING and WHO IS BEING ADDRESSED, and output only their genders.
-Codes: M = male, F = female, G = group or mixed, U = unknown, N = none (narration, on-screen text, sound effects, or speaking to oneself or the audience).
-Answer with TWO letters per line: first the speaker's gender, then the addressee's gender. Examples: "FM" = a woman speaking to a man, "MG" = a man speaking to a group, "UU" = cannot tell.
-Use the story: character names, titles (sir, ma'am, mother, king...), words like "he said"/"she said", who was just spoken to, and the alternation of dialogue. If a single line contains two speakers (lines starting with "-"), answer "UU". If you are not reasonably sure, answer U for that side. Do not guess randomly.
-${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
-Output ONLY a valid JSON array of strings, exactly one string per input id, in the same order, each formatted "<id>:<two letters>", for example ["0:UU","1:FM","2:MF"]. No explanations.
-Lines:
-${JSON.stringify(items)}`;
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  const t0 = Date.now();
-  const res = await callGeminiText({
-    prompt, keysArray, modelName: cleanModel, generationConfig,
-    timeout: ANNOTATION_REQUEST_TIMEOUT_MS, attempts: ANNOTATION_ATTEMPTS, deadline
-  });
-  if (res.status !== 'ok') {
-    console.log(`[تحليل الضمائر] ${sliceLabel}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
-    return new Map();
+// نداء صريح فقط: "Harry, ..." أو "..., Harry." (مو أي اسم موجود بالجملة)
+function isVocativeName(text, name) {
+  const n = escapeRe(name).replace(/\s+/g, '\\s+');
+  const start = new RegExp(`^\\W*(?:(?:hey|oh|ok|okay|look|listen|please|yes|no|well|come on)\\s*,?\\s+)?${n}\\s*[,!?:]`, 'i');
+  const end = new RegExp(`,\\s*${n}\\s*[.!?…"]*\\s*$`, 'i');
+  return start.test(String(text || '')) || end.test(String(text || ''));
+}
+
+// "H:MM:SS.cc" -> ثواني
+function assTimeToSec(t) {
+  const m = String(t || '').match(/(\d+):(\d{2}):(\d{2})[.,](\d{1,3})/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10) + parseFloat('0.' + m[4]);
+}
+
+function fmtClock(sec) {
+  if (sec == null) return '';
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// يقسم السطر لأدوار متكلمين: كل سطر يبدأ بشرطة = متكلم جديد
+function splitTurns(rawText) {
+  const lines = String(rawText || '')
+    .replace(/\{[^}]*\}|<[^>]*>/g, '')
+    .split(/\\N|\\n|\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return [lines.join(' ')];
+  const isDash = l => /^[-–—]/.test(l);
+  const dashCount = lines.filter(isDash).length;
+  if (dashCount === 0) return [lines.join(' ')];
+  if (dashCount === 1 && isDash(lines[0])) return [lines.join(' ')];
+  const turns = [];
+  for (const l of lines) {
+    if (isDash(l) || turns.length === 0) turns.push(l);
+    else turns[turns.length - 1] += ' ' + l;
   }
-  const map = parseAnnotationCodes(res.text);
-  console.log(`[تحليل الضمائر] ${sliceLabel}: رجع ${map.size} من ${items.length} سطر في ${Date.now() - t0}ms.`);
+  return turns;
+}
+
+// كل الأسطر اللي تحتاج ترجمة، بالترتيب، مع الوقت وعلامة فاصل المشهد وعدد أدوار المتكلمين
+function buildAnnotationItems(cues) {
+  const items = [];
+  const turnsById = new Map();
+  let prevEnd = null;
+  cues.forEach((c, i) => {
+    const s = assTimeToSec(c.start);
+    const e = assTimeToSec(c.end);
+    if (needsTranslation(c.text)) {
+      const turns = splitTurns(c.text);
+      const text = turns.join(' ⏎ ');
+      if (text.trim()) {
+        const it = { id: i, t: fmtClock(s), text };
+        if (prevEnd != null && s != null && s - prevEnd > SCENE_BREAK_SECONDS) it.b = 1;
+        if (turns.length > 1) it.turns = turns.length;
+        items.push(it);
+        turnsById.set(i, turns.length);
+      }
+    }
+    if (e != null) prevEnd = e;
+  });
+  return { items, turnsById };
+}
+
+// "12:FM" أو "12:FM/MF" (كود لكل دور متكلم)
+function parseAnnotationCodes(raw) {
+  const map = new Map();
+  if (!raw) return map;
+  const re = /(\d+)\s*[:=]\s*([MFGUN]{2}(?:\s*\/\s*[MFGUN]{2})*)(?![A-Za-z0-9])/gi;
+  let m;
+  while ((m = re.exec(String(raw))) !== null) {
+    map.set(Number(m[1]), m[2].toUpperCase().replace(/\s+/g, ''));
+  }
   return map;
 }
 
-function makeSlices(items, perSlice, offset) {
-  const slices = [];
-  let start = 0;
-  let len = offset > 0 ? offset : perSlice;
-  while (start < items.length) {
-    slices.push(items.slice(start, start + len));
-    start += len;
-    len = perSlice;
-  }
-  if (slices.length > 1 && slices[slices.length - 1].length < ANNOTATION_MIN_SLICE / 2) {
-    const tail = slices.pop();
-    slices[slices.length - 1] = slices[slices.length - 1].concat(tail);
-  }
-  return slices;
+// يتأكد إن عدد الأكواد = عدد الأدوار، وإلا يرجع null (يعتبر ناقص)
+function normalizeCode(raw, turns) {
+  if (!raw) return null;
+  const segs = String(raw).toUpperCase().split('/').map(s => s.trim());
+  if (segs.length !== (turns || 1)) return null;
+  if (!segs.every(s => /^[MFGUN]{2}$/.test(s))) return null;
+  return segs.join('/');
 }
 
-function voteCodes(maps, minAgree = ANNOTATION_VOTE_MIN_AGREE) {
-  const map = new Map();
-  const stats = { unanimous: 0, split: 0, lettersToU: 0, lone: 0 };
-  const ids = new Set(maps.flatMap(m => [...m.keys()]));
-  for (const id of ids) {
-    const codes = maps.map(m => m.get(id)).filter(Boolean);
-    if (codes.length === 0) continue;
-    if (codes.length === 1) { map.set(id, codes[0]); stats.lone++; continue; }
-
-    let code = '';
-    for (let i = 0; i < 2; i++) {
-      const counts = new Map();
-      for (const c of codes) counts.set(c[i], (counts.get(c[i]) || 0) + 1);
-      const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (n >= minAgree) code += best;
-      else { code += 'U'; stats.lettersToU++; }
+// يعبي حروف U في base من extra (ما يغيّر أي حرف محسوم)
+function mergeCodes(base, extra) {
+  if (!extra) return base;
+  if (!base) return extra;
+  const b = String(base).split('/');
+  const e = String(extra).split('/');
+  if (b.length !== e.length) return base;
+  return b.map((seg, i) => {
+    let out = '';
+    for (let k = 0; k < 2; k++) {
+      out += (seg[k] === 'U' && e[i][k] && e[i][k] !== 'U') ? e[i][k] : seg[k];
     }
-    map.set(id, code);
-    if (codes.every(c => c === code)) stats.unanimous++; else stats.split++;
-  }
-  return { map, stats };
+    return out;
+  }).join('/');
 }
 
-// ================== إضافة المحلولات محلياً كفلتر لدالة جلب الضمائر ==================
-async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', localResolved = new Map()) {
+function makeCoreRanges(n, size) {
+  const ranges = [];
+  let start = 0;
+  while (start < n) {
+    let end = Math.min(n, start + size);
+    if (n - end < Math.floor(size / 3)) end = n;
+    ranges.push([start, end]);
+    start = end;
+  }
+  return ranges;
+}
+
+function annotationConfig(model, baseModel) {
+  const cfg = { temperature: ANNOTATION_TEMPERATURE, responseMimeType: 'application/json' };
+  if (isGemini3Model(model)) cfg.thinkingConfig = { thinkingLevel: model === baseModel ? 'minimal' : 'low' };
+  return cfg;
+}
+
+function buildAnnotationPrompt(windowItems, mode, castPromptBlock) {
+  const scope = mode === 'rescue'
+    ? `Answer ONLY for items with "ask":1. Every other item is read-only context. "p" is the code an earlier, less careful pass gave (U = that side was not decided). "p" codes on context items are usually right: use them as evidence about who is in the conversation. For "ask" items, re-read the surrounding lines carefully before answering U.`
+    : `Items with "ctx":1 are read-only context from the neighbouring parts of the story: never answer for them. Answer for every other item.`;
+
+  return `You will receive consecutive subtitle lines from ONE film or episode, in story order, as a JSON array of objects {"id": <number>, "t": "<m:ss start time>", "text": "<subtitle text>"}.
+Optional fields: "b":1 = a pause of several seconds before this line (often a new scene or a change of speakers); "turns": N = the text holds N speaker turns separated by "⏎"; "ctx":1 = read-only context; "p" = code from an earlier pass; "ask":1 = answer this item.
+The subtitles can be in ANY language. Read the story first.
+For each item you must answer, work out WHO IS SPEAKING and WHO IS BEING ADDRESSED, and output only their genders.
+Codes: M = male, F = female, G = group or mixed, U = unknown, N = none (narration, on-screen text, sound effects, or the person talks to themselves or to the audience).
+Answer with TWO letters per line: first the speaker's gender, then the addressee's gender. "FM" = a woman speaking to a man, "MG" = a man speaking to a group, "UU" = cannot tell.
+If an item has "turns": N, give N codes separated by "/", one per turn in order (each turn usually starts with "-"), for example "FM/MF".
+Evidence to use:
+- names, titles and forms of address (sir, ma'am, mother, king, senhora, señor...), and who was just spoken to
+- grammatical gender inside the line itself, in languages where adjectives and participles agree with the speaker or the listener (for example Portuguese "obrigada" = a woman is speaking, "obrigado" = a man; "cansada"/"cansado"; Spanish "estoy cansada"; French "je suis fatiguée"; Russian "я устала" / "я устал")
+- "he said" / "she said", the alternation of replies in a conversation, and pauses
+Use the whole conversation, not only the single line. If you are not reasonably sure about one side, answer U for that side. Do not guess randomly.
+${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
+${scope}
+Output ONLY a valid JSON array of strings, exactly one string per item you must answer, in the same order, each formatted "<id>:<codes>", for example ["12:UU","13:FM","14:MF/FM"]. No explanations.
+Lines:
+${JSON.stringify(windowItems)}`;
+}
+
+// طلب تحليل واحد (شريحة أو نافذة إعادة). يرجع Map(id -> كود خام)
+async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock }) {
+  const baseModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const prompt = buildAnnotationPrompt(windowItems, mode, castPromptBlock);
+  const t0 = Date.now();
+
+  let model = (!annotationModelBroken && ANNOTATION_MODEL) ? normalizeGeminiModelId(ANNOTATION_MODEL) : baseModel;
+  const call = m => callGeminiText({
+    prompt, keysArray, modelName: m, generationConfig: annotationConfig(m, baseModel),
+    timeout: ANNOTATION_REQUEST_TIMEOUT_MS, attempts: ANNOTATION_ATTEMPTS, deadline
+  });
+
+  let res = await call(model);
+  if (res.status === 'config_error' && model !== baseModel) {
+    annotationModelBroken = true;
+    console.log(`[تحليل الضمائر] موديل التحليل (${model}) غير صالح. أرجع لموديل الترجمة (${baseModel}) لباقي الطلبات.`);
+    model = baseModel;
+    res = await call(model);
+  }
+
+  if (res.status !== 'ok') {
+    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
+    return new Map();
+  }
+  const map = parseAnnotationCodes(res.text);
+  console.log(`[تحليل الضمائر] ${label}: رجع ${map.size} كود من ${windowItems.length} سطر في ${Date.now() - t0}ms (${model}).`);
+  return map;
+}
+
+// الجولة الأولى: كل الأسطر بالتسلسل بشرائح مع تداخل. الجولة الثانية: إعادة الأسطر اللي فيها U فقط بسياق ±10 وبأكواد الجولة الأولى.
+// localHints = أدلة محلية، تملأ فقط الحروف اللي بقيت U (ما تغيّر أي حرف حسمه الـ AI).
+async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', localHints = new Map()) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
 
-  const eligibleItems = [];
-  cues.forEach((c, i) => {
-    if (!NEEDS_GENDER.test(c.text)) return;
-    eligibleItems.push({ id: i, text: cleanForAnalysis(c.text) });
-  });
-  const eligible = eligibleItems.length;
+  const { items, turnsById } = buildAnnotationItems(cues);
+  const posById = new Map(items.map((it, i) => [it.id, i]));
+  const pending = items.filter(it => !cache.has(it.id));
+  const coded = new Map();
+  const defaultCode = id => Array(turnsById.get(id) || 1).fill('UU').join('/');
+  const conc = Math.max(1, Math.min(aliveKeyCount(keysArray), ANNOTATION_MAX_CONCURRENCY));
 
-  // استبعاد الأسطر اللي انحسمت محلياً من الإرسال للـ AI لتوفير الـ Tokens والوقت
-  const todo = eligibleItems.filter(it => !cache.has(it.id) && !localResolved.has(it.id));
-
-  const RUNS = ANNOTATION_RUN_TEMPS.length;
-  const runMaps = Array.from({ length: RUNS }, () => new Map());
-  const alive = aliveKeyCount(keysArray);
-  const conc = Math.max(1, Math.min(alive, ANNOTATION_MAX_CONCURRENCY));
-  const concPerRun = Math.max(1, Math.floor(conc / RUNS));
-
-  for (let pass = 1; todo.length > 0 && pass <= ANNOTATION_PASSES; pass++) {
-    const pendingPerRun = runMaps.map(m => todo.filter(it => !m.has(it.id)));
-    const worst = Math.max(...pendingPerRun.map(p => p.length));
-
-    if (worst <= todo.length * (1 - ANNOTATION_MIN_COVERAGE)) {
-      console.log(`[تحليل الضمائر] التغطية كافية بكل الدفعات (أسوأ دفعة ناقصها ${worst} من ${todo.length}), أكتفي بالموجود.`);
-      break;
-    }
-    if (deadline - Date.now() <= 3000) {
-      console.log(`[تحليل الضمائر] انتهت الميزانية الزمنية (${ANNOTATION_BUDGET_MS}ms)، أكمل بما تحلل.`);
-      break;
-    }
-
-    const taskLists = pendingPerRun.map((pending, r) => {
-      if (pending.length === 0) return [];
-      const perSlice = Math.min(ANNOTATION_SLICE_SIZE, Math.max(ANNOTATION_MIN_SLICE, Math.ceil(pending.length / concPerRun)));
-      const offset = Math.round(perSlice * ANNOTATION_RUN_OFFSET_FRACS[r]);
-      const slices = makeSlices(pending, perSlice, offset);
-      return slices.map((slice, si) => async () => {
-        const label = `جولة ${pass} دفعة ${r + 1}/${RUNS} شريحة ${si + 1}/${slices.length}`;
-        const map = await annotateSlice(slice, keysArray, modelName, deadline, label, ANNOTATION_RUN_TEMPS[r], castPromptBlock);
-        const wanted = new Set(slice.map(it => it.id));
-        for (const [id, code] of map) if (wanted.has(id)) runMaps[r].set(id, code);
+  // ---------- الجولة الأولى ----------
+  if (pending.length > 0) {
+    const ranges = makeCoreRanges(items.length, ANNOTATION_SLICE_SIZE);
+    const tasks = [];
+    ranges.forEach(([a, b], ri) => {
+      const core = items.slice(a, b);
+      if (core.every(it => cache.has(it.id))) return;
+      const from = Math.max(0, a - ANNOTATION_OVERLAP);
+      const to = Math.min(items.length, b + ANNOTATION_OVERLAP);
+      const windowItems = items.slice(from, to).map((it, k) => ((from + k < a || from + k >= b) ? { ...it, ctx: 1 } : it));
+      tasks.push(async () => {
+        const map = await annotateWindow({
+          windowItems, mode: 'main', keysArray, modelName, deadline,
+          label: `جولة 1 شريحة ${ri + 1}/${ranges.length}`, castPromptBlock
+        });
+        for (const it of core) {
+          if (cache.has(it.id)) continue;
+          const c = normalizeCode(map.get(it.id), turnsById.get(it.id));
+          if (c) coded.set(it.id, c);
+        }
       });
     });
-
-    const tasks = [];
-    const maxLen = Math.max(...taskLists.map(l => l.length));
-    for (let i = 0; i < maxLen; i++) for (const l of taskLists) if (l[i]) tasks.push(l[i]);
-
-    console.log(`[تحليل الضمائر] جولة ${pass}/${ANNOTATION_PASSES}: ${todo.length} سطر مؤهل × ${RUNS} دفعات → ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${alive}).`);
+    console.log(`[تحليل الضمائر] ${items.length} سطر بالتسلسل (من ${cues.length}) | ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${aliveKeyCount(keysArray)}).`);
     await runConcurrentPool(tasks, conc);
   }
 
-  if (todo.length > 0) {
-    const { map: voted, stats } = voteCodes(runMaps);
-    for (const [id, code] of voted) cache.set(id, code);
-    const perRun = runMaps.map(m => m.size).join('/');
-    console.log(`[تصويت الضمائر] رجعت لكل دفعة ${perRun} سطر | إجماع=${stats.unanimous} اختلاف=${stats.split} دفعة وحيدة=${stats.lone} | حروف تحولت U=${stats.lettersToU}`);
-    const diffs = [];
-    for (const it of todo) {
-      const codes = runMaps.map(m => m.get(it.id) || '--');
-      if (new Set(codes.filter(c => c !== '--')).size > 1) diffs.push(`#${it.id} "${it.text.slice(0, 40)}" -> ${codes.join('/')} => ${cache.get(it.id)}`);
+  // ---------- الجولة الثانية: إعادة الناقص وأسطر U فقط ----------
+  const askList = pending.filter(it => {
+    const c = coded.get(it.id);
+    return !c || c.includes('U');
+  });
+  console.log(`[تحليل الضمائر] الجولة 1 انتهت: ${coded.size}/${pending.length} سطر رجع كود، و${askList.length} فيه U أو ناقص.`);
+
+  if (askList.length > 0 && deadline - Date.now() > 4000) {
+    const groups = [];
+    let cur = [];
+    for (const it of askList) {
+      const pos = posById.get(it.id);
+      if (cur.length && (cur.length >= RESCUE_MAX_ASK || pos - posById.get(cur[0].id) > RESCUE_MAX_SPAN)) {
+        groups.push(cur);
+        cur = [];
+      }
+      cur.push(it);
     }
-    const stepD = Math.max(1, Math.floor(diffs.length / 8));
-    console.log(`[اختلاف الدفعات] ${diffs.length} سطر. عينة: ${diffs.filter((_, i) => i % stepD === 0).slice(0, 8).join(' | ')}`);
+    if (cur.length) groups.push(cur);
+
+    const tasks = groups.map((group, gi) => async () => {
+      const first = posById.get(group[0].id);
+      const last = posById.get(group[group.length - 1].id);
+      const from = Math.max(0, first - RESCUE_CONTEXT);
+      const to = Math.min(items.length, last + 1 + RESCUE_CONTEXT);
+      const askSet = new Set(group.map(it => it.id));
+      const windowItems = items.slice(from, to).map(it => {
+        const o = { ...it };
+        const p = coded.get(it.id) || cache.get(it.id);
+        if (p) o.p = p;
+        if (askSet.has(it.id)) o.ask = 1; else o.ctx = 1;
+        return o;
+      });
+      const map = await annotateWindow({
+        windowItems, mode: 'rescue', keysArray, modelName, deadline,
+        label: `جولة 2 (إعادة U) نافذة ${gi + 1}/${groups.length} [${group.length} سطر]`, castPromptBlock
+      });
+      for (const it of group) {
+        const nc = normalizeCode(map.get(it.id), turnsById.get(it.id));
+        if (nc) coded.set(it.id, mergeCodes(coded.get(it.id) || defaultCode(it.id), nc));
+      }
+    });
+    console.log(`[تحليل الضمائر] جولة 2: ${askList.length} سطر → ${groups.length} طلب بسياق ±${RESCUE_CONTEXT}.`);
+    await runConcurrentPool(tasks, conc);
+  }
+
+  // ---------- دمج الأدلة المحلية (تملأ U فقط) وحفظ بالكاش ----------
+  let localFilled = 0;
+  for (const it of pending) {
+    let code = coded.get(it.id);
+    const local = localHints.get(it.id);
+    if (local && (turnsById.get(it.id) || 1) === 1) {
+      const merged = mergeCodes(code || 'UU', local);
+      if (merged !== (code || 'UU')) localFilled++;
+      code = merged;
+    }
+    if (code) cache.set(it.id, code);
   }
 
   const dist = new Map();
-  let covered = 0;
-  for (const it of eligibleItems) {
-    // الأولوية للمحلول محلياً، ثم للكاش
-    const code = localResolved.get(it.id) || cache.get(it.id);
-    if (!code) continue;
-    covered++;
-    dist.set(code, (dist.get(code) || 0) + 1);
+  let useful = 0;
+  for (const it of pending) {
+    const c = cache.get(it.id);
+    if (!c) continue;
+    dist.set(c, (dist.get(c) || 0) + 1);
+    if (/[MFG]/.test(c)) useful++;
   }
   const distStr = [...dist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}:${v}`).join(' ');
-  console.log(`[تحليل الضمائر] النتيجة: ${covered}/${eligible} سطر محلل في ${Date.now() - tStart}ms | التوزيع: ${distStr || 'لا شيء'}`);
+  console.log(`[تحليل الضمائر] النتيجة: ${useful}/${pending.length} سطر فيه معلومة جنس | ملأ المحلي ${localFilled} حرف | ${Date.now() - tStart}ms | التوزيع: ${distStr || 'لا شيء'}`);
 
   return cache;
 }
@@ -739,9 +888,10 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
 
   let enhancedCastPrompt = castPromptBlock || '';
-  const localResolved = new Map();
+  // أدلة محلية: ما تمنع الـ AI من تحليل السطر، فقط تملأ الحروف اللي بقيت U
+  const localHints = new Map();
 
-  // ================== تطبيق النقطة 1 و 2 (التحليل النحوي وتخمين الأسماء) ==================
+  // ================== التحليل النحوي المحلي (إنجليزي فقط) وتخمين الأسماء ==================
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0 && nlp && genderDetect) {
     const known = new Map();
     const lines = enhancedCastPrompt.split('\n');
@@ -752,12 +902,12 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
 
     const dynamicNames = new Map();
     for (const it of toDo) {
-      if (!NEEDS_GENDER.test(it.text)) continue;
+      if (!ENGLISH_PRONOUNS.test(it.text)) continue;
 
       const doc = nlp(it.text);
       const people = doc.people().out('array');
 
-      // النقطة 2: تخمين أسماء الشخصيات الجانبية الجديدة أوفلاين
+      // تخمين أسماء الشخصيات الجانبية الجديدة أوفلاين
       for (let p of people) {
         const cleanP = p.replace(/[^\w\s]/g, '').trim().toLowerCase();
         if (cleanP && cleanP.length > 2 && !known.has(cleanP) && !dynamicNames.has(cleanP)) {
@@ -768,9 +918,6 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
         }
       }
 
-      // النقطة 1: التحليل النحوي الداخلي لحسم الضمائر مباشرة
-      const hasYou = doc.match('(you|your|yours|yourself)').found;
-      const hasI = doc.match('(i|me|my|mine|myself|i am|im)').found;
       let addresseeG = 'U', speakerG = 'U';
 
       // نعالج الجملة فقط إذا احتوت على اسم شخص واحد لضمان عدم الخلط
@@ -778,25 +925,24 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
          const pName = people[0].replace(/[^\w\s]/g, '').trim().toLowerCase();
          const pGen = known.get(pName) || dynamicNames.get(pName);
          if (pGen) {
-            // إذا الجملة فيها "أنت" وما بيها "أنا" وقصيرة، الاحتمال الأكبر أن الاسم هو للمخاطب (Vocative)
-            if (hasYou && !hasI && it.text.length < 60) addresseeG = pGen;
-            // إذا الجملة "أنا فلان" أو "اسمي فلان"، المتحدث هو الاسم
+            // المخاطَب فقط بنداء صريح (Harry, ... أو ..., Harry.) مو أي اسم يمر بالجملة
+            if (isVocativeName(it.text, pName)) addresseeG = pGen;
+            // "I am X" / "my name is X": المتحدث هو الاسم
             if (doc.match('(i am|im|my name is) #Person').found) speakerG = pGen;
          }
       }
 
-      // إذا انحسم أي طرف محلياً، نخزنه حتى نستثنيه من التصويت
       if (speakerG !== 'U' || addresseeG !== 'U') {
-         localResolved.set(it.id, speakerG + addresseeG);
+         localHints.set(it.id, speakerG + addresseeG);
       }
     }
 
     if (dynamicNames.size > 0) {
-      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (NLP):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
-      console.log(`[تخمين الأسماء] تم تخمين جنس ${dynamicNames.size} أسماء جانبية وإضافتها لسياق الـ AI.`);
+      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (weak guesses from first names, may be wrong; the story context overrides them):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
+      console.log(`[تخمين الأسماء] تم تخمين جنس ${dynamicNames.size} أسماء جانبية وإضافتها كترجيح ضعيف لسياق الـ AI.`);
     }
-    if (localResolved.size > 0) {
-      console.log(`[التحليل النحوي] تم حسم الضمائر محلياً لـ ${localResolved.size} سطر واستثنائها من التصويت.`);
+    if (localHints.size > 0) {
+      console.log(`[التحليل النحوي] ${localHints.size} سطر فيه دليل محلي (يُستخدم فقط لملء الحروف اللي ما حسمها الـ AI).`);
     }
   }
   // =====================================================================================
@@ -811,12 +957,11 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       try {
         const tA = Date.now();
         const deadline = Date.now() + ANNOTATION_BUDGET_MS;
-        // نمرر الـ Prompt المحسن والمحلولات محلياً لدالة التصويت
-        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, enhancedCastPrompt, localResolved);
-        
+        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, enhancedCastPrompt, localHints);
+
         let attached = 0;
         for (const it of toDo) {
-          const g = localResolved.get(it.id) || annotations.get(it.id);
+          const g = annotations.get(it.id);
           if (g && /[MFG]/.test(g)) { it.g = g; attached++; }
         }
         annotationSummary = `أُرفق بـ ${attached} من ${toDo.length} سطر (${Date.now() - tA}ms)`;
@@ -831,6 +976,8 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (toDo.length > 0) {
     let ruleFixes = 0;
     for (const it of toDo) {
+      // الأسطر ذات عدة متكلمين (g فيه "/") تبقى كما هي
+      if (it.g && it.g.includes('/')) continue;
       const adj = applyVocativeRules(cues[it.id].text, it.g);
       if (adj && adj !== it.g) { it.g = adj; ruleFixes++; }
     }
