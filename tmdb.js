@@ -1,4 +1,4 @@
-// tmdb.js — يجيب أسماء الشخصيات وجنس الممثلين من TMDB
+// tmdb.js — يجيب أسماء الشخصيات، جنس الممثلين، وملخص القصة من TMDB
 const axios = require('axios');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
@@ -8,7 +8,6 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CAST = 40;
 const cache = new Map();
 
-// التعديل هنا: صار يقبل المفتاح اللي يجي من المستخدم كأولوية أولى
 function authConfig(userKey) {
   const rawKey = userKey || process.env.TMDB_API_KEY || '';
   const key = String(rawKey).replace(/["'\s]/g, '').replace(/^Bearer/i, '');
@@ -65,12 +64,10 @@ function addEntry(list, seen, character, actor, gender, order) {
   list.push({ character: ch, actor: actor || '', gender: g, order: order ?? 999 });
 }
 
-// التعديل هنا: استلام userKey وتمريره
 async function getTmdbCast(stremioId, userKey = null) {
   const { imdbId, season, episode } = parseStremioId(stremioId);
   if (!/^tt\d+$/.test(imdbId || '')) return { ok: false, reason: 'الرقم ليس IMDb صالح', cast: [], promptBlock: '' };
 
-  // سوينا مفتاح الكاش يتضمن جزء من مفتاح المستخدم حتى ما يصير تداخل إذا أكثر من مستخدم استخدموا مفاتيح مختلفة
   const safeKeySuffix = userKey ? userKey.slice(-4) : 'env';
   const cacheKey = `${imdbId}:${season || ''}:${episode || ''}-${safeKeySuffix}`;
   
@@ -94,17 +91,23 @@ async function getTmdbCast(stremioId, userKey = null) {
 
     const list = [];
     const seen = new Set();
+    let overviewText = '';
 
     if (kind === 'movie') {
-      const c = await tmdbGet(`/movie/${id}/credits`, {}, userKey);
-      for (const p of (c.cast || [])) addEntry(list, seen, p.character, p.name, p.gender, p.order);
+      const c = await tmdbGet(`/movie/${id}`, { append_to_response: 'credits' }, userKey);
+      overviewText = c.overview || (movie && movie.overview) || '';
+      for (const p of (c.credits?.cast || [])) addEntry(list, seen, p.character, p.name, p.gender, p.order);
     } else {
       const jobs = [tmdbGet(`/tv/${id}/aggregate_credits`, {}, userKey)];
-      if (season !== null && episode !== null) jobs.push(tmdbGet(`/tv/${id}/season/${season}/episode/${episode}/credits`, {}, userKey));
-      const [agg, epc] = await Promise.allSettled(jobs);
+      if (season !== null && episode !== null) {
+        jobs.push(tmdbGet(`/tv/${id}/season/${season}/episode/${episode}`, { append_to_response: 'credits' }, userKey));
+      }
+      const [agg, epDetails] = await Promise.allSettled(jobs);
 
-      if (epc && epc.status === 'fulfilled') {
-        for (const p of [...(epc.value.cast || []), ...(epc.value.guest_stars || [])]) {
+      if (epDetails && epDetails.status === 'fulfilled') {
+        overviewText = epDetails.value.overview || '';
+        const epCredits = epDetails.value.credits || {};
+        for (const p of [...(epCredits.cast || []), ...(epCredits.guest_stars || [])]) {
           addEntry(list, seen, p.character, p.name, p.gender, p.order);
         }
       }
@@ -114,13 +117,15 @@ async function getTmdbCast(stremioId, userKey = null) {
           addEntry(list, seen, roles[0] && roles[0].character, p.name, p.gender, p.order);
         }
       }
+      
+      if (!overviewText && tv) overviewText = tv.overview || '';
     }
 
     list.sort((a, b) => a.order - b.order);
     const cast = list.slice(0, MAX_CAST);
 
     const promptBlock = cast.length
-      ? 'KNOWN CHARACTERS (from TMDB; M = male, F = female). Use only to decide gender when the line or story clearly refers to this character:\n' +
+      ? `STORY OVERVIEW:\n${overviewText || 'No overview available.'}\n\nKNOWN CHARACTERS (from TMDB; M = male, F = female). Use only to decide gender when the line or story clearly refers to this character:\n` +
         cast.map(c => `${c.character} = ${c.gender}`).join('\n')
       : '';
 
