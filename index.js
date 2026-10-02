@@ -11,6 +11,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 7000;
 
 // للاختبار فقط: ضع FORCE_SUBDL=1 بريندر ليستخدم SubDL حتى لو OpenSubtitles رجّع ترجمات
+// (احذف المتغير بعد ما تتأكد أن SubDL يشتغل)
 const FORCE_SUBDL = process.env.FORCE_SUBDL === '1';
 
 // ==========================================
@@ -19,7 +20,7 @@ const FORCE_SUBDL = process.env.FORCE_SUBDL === '1';
 const translationCache = {};
 
 // ==========================================
-// 2. الطابور الذكي (Global Queue) للعمل بالخلفية
+// 2. الطابور الذكي (Global Queue) للعمل بالخلفية - يدعم تنفيذ متوازي (concurrency)
 // ==========================================
 class RequestQueue {
     constructor(concurrency = 2) {
@@ -72,6 +73,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
+                // تمرير kitsuId للـ handler
                 const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId);
 
                 if (r.failed) {
@@ -160,19 +162,38 @@ async function mapKitsuToImdb(targetId) {
     const kitsuEp = parseInt(parts[2], 10);
     if (!kitsuId || isNaN(kitsuEp)) return null;
 
+    console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep: ${kitsuEp}`);
+
     try {
         const viaArm = await mapKitsuViaArm(kitsuId, kitsuEp);
-        if (viaArm) return viaArm;
-    } catch (err) {}
+        if (viaArm) {
+            console.log(`[Anime Mapper] ARM mapped ${targetId} -> ${viaArm}`);
+            return viaArm;
+        }
+        console.log(`[Anime Mapper] ARM returned no IMDb match for ${targetId}`);
+    } catch (err) {
+        console.error(`[Anime Mapper] ARM failed for ${targetId} - ${err.message}`);
+    }
 
     try {
         const viaKitsu = await mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp);
-        if (viaKitsu) return viaKitsu;
-    } catch (err) {}
+        if (viaKitsu) {
+            console.log(`[Anime Mapper] Kitsu addon mapped ${targetId} -> ${viaKitsu}`);
+            return viaKitsu;
+        }
+        console.log(`[Anime Mapper] Kitsu addon returned no IMDb match for ${targetId}`);
+    } catch (err) {
+        console.error(`[Anime Mapper] Kitsu addon failed for ${targetId} - ${err.message}`);
+    }
 
     return null;
 }
 
+// ==========================================
+// 3.4 تحويل ترقيم tt:S:E (مواسم) إلى الترقيم المطلق tt:1:ABS
+// مثال: One Piece tt0388629:9:17 -> tt0388629:1:160
+// (مواقع الترجمة تخزّن بعض الأنمي بالرقم المطلق، فلو ما حولنا ترجع النتيجة فارغة)
+// ==========================================
 const absCache = new Map();
 const ABS_CACHE_TTL = 24 * 60 * 60 * 1000;
 
@@ -185,6 +206,7 @@ async function osCount(id) {
     }
 }
 
+// يرجع معرف بديل بالترقيم المطلق (tt:1:ABS) أو null إذا ما احتاج/ما لقى
 async function resolveAbsoluteTtId(ttId) {
     const cached = absCache.get(ttId);
     if (cached && (Date.now() - cached.time) < ABS_CACHE_TTL) return cached.value;
@@ -196,12 +218,14 @@ async function resolveAbsoluteTtId(ttId) {
 
     let result = null;
     try {
+        // إذا OpenSubtitles عنده ترجمات للترقيم الأصلي، لا نغيّر شي
         const direct = await osCount(ttId);
         if (direct > 0) {
             absCache.set(ttId, { time: Date.now(), value: null });
             return null;
         }
 
+        // نحسب الرقم المطلق = عدد حلقات المواسم السابقة + رقم الحلقة
         const meta = await axios.get(`https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`, {
             timeout: 8000,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
@@ -213,16 +237,23 @@ async function resolveAbsoluteTtId(ttId) {
             const absolute = before + episode;
             const candidate = `${imdbId}:1:${absolute}`;
             const n = await osCount(candidate);
+            console.log(`[TT Remap] ${ttId}: حلقات قبل الموسم=${before} -> ${candidate} (OpenSubtitles: ${n} ترجمة)`);
             if (n > 0) result = candidate;
+        } else {
+            console.log(`[TT Remap] ${ttId}: Cinemeta ما رجّع مواسم سابقة، ما أقدر أحسب الرقم المطلق`);
         }
     } catch (err) {
-        return null; 
+        console.error(`[TT Remap] فشل لـ ${ttId}: ${err.message}`);
+        return null; // لا نخزّن الفشل
     }
 
     absCache.set(ttId, { time: Date.now(), value: result });
     return result;
 }
 
+// ==========================================
+// 3.5 كاشف ترجمات الصم وضعاف السمع (SDH)
+// ==========================================
 function isHearingImpairedSub(sub) {
     if (!sub) return false;
     if (sub.hearingImpaired === true) return true;
@@ -232,19 +263,28 @@ function isHearingImpairedSub(sub) {
         .map(f => String(f).toLowerCase());
 
     const patterns = [
-        /\bsdh\b/, /\bhi\b/, /\bcc\b/,
-        /hearing[\s_-]*impaired/, /closed[\s_-]*caption/, /\bdeaf\b/
+        /\bsdh\b/,
+        /\bhi\b/,
+        /\bcc\b/,
+        /hearing[\s_-]*impaired/,
+        /closed[\s_-]*caption/,
+        /\bdeaf\b/
     ];
 
     return fields.some(text => patterns.some(p => p.test(text)));
 }
 
+// ==========================================
+// 4. جلب ترجمات ASS/SSA الأصلية
+// ==========================================
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
     const name = (fileName || '').toLowerCase();
+
     if (name.includes('.zip') || name.includes('.rar')) return true;
 
     const epStr = parseInt(targetEpisode, 10).toString();
+
     const patterns = [
         new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
         new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
@@ -252,29 +292,29 @@ function matchEpisode(fileName, targetEpisode) {
         new RegExp(`\\(0*${epStr}\\)`, 'i'),
         new RegExp(`\\b0*${epStr}\\b`, 'i')
     ];
+
     return patterns.some(p => p.test(name));
 }
 
-// ==========================================
-// 4. جلب ترجمات ASS/SSA الأصلية باستخدام البروكسي المزدوج (Vercel)
-// ==========================================
 async function fetchLegacyData(url) {
     try {
-        // ⚠️⚠️⚠️ انتباه: حط رابط Vercel مالتك اللي نسخته هنا بمكان هذا الرابط ⚠️⚠️⚠️
-        const VERCEL_APP_URL = 'https://os-proxy-seven.vercel.app';
- 
-        
-        // 1. نطلب البحث عبر مسار /search ببروكسي Vercel
-        const proxySearchUrl = `${VERCEL_APP_URL}/search?url=${encodeURIComponent(url)}`;
-        console.log(`[Legacy Proxy] Requesting Search: ${proxySearchUrl}`);
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'VLSub 0.10.3',
+                'X-User-Agent': 'VLSub 0.10.3',
+                'Accept': 'application/json'
+            }
+        });
 
-        const response = await fetch(proxySearchUrl);
+        // [DEBUG-1] رمز رد السيرفر القديم
+        console.log(`[Legacy] ${response.status} <- ${url}`);
+
         if (!response.ok) return [];
-        
         const data = await response.json();
         if (!Array.isArray(data)) return [];
 
-        console.log(`[Legacy Proxy] رجع ${data.length} نتيجة.`);
+        // [DEBUG-2] عدد النتائج وعدد ملفات ASS منها
+        console.log(`[Legacy] رجع ${data.length} نتيجة، منها ASS: ${data.filter(e => /^(ass|ssa)$/i.test(e.SubFormat || '') || /\.(ass|ssa)/i.test(e.SubFileName || '')).length}`);
 
         const results = [];
         data.forEach(entry => {
@@ -285,16 +325,14 @@ async function fetchLegacyData(url) {
             const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
             const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
             const finalExt = isAss ? 'ass' : 'srt';
+
             const isHi = entry.SubHearingImpaired === '1' || entry.SubHearingImpaired === 1 || entry.SubHearingImpaired === true;
 
             // الخدعة السحرية: تحويل الرابط المضغوط إلى نص مباشر حتى يفهمه الذكاء الاصطناعي
             const directUrl = downloadLink.replace(/\.gz$/i, '') + '.' + finalExt;
 
-            // 2. الفكرة الجهنمية: نجبر دالة ai.js تحمل الملف من مسار /download بـ Vercel
-            const safeDownloadUrl = `${VERCEL_APP_URL}/download?url=${encodeURIComponent(directUrl)}`;
-
             results.push({
-                url: safeDownloadUrl, // Render راح يحمل من Vercel
+                url: directUrl,
                 lang: 'eng',
                 format: finalExt,
                 ext: finalExt,
@@ -308,7 +346,8 @@ async function fetchLegacyData(url) {
         });
         return results;
     } catch (e) {
-        console.log('[Legacy Proxy] خطأ بالاتصال:', e.message);
+        // [DEBUG-3] سبب الفشل
+        console.log('[Legacy] خطأ:', e.message);
         return [];
     }
 }
@@ -458,7 +497,9 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
             if (Array.isArray(decoded.keys)) existingKeys = decoded.keys;
             if (decoded.model) existingModel = decoded.model;
             if (decoded.tmdbKey) existingTmdbKey = decoded.tmdbKey;
-        } catch (e) {}
+        } catch (e) {
+            console.error('[Configure] Failed to parse existing config:', e.message);
+        }
     }
 
     let keyRowsHtml = '';
@@ -502,6 +543,7 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
         <h1>إعدادات المترجم الذكي</h1>
         <div class="container">
             ${existingKeys.length > 0 ? `<div class="status-banner">✅ تم تحميل ${existingKeys.length} مفتاح موجود مسبقًا — عدّل حسب حاجتك</div>` : ''}
+            <p style="text-align: center; font-size: 14px; color: #cbd5e1; margin-bottom: 25px;">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
             
             <div id="keys-container">
                 ${keyRowsHtml}
@@ -510,19 +552,29 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
             <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
             
             <div class="input-group" style="margin-top: 20px;">
-                <label>مفتاح TMDB API (اختياري)</label>
-                <input type="text" id="tmdb-key" value="${existingTmdbKey.replace(/"/g, '&quot;')}">
+                <label>مفتاح TMDB API (اختياري - لمعرفة أسماء وجنس الشخصيات)</label>
+                <input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="${existingTmdbKey.replace(/"/g, '&quot;')}">
             </div>
 
             <div class="input-group" style="margin-top: 20px;">
-                <label>نموذج الترجمة</label>
-                <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; background: #0f172a; color: #fff;">
+                <label>نموذج الترجمة (Translation Model)</label>
+                <select id="model-select" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #fff;">
                     <option value="gemini-3.1-flash-lite" ${existingModel === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash Lite</option>
                     <option value="gemini-3.5-flash-lite" ${existingModel === 'gemini-3.5-flash-lite' ? 'selected' : ''}>Gemini 3.5 Flash Lite</option>
+                    <option value="gemini-3.7-flash" ${existingModel === 'gemini-3.7-flash' ? 'selected' : ''}>Gemini 3.7 Flash (beta)</option>
+                    <option value="gemini-3.6-flash" ${existingModel === 'gemini-3.6-flash' ? 'selected' : ''}>Gemini 3.6 Flash (beta)</option>
+                    <option value="gemini-3.5-flash" ${existingModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (beta)</option>
+                    <option value="gemini-2.5-flash" ${existingModel === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash</option>
                 </select>
             </div>
 
-            <button class="btn" onclick="generateInstallLink()">${existingKeys.length > 0 ? 'تحديث الإضافة' : 'تثبيت الإضافة'}</button>
+            <button class="btn" onclick="generateInstallLink()">${existingKeys.length > 0 ? 'تحديث الإضافة في Nuvio 🔄' : 'تثبيت الإضافة في Nuvio 🚀'}</button>
+
+            <div id="test-link-box" style="display:none; margin-top: 20px; padding: 12px; background: #0f172a; border-radius: 8px; border: 1px solid #334155;">
+                <label style="margin-bottom: 8px;">رابط اختبار (JSON) - انسخه للفحص اليدوي بالمفاتيح:</label>
+                <input type="text" id="test-link-input" readonly style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #38bdf8; font-size: 12px; box-sizing: border-box;" onclick="this.select()">
+                <button type="button" class="btn btn-secondary" style="margin-top: 8px; margin-bottom: 0;" onclick="copyTestLink()">نسخ الرابط</button>
+            </div>
         </div>
 
         <script>
@@ -530,25 +582,59 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
                 const container = document.getElementById('keys-container');
                 const row = document.createElement('div');
                 row.className = 'key-row';
-                row.innerHTML = \`<input type="text" class="api-key"><button class="remove-btn" onclick="this.parentElement.remove()">X</button>\`;
+                row.innerHTML = \`
+                    <input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)">
+                    <button class="remove-btn" onclick="this.parentElement.remove()">X</button>
+                \`;
                 container.appendChild(row);
             }
 
             function buildConfigStr() {
                 const inputs = document.querySelectorAll('.api-key');
                 let keys = [];
-                inputs.forEach(i => { if(i.value.trim()) keys.push(i.value.trim()); });
-                if(keys.length === 0) return null;
-                const config = { keys: keys, model: document.getElementById('model-select').value };
-                const tk = document.getElementById('tmdb-key').value.trim();
-                if (tk) config.tmdbKey = tk; 
+                inputs.forEach(input => {
+                    let val = input.value.trim();
+                    if(val) keys.push(val);
+                });
+
+                if(keys.length === 0) {
+                    alert('الرجاء إدخال مفتاح API واحد على الأقل!');
+                    return null;
+                }
+
+                const tmdbKey = document.getElementById('tmdb-key').value.trim();
+                const model = document.getElementById('model-select').value;
+                
+                const config = { keys: keys, model: model };
+                if (tmdbKey) config.tmdbKey = tmdbKey; 
+                
                 return encodeURIComponent(JSON.stringify(config));
             }
 
             function generateInstallLink() {
                 const configStr = buildConfigStr();
                 if (!configStr) return;
-                window.location.href = 'stremio://' + window.location.host + '/' + configStr + '/manifest.json';
+                const host = window.location.host;
+
+                const installUrl = 'stremio://' + host + '/' + configStr + '/manifest.json';
+                const testUrl = window.location.origin + '/' + configStr + '/manifest.json';
+                
+                document.getElementById('test-link-input').value = testUrl;
+                document.getElementById('test-link-box').style.display = 'block';
+
+                window.location.href = installUrl;
+            }
+
+            function copyTestLink() {
+                const input = document.getElementById('test-link-input');
+                if (!input.value) return;
+                input.select();
+                input.setSelectionRange(0, 99999);
+                try {
+                    navigator.clipboard.writeText(input.value);
+                } catch (e) {
+                    document.execCommand('copy');
+                }
             }
         </script>
     </body>
@@ -558,25 +644,35 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
+    
     let modifiedManifest = { ...MANIFEST };
     if (req.params.config) {
         modifiedManifest.description = '✅ مفعل! جاهز للترجمة التلقائية.';
         modifiedManifest.name = 'Nuvio AI Subs (Active)';
     }
+    
     res.json(modifiedManifest);
 });
 
 // ==========================================
 // مسار جلب الترجمات
 // ==========================================
-app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
+app.get([
+  '/subtitles/:type/:reqId(*)', 
+  '/:config/subtitles/:type/:reqId(*)'
+], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
 
-    const configParam = (req.params.config || '') ? encodeURIComponent(req.params.config) : '';
+    const configParamRaw = req.params.config || '';
+    const configParam = configParamRaw ? encodeURIComponent(configParamRaw) : '';
+    
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
+
     let type = req.params.type;
     const baseUrl = getBaseUrl(req);
 
@@ -584,17 +680,30 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         let subtitlesData = [];
         let finalTargetId = targetId;
         let finalType = type;
+        
         let originalKitsuId = null;
 
         if (targetId.startsWith('kitsu')) {
-            originalKitsuId = targetId.split(':')[1];
+            originalKitsuId = targetId.split(':')[1]; // نستخرج رقم الأنمي قبل التحويل
+            
             const mapped = await mapKitsuToImdb(targetId);
-            if (mapped) { finalTargetId = mapped; finalType = 'series'; }
+            if (mapped) {
+                finalTargetId = mapped;
+                finalType = 'series';
+                console.log(`[Anime Mapper] Successfully mapped! ${targetId} -> ${finalTargetId}`);
+            } else {
+                console.log(`[Anime Mapper] No mapping found for ${targetId}, using it as-is.`);
+            }
         }
 
+        // تحويل tt:S:E (ترقيم المواسم) إلى الترقيم المطلق إذا مواقع الترجمة ما تعرف الرقم الأصلي
         if (!originalKitsuId && /^tt\d+:\d+:\d+$/.test(finalTargetId)) {
             const alt = await resolveAbsoluteTtId(finalTargetId);
-            if (alt) { finalTargetId = alt; finalType = 'series'; }
+            if (alt) {
+                console.log(`[TT Remap] Using absolute numbering: ${finalTargetId} -> ${alt}`);
+                finalTargetId = alt;
+                finalType = 'series';
+            }
         }
 
         if (/^tt\d+/.test(finalTargetId) && finalType !== 'movie' && finalType !== 'series') {
@@ -611,23 +720,48 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
+        getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode })
+            .then(list => console.log(`[SubDL Probe] ${finalTargetId} => ${list.length} ترجمة${list.length === 0 ? ' (السبب بالسطر اللي قبل هذا)' : ' ✅ SubDL شغال'}`))
+            .catch(e => console.log(`[SubDL Probe] ${finalTargetId} => استثناء غير متوقع: ${e.message}`));
+
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
+        console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
+
         const [r, assResults] = await Promise.all([
-            axios.get(osUrl, { timeout: 10000 }).catch(() => null),
-            getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType }).catch(() => [])
+            axios.get(osUrl, { timeout: 10000 }).catch(e => {
+                console.log(`[Fetch] OpenSubtitles فشل لـ ${finalTargetId}: ${e.message}`);
+                return null;
+            }),
+            getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType })
+                .catch(() => [])
         ]);
 
         if (r && r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
+        console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for ${finalTargetId}`);
+
         const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
+        const assHiCount = assOnly.filter(s => isHearingImpairedSub(s)).length;
+        console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assHiCount} SDH, pushed to the back)`);
+
         let srtSubs = [];
 
         if (subtitlesData.length > 0) {
             const targetLangs = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
+
             const validSubs = subtitlesData.filter(s => {
                 const lang = (s.lang || '').toLowerCase();
                 return targetLangs.some(l => lang === l || lang.startsWith(l));
             });
-            const sortedSubs = [...validSubs].sort((a, b) => (isHearingImpairedSub(a) ? 1 : 0) - (isHearingImpairedSub(b) ? 1 : 0));
+
+            const sortedSubs = [...validSubs].sort((a, b) => {
+                const aHi = isHearingImpairedSub(a) ? 1 : 0;
+                const bHi = isHearingImpairedSub(b) ? 1 : 0;
+                return aHi - bHi;
+            });
+
+            const cleanCount = sortedSubs.filter(s => !isHearingImpairedSub(s)).length;
+            console.log(`[SDH Filter] ${cleanCount}/${sortedSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
+
             srtSubs = sortedSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
@@ -636,13 +770,28 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
 
         if (srtSubs.length === 0 || FORCE_SUBDL) {
-            const subdlSubs = await getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode });
-            if (subdlSubs.length > 0) srtSubs = subdlSubs;
+            console.log(FORCE_SUBDL
+                ? `[SubDL] وضع الاختبار FORCE_SUBDL مفعل، أجرب SubDL لـ ${finalTargetId}...`
+                : `[SubDL] OpenSubtitles ما رجّع ترجمة صالحة لـ ${finalTargetId}، أجرب SubDL...`);
+
+            const subdlSubs = await getSubDLEnglish({
+                imdbId: assImdbId,
+                season: assSeason,
+                episode: assEpisode
+            });
+
+            if (subdlSubs.length > 0) {
+                srtSubs = subdlSubs;
+                console.log(`[SubDL] راح أستخدم ${subdlSubs.length} ترجمة من SubDL لـ ${finalTargetId}.`);
+            } else {
+                console.log(`[SubDL] ما لقيت شي بـ SubDL لـ ${finalTargetId}.`);
+            }
         }
 
         const transSubs = [];
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : `/stream-ai.srt`;
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : `/stream-ai.ass`;
+
         let extraParams = `&id=${finalTargetId}`;
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
 
@@ -668,19 +817,31 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
             }
+            console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
+        } else {
+            console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
         }
+
         return res.json({ subtitles: transSubs });
     } catch (err) {
+        console.error(`[Subtitles Error] ${targetId} - ${err.message}`);
         return res.json({ subtitles: [] });
     }
 });
 
-app.all(['/stream-ai.srt', '/:config/stream-ai.srt'], async (req, res) => {
+app.all([
+    '/stream-ai.srt', '/:config/stream-ai.srt'
+], async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
-    const targetUrl = req.query.url, targetId = req.query.id || '', kitsuId = req.query.kitsu || '', trackNum = req.query.track || '1';
+    
+    const targetUrl = req.query.url;
+    const targetId = req.query.id || ''; 
+    const kitsuId = req.query.kitsu || '';
+    const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const cacheKey = `SRT_${targetUrl}`;
+    
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
         res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-SRT.srt"`);
@@ -688,32 +849,51 @@ app.all(['/stream-ai.srt', '/:config/stream-ai.srt'], async (req, res) => {
         return res.send(translationCache[cacheKey].content);
     }
 
-    let userKeys = [], userModel = 'gemini-3.1-flash-lite', userTmdbKey = '';
+    let userKeys = [];
+    let userModel = 'gemini-3.1-flash-lite'; 
+    let userTmdbKey = '';
+
     if (req.params.config) {
         try {
-            const decoded = JSON.parse(decodeURIComponent(req.params.config));
-            if (Array.isArray(decoded.keys)) userKeys = decoded.keys;
-            if (decoded.model) userModel = decoded.model;
-            if (decoded.tmdbKey) userTmdbKey = decoded.tmdbKey; 
-        } catch (e) {}
+            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
+            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
+            if (decodedConfig.model) userModel = decodedConfig.model;
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; 
+        } catch (e) { }
     }
 
     if (!translationCache[cacheKey]) {
-        startTranslationJob({ cacheKey, handler: handleTranslationSrtDetailed, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label: 'SRT', targetId, kitsuId });
+        startTranslationJob({
+            cacheKey,
+            handler: handleTranslationSrtDetailed,
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
+            label: 'SRT',
+            targetId,
+            kitsuId
+        });
     }
+
+    const fakeSub = `1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n`;
 
     res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
     res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-SRT.srt"`);
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.send(`1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n`);
+    res.send(fakeSub);
 });
 
-app.all(['/stream-ai.ass', '/:config/stream-ai.ass'], async (req, res) => {
+app.all([
+    '/stream-ai.ass', '/:config/stream-ai.ass'
+], async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
-    const targetUrl = req.query.url, targetId = req.query.id || '', kitsuId = req.query.kitsu || '', trackNum = req.query.track || '1';
+
+    const targetUrl = req.query.url;
+    const targetId = req.query.id || ''; 
+    const kitsuId = req.query.kitsu || '';
+    const trackNum = req.query.track || '1';
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const cacheKey = `ASS_${targetUrl}`;
+
     if (translationCache[cacheKey] && translationCache[cacheKey].status === 'done') {
         res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="Trans-Track${trackNum}-ASS.ass"`);
@@ -721,25 +901,40 @@ app.all(['/stream-ai.ass', '/:config/stream-ai.ass'], async (req, res) => {
         return res.send(translationCache[cacheKey].content);
     }
 
-    let userKeys = [], userModel = 'gemini-3.1-flash-lite', userTmdbKey = '';
+    let userKeys = [];
+    let userModel = 'gemini-3.1-flash-lite';
+    let userTmdbKey = '';
+
     if (req.params.config) {
         try {
-            const decoded = JSON.parse(decodeURIComponent(req.params.config));
-            if (Array.isArray(decoded.keys)) userKeys = decoded.keys;
-            if (decoded.model) userModel = decoded.model;
-            if (decoded.tmdbKey) userTmdbKey = decoded.tmdbKey; 
-        } catch (e) {}
+            const decodedConfig = JSON.parse(decodeURIComponent(req.params.config));
+            if (decodedConfig.keys && Array.isArray(decodedConfig.keys)) userKeys = decodedConfig.keys;
+            if (decodedConfig.model) userModel = decodedConfig.model;
+            if (decodedConfig.tmdbKey) userTmdbKey = decodedConfig.tmdbKey; 
+        } catch (e) { }
     }
 
     if (!translationCache[cacheKey]) {
-        startTranslationJob({ cacheKey, handler: handleTranslationAssDetailed, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label: 'ASS', targetId, kitsuId });
+        startTranslationJob({
+            cacheKey,
+            handler: handleTranslationAssDetailed,
+            targetUrl, userKeys, userModel, userTmdbKey, trackNum, 
+            label: 'ASS',
+            targetId,
+            kitsuId
+        });
     }
+
+    const fakeSub = `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.`;
 
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
     res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-ASS.ass"`);
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.send(`[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.`);
+    res.send(fakeSub);
 });
 
-app.listen(PORT, () => console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
+});
+
 module.exports = app;
