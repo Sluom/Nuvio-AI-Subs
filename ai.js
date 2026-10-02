@@ -42,25 +42,23 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_MISSING_RETRIES = 3;
 const MAX_RETRY_PASSES = 4;
 
-// ================== إعدادات تحليل الجنس (Patch 1) ==================
+// ================== إعدادات تحليل الجنس (Patch 1 & 2) ==================
 const ENABLE_GENDER_ANALYSIS = true;
 
-// موديل التحليل (أقوى من موديل الترجمة). تقدر تغيره من Environment بمتغير ANNOTATION_MODEL.
-// إذا الموديل غير صالح يرجع تلقائياً لموديل الترجمة.
+// تم الرجوع للموديل السريع لضمان عدم حصول اختناق 503
 const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || 'gemini-3.1-flash-lite').trim();
-const ANNOTATION_BUDGET_MS = 75000;          // الميزانية الزمنية الكلية للتحليل (طلب أول + إعادة U)
-const ANNOTATION_SLICE_SIZE = 200;           // أسطر "الجوهر" بكل طلب
-const ANNOTATION_OVERLAP = 8;                // أسطر سياق قراءة فقط قبل وبعد كل شريحة
+const ANNOTATION_BUDGET_MS = 75000;          
+const ANNOTATION_SLICE_SIZE = 200;           
+const ANNOTATION_OVERLAP = 8;                
 const ANNOTATION_MAX_CONCURRENCY = 8;
 const ANNOTATION_REQUEST_TIMEOUT_MS = 60000;
 const ANNOTATION_ATTEMPTS = 3;
 const ANNOTATION_TEMPERATURE = 0.1;
-const SCENE_BREAK_SECONDS = 4;               // فجوة أكبر من هذا = غالباً مشهد جديد
-const RESCUE_CONTEXT = 10;                   // ±10 أسطر لإعادة الأسطر اللي رجعت U
-const RESCUE_MAX_ASK = 80;                   // أقصى عدد أسطر مطلوبة بطلب إعادة واحد
-const RESCUE_MAX_SPAN = 250;                 // أقصى امتداد (بالأسطر) لنافذة إعادة واحدة
+const SCENE_BREAK_SECONDS = 4;               
+const RESCUE_CONTEXT = 10;                   
+const RESCUE_MAX_ASK = 80;                   
+const RESCUE_MAX_SPAN = 250;                 
 
-// عدد أسطر السياق (للقراءة فقط) قبل وبعد كل دفعة ترجمة
 const CONTEXT_LINES = 4;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -96,7 +94,6 @@ function isGeminiAuthFailure(e) {
   return msg.includes('api key') && (msg.includes('invalid') || msg.includes('not valid') || msg.includes('permission'));
 }
 
-// خطأ إعداد (موديل غير موجود / معامل thinking غير مدعوم): ما نبرّد المفتاح، ونرجع للموديل الاحتياطي
 function isGeminiConfigError(e) {
   const s = e?.response?.status;
   if (s === 404) return true;
@@ -221,32 +218,6 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
-function parseRobustJsonArray(raw, expectedLength) {
-  if (!raw) return null;
-  let clean = raw.trim();
-  if (clean.startsWith('```json')) clean = clean.substring(7);
-  else if (clean.startsWith('```')) clean = clean.substring(3);
-  if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
-  clean = clean.trim();
-
-  try {
-    const parsed = JSON.parse(clean);
-    let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-    if (Array.isArray(arr) && arr.length === expectedLength) {
-      return arr.map(x => {
-        let txt = String(x || '').replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
-        return normalizeLineBreakArtifacts(txt).trim();
-      });
-    }
-  } catch (e) {
-    const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-    if (stringMatches.length === expectedLength) {
-      return stringMatches.filter(s => s !== 'translations' && s !== 'data').map(s => normalizeLineBreakArtifacts(s).replace(/âTM./gi, '♪').trim());
-    }
-  }
-  return null;
-}
-
 function parseIdTranslations(raw) {
   if (!raw) return null;
   let clean = String(raw).trim();
@@ -304,7 +275,6 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-// ================== سياق الدفعة (قراءة فقط): أسطر قبل وبعد الدفعة من الملف الأصلي ==================
 function buildChunkContext(cues, chunk) {
   if (!chunk || !chunk.length) return { before: [], after: [] };
   const first = chunk[0].id;
@@ -330,20 +300,14 @@ async function translateChunkStrict(items, keysArray, modelName, castPromptBlock
   if (isGemini3) { generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }; }
 
   const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
-    ? `
-15. CONTEXT (READ-ONLY): The lines below are NOT part of the content to translate. Use them ONLY to understand sentences that continue across entries, who is speaking, and references to people/places/objects.
-   - NEVER translate, modify, or output any context line.
-   - Do NOT apply any formatting rule (parentheses, quotation marks, brackets, narration quotes) to context lines.
-context_before: ${JSON.stringify(ctx.before)}
-context_after: ${JSON.stringify(ctx.after)}
-`
+    ? `\n15. CONTEXT (READ-ONLY): The lines below are NOT part of the content to translate. Use them ONLY to understand sentences that continue across entries, who is speaking, and references to people/places/objects.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
   const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a hint code.
 "g" = two letters: the first letter is the SPEAKER's gender, the second letter is the gender of the person being ADDRESSED. If the entry holds several speaker turns (lines starting with "-"), "g" has one two-letter code per turn, separated by "/", in the same order as the turns (for example "FM/MF"): apply each code only to its own turn. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
 Translate the "text" of every entry to Arabic while:
 1. Returning a JSON array of objects in the exact same shape: [{"id": <same number>, "text": "<Arabic translation>"}].
-   - Return exactly ONE object for EVERY input id, using the SAME id. Never merge entries, never split an entry, never skip an entry, never invent ids.
+   - Return exactly ONE object for EVERY input id, using the SAME id.
    - Keep each translation inside its own id, even if a sentence continues in the next entry.
 2. If an entry contains multiple lines separated by a real line break, the translation must contain the exact same number of lines, in the same order, separated by a real line break only, within the JSON string value.
 3. Preserving any formatting tags or special characters.
@@ -519,9 +483,6 @@ function getAnnotationCache(key) {
   return annotationCaches.get(key);
 }
 
-// الفلتر القديم (ضمائر إنجليزية): ما عاد يتحكم بتحليل الـ AI. يبقى فقط للتحليل النحوي المحلي لأنه إنجليزي.
-const ENGLISH_PRONOUNS = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
-
 const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
   { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'OFF' },
@@ -580,22 +541,29 @@ function cleanForAnalysis(t) {
 }
 
 // ==================================================================================
-// ================== Patch 1: تحليل الضمائر على كل الأسطر وبأي لغة ==================
+// ================== Patch 2: القاموس الشامل، النداء المتقدم، والأولويات ==================
 // ==================================================================================
 
 function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// نداء صريح فقط: "Harry, ..." أو "..., Harry." (مو أي اسم موجود بالجملة)
+// تعديل (كلاود): دعم حدود Unicode (\p{L}) لمعالجة اللغات المتعددة واستثناء الترقيم
 function isVocativeName(text, name) {
+  if (!name || name.length < 2) return false;
   const n = escapeRe(name).replace(/\s+/g, '\\s+');
-  const start = new RegExp(`^\\W*(?:(?:hey|oh|ok|okay|look|listen|please|yes|no|well|come on)\\s*,?\\s+)?${n}\\s*[,!?:]`, 'i');
-  const end = new RegExp(`,\\s*${n}\\s*[.!?…"]*\\s*$`, 'i');
-  return start.test(String(text || '')) || end.test(String(text || ''));
+  try {
+    const start = new RegExp(`^[^\\p{L}]*(?:(?:hey|oh|ok|okay|look|listen|please|yes|no|well|come on|hola|oye|mira|bonjour|salut)\\s*,?\\s+)?${n}\\s*[,!?:.]`, 'iu');
+    const end = new RegExp(`[,!?:.]\\s*${n}\\s*[^\\p{L}]*$`, 'iu');
+    return start.test(String(text || '')) || end.test(String(text || ''));
+  } catch (e) {
+    // خط رجعة لو بيئة Node قديمة
+    const start = new RegExp(`^\\W*(?:(?:hey|oh|ok|okay|look|listen|please|yes|no|well|come on|hola|oye|mira)\\s*,?\\s+)?${n}\\s*[,!?:.]`, 'i');
+    const end = new RegExp(`[,!?:.]\\s*${n}\\s*\\W*$`, 'i');
+    return start.test(String(text || '')) || end.test(String(text || ''));
+  }
 }
 
-// "H:MM:SS.cc" -> ثواني
 function assTimeToSec(t) {
   const m = String(t || '').match(/(\d+):(\d{2}):(\d{2})[.,](\d{1,3})/);
   if (!m) return null;
@@ -608,7 +576,6 @@ function fmtClock(sec) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// يقسم السطر لأدوار متكلمين: كل سطر يبدأ بشرطة = متكلم جديد
 function splitTurns(rawText) {
   const lines = String(rawText || '')
     .replace(/\{[^}]*\}|<[^>]*>/g, '')
@@ -628,7 +595,6 @@ function splitTurns(rawText) {
   return turns;
 }
 
-// كل الأسطر اللي تحتاج ترجمة، بالترتيب، مع الوقت وعلامة فاصل المشهد وعدد أدوار المتكلمين
 function buildAnnotationItems(cues) {
   const items = [];
   const turnsById = new Map();
@@ -652,7 +618,6 @@ function buildAnnotationItems(cues) {
   return { items, turnsById };
 }
 
-// "12:FM" أو "12:FM/MF" (كود لكل دور متكلم)
 function parseAnnotationCodes(raw) {
   const map = new Map();
   if (!raw) return map;
@@ -664,7 +629,6 @@ function parseAnnotationCodes(raw) {
   return map;
 }
 
-// يتأكد إن عدد الأكواد = عدد الأدوار، وإلا يرجع null (يعتبر ناقص)
 function normalizeCode(raw, turns) {
   if (!raw) return null;
   const segs = String(raw).toUpperCase().split('/').map(s => s.trim());
@@ -673,7 +637,6 @@ function normalizeCode(raw, turns) {
   return segs.join('/');
 }
 
-// يعبي حروف U في base من extra (ما يغيّر أي حرف محسوم)
 function mergeCodes(base, extra) {
   if (!extra) return base;
   if (!base) return extra;
@@ -721,7 +684,7 @@ Answer with TWO letters per line: first the speaker's gender, then the addressee
 If an item has "turns": N, give N codes separated by "/", one per turn in order (each turn usually starts with "-"), for example "FM/MF".
 Evidence to use:
 - names, titles and forms of address (sir, ma'am, mother, king, senhora, señor...), and who was just spoken to
-- grammatical gender inside the line itself, in languages where adjectives and participles agree with the speaker or the listener (for example Portuguese "obrigada" = a woman is speaking, "obrigado" = a man; "cansada"/"cansado"; Spanish "estoy cansada"; French "je suis fatiguée"; Russian "я устала" / "я устал")
+- grammatical gender inside the line itself, in languages where adjectives and participles agree with the speaker or the listener
 - "he said" / "she said", the alternation of replies in a conversation, and pauses
 Use the whole conversation, not only the single line. If you are not reasonably sure about one side, answer U for that side. Do not guess randomly.
 ${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
@@ -731,7 +694,6 @@ Lines:
 ${JSON.stringify(windowItems)}`;
 }
 
-// طلب تحليل واحد (شريحة أو نافذة إعادة). يرجع Map(id -> كود خام)
 async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock }) {
   const baseModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const prompt = buildAnnotationPrompt(windowItems, mode, castPromptBlock);
@@ -760,8 +722,6 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
   return map;
 }
 
-// الجولة الأولى: كل الأسطر بالتسلسل بشرائح مع تداخل. الجولة الثانية: إعادة الأسطر اللي فيها U فقط بسياق ±10 وبأكواد الجولة الأولى.
-// localHints = أدلة محلية، تملأ فقط الحروف اللي بقيت U (ما تغيّر أي حرف حسمه الـ AI).
 async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', localHints = new Map()) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
@@ -773,7 +733,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   const defaultCode = id => Array(turnsById.get(id) || 1).fill('UU').join('/');
   const conc = Math.max(1, Math.min(aliveKeyCount(keysArray), ANNOTATION_MAX_CONCURRENCY));
 
-  // ---------- الجولة الأولى ----------
   if (pending.length > 0) {
     const ranges = makeCoreRanges(items.length, ANNOTATION_SLICE_SIZE);
     const tasks = [];
@@ -799,7 +758,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     await runConcurrentPool(tasks, conc);
   }
 
-  // ---------- الجولة الثانية: إعادة الناقص وأسطر U فقط ----------
   const askList = pending.filter(it => {
     const c = coded.get(it.id);
     return !c || c.includes('U');
@@ -845,7 +803,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     await runConcurrentPool(tasks, conc);
   }
 
-  // ---------- دمج الأدلة المحلية (تملأ U فقط) وحفظ بالكاش ----------
   let localFilled = 0;
   for (const it of pending) {
     let code = coded.get(it.id);
@@ -888,61 +845,90 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
 
   let enhancedCastPrompt = castPromptBlock || '';
-  // أدلة محلية: ما تمنع الـ AI من تحليل السطر، فقط تملأ الحروف اللي بقيت U
   const localHints = new Map();
 
-  // ================== التحليل النحوي المحلي (إنجليزي فقط) وتخمين الأسماء ==================
+  // ================== السجل الشامل (Global Dictionary) والأدلة المتعددة ==================
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0 && nlp && genderDetect) {
+    
+    // 1. استخراج الأسماء الموثوقة من (TMDB/AniList) وتوليد أسماء مستعارة (الاسم الأول)
     const known = new Map();
     const lines = enhancedCastPrompt.split('\n');
     for (const l of lines) {
       const m = l.match(/^(.+?)\s*=\s*(M|F)$/i);
-      if (m) known.set(m[1].trim().toLowerCase(), m[2].toUpperCase());
+      if (m) {
+        const fullName = m[1].trim().toLowerCase();
+        const gen = m[2].toUpperCase();
+        known.set(fullName, gen);
+        if (fullName.includes(' ')) known.set(fullName.split(' ')[0], gen);
+      }
     }
 
     const dynamicNames = new Map();
-    for (const it of toDo) {
-      if (!ENGLISH_PRONOUNS.test(it.text)) continue;
+    const nameFreq = new Map();
 
+    // 2. مسح شامل لكامل الملف (Global Pass) لحصر أسماء الشخصيات الجانبية
+    for (const it of toDo) {
       const doc = nlp(it.text);
       const people = doc.people().out('array');
-
-      // تخمين أسماء الشخصيات الجانبية الجديدة أوفلاين
       for (let p of people) {
         const cleanP = p.replace(/[^\w\s]/g, '').trim().toLowerCase();
-        if (cleanP && cleanP.length > 2 && !known.has(cleanP) && !dynamicNames.has(cleanP)) {
-           const first = cleanP.split(' ')[0];
-           const g = genderDetect.detect(first);
-           if (g === 'male') dynamicNames.set(cleanP, 'M');
-           else if (g === 'female') dynamicNames.set(cleanP, 'F');
+        // استثناء الأفعال والكلمات الشائعة التي تلتبس بالأسماء
+        if (cleanP && cleanP.length > 2 && !known.has(cleanP) && !/^(will|may|mark|hope|faith|joy|grace|chase|hunter|miles)$/i.test(cleanP)) {
+           nameFreq.set(cleanP, (nameFreq.get(cleanP) || 0) + 1);
         }
       }
+    }
 
+    // بناء قاموس الأسماء الجانبية
+    for (const [name, count] of nameFreq.entries()) {
+      if (count >= 1) { 
+         const first = name.split(' ')[0];
+         const g = genderDetect.detect(first);
+         if (g === 'male') dynamicNames.set(name, 'M');
+         else if (g === 'female') dynamicNames.set(name, 'F');
+      }
+    }
+
+    // 3. تحليل الأدلة المحلية (النداء والتعريف الذاتي متعدد اللغات)
+    const MULTILINGUAL_SELF_ID = /^(?:i am|i'm|my name is|soy|me llamo|je suis|ich bin|sono|mi chiamo)\s+([A-Z][a-z]+)/i;
+
+    for (const it of toDo) {
+      const doc = nlp(it.text);
+      const people = doc.people().out('array');
       let addresseeG = 'U', speakerG = 'U';
 
-      // نعالج الجملة فقط إذا احتوت على اسم شخص واحد لضمان عدم الخلط
-      if (people.length === 1) {
-         const pName = people[0].replace(/[^\w\s]/g, '').trim().toLowerCase();
-         const pGen = known.get(pName) || dynamicNames.get(pName);
-         if (pGen) {
-            // المخاطَب فقط بنداء صريح (Harry, ... أو ..., Harry.) مو أي اسم يمر بالجملة
-            if (isVocativeName(it.text, pName)) addresseeG = pGen;
-            // "I am X" / "my name is X": المتحدث هو الاسم
-            if (doc.match('(i am|im|my name is) #Person').found) speakerG = pGen;
-         }
+      // فحص التعريف الذاتي
+      const selfIdMatch = it.text.match(MULTILINGUAL_SELF_ID);
+      if (selfIdMatch) {
+          const n = selfIdMatch[1].toLowerCase();
+          speakerG = known.get(n) || dynamicNames.get(n) || 'U';
+      }
+
+      if (people.length > 0) {
+          for (let p of people) {
+              const pName = p.replace(/[^\w\s]/g, '').trim().toLowerCase();
+              const pGen = known.get(pName) || dynamicNames.get(pName);
+              if (pGen) {
+                  // نداء صريح كدليل للمخاطب
+                  if (isVocativeName(it.text, pName)) addresseeG = pGen;
+                  // تعريف ذاتي (إنجليزي) عبر NLP
+                  if (doc.match('(i am|im|my name is) #Person').found && speakerG === 'U') speakerG = pGen;
+              }
+          }
       }
 
       if (speakerG !== 'U' || addresseeG !== 'U') {
-         localHints.set(it.id, speakerG + addresseeG);
+          localHints.set(it.id, speakerG + addresseeG);
       }
     }
 
+    // 4. دمج قاموس التخمينات ضمن سياق الـ AI (بدرجة ثقة أقل)
     if (dynamicNames.size > 0) {
-      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (weak guesses from first names, may be wrong; the story context overrides them):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
-      console.log(`[تخمين الأسماء] تم تخمين جنس ${dynamicNames.size} أسماء جانبية وإضافتها كترجيح ضعيف لسياق الـ AI.`);
+      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (weak guesses from first names; story context overrides them):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
+      console.log(`[قاموس الشخصيات] تم بناء سجل موحد لـ ${dynamicNames.size} اسم جانبي لكامل الملف.`);
     }
     if (localHints.size > 0) {
-      console.log(`[التحليل النحوي] ${localHints.size} سطر فيه دليل محلي (يُستخدم فقط لملء الحروف اللي ما حسمها الـ AI).`);
+      console.log(`[التحليل اللغوي] ${localHints.size} سطر فيه دليل محلي موثوق (تعريف ذاتي أو نداء صريح).`);
     }
   }
   // =====================================================================================
@@ -976,7 +962,6 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (toDo.length > 0) {
     let ruleFixes = 0;
     for (const it of toDo) {
-      // الأسطر ذات عدة متكلمين (g فيه "/") تبقى كما هي
       if (it.g && it.g.includes('/')) continue;
       const adj = applyVocativeRules(cues[it.id].text, it.g);
       if (adj && adj !== it.g) { it.g = adj; ruleFixes++; }
@@ -1000,9 +985,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      // سياق قراءة فقط (قبل/بعد الدفعة) من الملف الأصلي لحل الجمل المقطوعة بين الدفعات
       const ctx = buildChunkContext(cues, chunk);
-      // نرسل البرومبت المحسن (اللي يحتوي على الأسماء الجانبية) للترجمة النهائية أيضاً
       const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx);
       for (const [id, text] of map) {
         results[id] = text;
