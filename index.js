@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed, prefetchRawSub } = require('./ai');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 const { getSubDLEnglish } = require('./subdl');
 
 const app = express();
@@ -805,33 +805,16 @@ app.get([
         }
 
         if (assOnly.length > 0) {
-            // بعض ملفات OpenSubtitles ترفضها بـ 403 حتى من فيرسال، فنحمّل مسبقاً حتى 8 مصادر بالتوازي
-            // ونعرض فقط اللي نزل فعلاً، حتى ما يظهر مسار ASS ميت.
-            const candidates = assOnly.slice(0, 8);
-            const PREFETCH_WAIT_MS = 12000;
-            const results = await Promise.all(candidates.map(c =>
-                Promise.race([
-                    prefetchRawSub(c.url),
-                    new Promise(resolve => setTimeout(() => resolve(false), PREFETCH_WAIT_MS))
-                ]).catch(() => false)
-            ));
-            const okAss = candidates.filter((_, i) => results[i]);
-            console.log(`[Fetch] ASS prefetch: ${okAss.length}/${candidates.length} ملف نزل بنجاح لـ ${finalTargetId}`);
-
-            const maxAss = Math.min(4, okAss.length);
+            const maxAss = Math.min(4, assOnly.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(okAss[i].url)}&track=${i+7}${extraParams}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}${extraParams}`,
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
             }
-            if (maxAss > 0) {
-                console.log(`[Fetch] Added ${maxAss} ASS track(s) (جاهزة ومحمّلة مسبقاً) for ${finalTargetId}`);
-            } else {
-                console.log(`[Fetch] كل مصادر ASS رُفضت (403) لـ ${finalTargetId} - skipping ASS tracks`);
-            }
+            console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
         } else {
             console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
         }
@@ -945,34 +928,6 @@ app.all([
     res.setHeader('Content-Disposition', `inline; filename="Trans-Wait-ASS.ass"`);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(fakeSub);
-});
-
-// ==========================================
-// مسار فحص بالمتصفح (بدون Nuvio): يفتح مسار ASS رقم n لحلقة معينة
-// مثال: /{config}/test-ass/tt2560140:1:1?n=1
-// ==========================================
-app.get('/:config/test-ass/:id', async (req, res) => {
-    try {
-        const n = parseInt(req.query.n || '1', 10);
-        const host = req.headers['x-forwarded-host'] || req.headers.host;
-        const proto = req.headers['x-forwarded-proto'] || 'https';
-        const listUrl = `http://127.0.0.1:${PORT}/${encodeURIComponent(req.params.config)}/subtitles/series/${encodeURIComponent(req.params.id)}.json`;
-
-        const r = await axios.get(listUrl, {
-            timeout: 30000,
-            headers: { 'x-forwarded-host': host, 'x-forwarded-proto': proto }
-        });
-        const list = (r.data && r.data.subtitles) || [];
-        const sub = list.find(s => s.id === `nuvio-ai-ass-${n}`);
-        if (!sub) {
-            return res.status(404).send(`ما لقيت مسار ASS رقم ${n} لهذه الحلقة (عدد مسارات ASS المتوفرة: ${list.filter(s => /ass/.test(s.id)).length})`);
-        }
-        console.log(`[Test-ASS] ${req.params.id} n=${n} -> redirect`);
-        return res.redirect(sub.url);
-    } catch (e) {
-        console.error('[Test-ASS] خطأ:', e.message);
-        return res.status(500).send('Test failed: ' + e.message);
-    }
 });
 
 app.listen(PORT, () => {
