@@ -805,19 +805,33 @@ app.get([
         }
 
         if (assOnly.length > 0) {
-            const maxAss = Math.min(4, assOnly.length);
+            // بعض ملفات OpenSubtitles ترفضها بـ 403 حتى من فيرسال، فنحمّل مسبقاً حتى 8 مصادر بالتوازي
+            // ونعرض فقط اللي نزل فعلاً، حتى ما يظهر مسار ASS ميت.
+            const candidates = assOnly.slice(0, 8);
+            const PREFETCH_WAIT_MS = 12000;
+            const results = await Promise.all(candidates.map(c =>
+                Promise.race([
+                    prefetchRawSub(c.url),
+                    new Promise(resolve => setTimeout(() => resolve(false), PREFETCH_WAIT_MS))
+                ]).catch(() => false)
+            ));
+            const okAss = candidates.filter((_, i) => results[i]);
+            console.log(`[Fetch] ASS prefetch: ${okAss.length}/${candidates.length} ملف نزل بنجاح لـ ${finalTargetId}`);
+
+            const maxAss = Math.min(4, okAss.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i+1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i+7}${extraParams}`,
+                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(okAss[i].url)}&track=${i+7}${extraParams}`,
                     lang: 'ara',
                     title: `Nuvio AI ASS ${i+1} (Sync ${String.fromCharCode(65+i)})`
                 });
             }
-            console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for ${finalTargetId}`);
-
-            // تحميل مسبق: نحمّل ملفات ASS الأصلية بالخلفية فوراً (روابط OpenSubtitles تنتهي بسرعة)
-            for (let i = 0; i < maxAss; i++) prefetchRawSub(assOnly[i].url);
+            if (maxAss > 0) {
+                console.log(`[Fetch] Added ${maxAss} ASS track(s) (جاهزة ومحمّلة مسبقاً) for ${finalTargetId}`);
+            } else {
+                console.log(`[Fetch] كل مصادر ASS رُفضت (403) لـ ${finalTargetId} - skipping ASS tracks`);
+            }
         } else {
             console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
         }
