@@ -218,6 +218,32 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\r/g, '');
 }
 
+function parseRobustJsonArray(raw, expectedLength) {
+  if (!raw) return null;
+  let clean = raw.trim();
+  if (clean.startsWith('```json')) clean = clean.substring(7);
+  else if (clean.startsWith('```')) clean = clean.substring(3);
+  if (clean.endsWith('```')) clean = clean.substring(0, clean.length - 3);
+  clean = clean.trim();
+
+  try {
+    const parsed = JSON.parse(clean);
+    let arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+    if (Array.isArray(arr) && arr.length === expectedLength) {
+      return arr.map(x => {
+        let txt = String(x || '').replace(/âTM./gi, '♪').replace(/â™ª/gi, '♪');
+        return normalizeLineBreakArtifacts(txt).trim();
+      });
+    }
+  } catch (e) {
+    const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
+    if (stringMatches.length === expectedLength) {
+      return stringMatches.filter(s => s !== 'translations' && s !== 'data').map(s => normalizeLineBreakArtifacts(s).replace(/âTM./gi, '♪').trim());
+    }
+  }
+  return null;
+}
+
 function parseIdTranslations(raw) {
   if (!raw) return null;
   let clean = String(raw).trim();
@@ -450,7 +476,6 @@ async function fetchAndExtractSub(subUrl) {
   }
   return fixArabicEncoding(buffer).toString('utf-8');
 }
-
 function prepCueText(t) {
   if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
   return t;
