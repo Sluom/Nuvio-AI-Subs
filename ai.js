@@ -60,6 +60,12 @@ const RESCUE_CONTEXT = 10;                   // ±10 أسطر لإعادة ال�
 const RESCUE_MAX_ASK = 80;                   // أقصى عدد أسطر مطلوبة بطلب إعادة واحد
 const RESCUE_MAX_SPAN = 250;                 // أقصى امتداد (بالأسطر) لنافذة إعادة واحدة
 
+// ================== Patch 3: المشهد والأشخاص ==================
+const ROSTER_ENABLED = process.env.ROSTER_PASS !== '0';   // ROSTER_PASS=0 يرجّع جولة الحروف القديمة
+const VERIFY_RUN_MIN = 6;                    // أقل عدد أسطر FF متتالية لنعتبر المشهد مشبوه
+const VERIFY_MAX_REQUESTS = 6;               // أقصى عدد طلبات رأي ثاني بالملف
+const VERIFY_CONTEXT = 10;
+
 // ================== Patch 2: سجل الشخصيات + الأدلة بدرجات ثقة ==================
 const REGISTRY_BUDGET_MS = 30000;            // وقت طلب سجل الشخصيات (طلب واحد على الملف كامل)
 const REGISTRY_MAX_CHARS = 250000;           // أقصى حجم نص يُرسل للسجل
@@ -400,6 +406,14 @@ ${JSON.stringify(items)}`;
       const map = parseIdTranslations(responseText);
 
       if (map) {
+        // حارس الأرقام: رد فيه أرقام ما طلبتها = أرقام مزاحة أو مخترعة، نرفضه (واحنا نقسم الدفعة ونعيد)
+        const allowedIds = new Set(items.map(i => i.id));
+        let extraIds = 0;
+        for (const id of map.keys()) if (!allowedIds.has(id)) extraIds++;
+        if (extraIds > Math.max(3, Math.floor(items.length * 0.02))) {
+          console.log(`[حارس الأرقام] الرد فيه ${extraIds} رقم ما طلبته (من ${items.length}). أرفضه.`);
+          return { status: 'bad_ids', map: new Map() };
+        }
         if (items.length >= 80) console.log(`[Success] chunk ${items.length} via ...${cleanKey.slice(-4)} (${map.size} رجعت)`);
         return { status: 'ok', map };
       }
@@ -438,6 +452,17 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
 
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
+      break;
+    }
+
+    if ((result.status === 'bad_ids' || result.status === 'bad_format') && pending.length > 60) {
+      const mid = Math.ceil(pending.length / 2);
+      console.log(`[حارس الأرقام] أقسم الدفعة (${pending.length}) لنصفين وأعيد.`);
+      const left = await translateItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, castPromptBlock, ctx);
+      const right = await translateItemsWithRecovery(pending.slice(mid), keysArray, modelName, castPromptBlock, ctx);
+      for (const [id, text] of left) done.set(id, text);
+      for (const [id, text] of right) done.set(id, text);
+      pending = pending.filter(it => !done.has(it.id));
       break;
     }
 
@@ -534,7 +559,7 @@ const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' }
 ];
 
-async function callGeminiText({ prompt, keysArray, modelName, generationConfig, timeout = 120000, attempts = 4, deadline = Infinity }) {
+async function callGeminiText({ prompt, keysArray, modelName, generationConfig, timeout = 120000, attempts = 4, deadline = Infinity, stopOn429 = false }) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   for (let attempt = 0; attempt < attempts; attempt++) {
     const remaining = deadline - Date.now();
@@ -575,6 +600,7 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErr(e)}`);
+      if (status === 429 && stopOn429) return { status: 'rate_limited', text: '' };   // طلب اختياري: ما نحرق مفتاح ثاني
       if (attempt < attempts - 1) await delay(1000 + Math.random() * 1000);
     }
   }
@@ -730,7 +756,9 @@ function annotationConfig(model, baseModel) {
 }
 
 function buildAnnotationPrompt(windowItems, mode, castPromptBlock) {
-  const scope = mode === 'rescue'
+  const scope = mode === 'verify'
+    ? `Answer ONLY for items with "ask":1. Every other item is read-only context. "p" is the code an earlier pass gave. That pass said that ALL the "ask" lines are spoken between two women (FF). This is unusual, so check it carefully: work out who the two sides of this conversation are (names, forms of address, the other lines of the scene), and remember that the two sides can be a woman and a man. Do not assume the earlier pass is right or wrong. Use U for a side you cannot justify.`
+    : mode === 'rescue'
     ? `Answer ONLY for items with "ask":1. Every other item is read-only context. "p" is the code an earlier, less careful pass gave (U = that side was not decided). "p" codes on context items are usually right: use them as evidence about who is in the conversation. For "ask" items, re-read the surrounding lines carefully before answering U.`
     : `Items with "ctx":1 are read-only context from the neighbouring parts of the story: never answer for them. Answer for every other item.`;
 
@@ -754,12 +782,12 @@ ${JSON.stringify(windowItems)}`;
 }
 
 // استدعاء موديل التحليل مع الرجوع التلقائي لموديل الترجمة إذا الإعداد غير صالح
-async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeout = ANNOTATION_REQUEST_TIMEOUT_MS, attempts = ANNOTATION_ATTEMPTS }) {
+async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeout = ANNOTATION_REQUEST_TIMEOUT_MS, attempts = ANNOTATION_ATTEMPTS, stopOn429 = false }) {
   const baseModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   let model = (!annotationModelBroken && ANNOTATION_MODEL) ? normalizeGeminiModelId(ANNOTATION_MODEL) : baseModel;
   const call = m => callGeminiText({
     prompt, keysArray, modelName: m, generationConfig: annotationConfig(m, baseModel),
-    timeout, attempts, deadline
+    timeout, attempts, deadline, stopOn429
   });
   let res = await call(model);
   if (res.status === 'config_error' && model !== baseModel) {
@@ -771,13 +799,20 @@ async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeo
   return { res, model };
 }
 
-// طلب تحليل واحد (شريحة أو نافذة إعادة). يرجع Map(id -> كود خام)
+// طلب تحليل واحد بنظام الحروف (شريحة أو نافذة إعادة/رأي ثاني). يرجع Map(id -> كود خام)
+// state: إذا انمرر، الطلب "اختياري": أول 429 يوقف كل الطلبات الاختيارية (حتى ما نحرق مفاتيح الترجمة).
 // إذا رجع الطلب بدون أي كود: يسجل السبب ويقسم الطلب لنصفين ويعيده مرة وحدة (يعزل الأسطر اللي تسبب الرفض).
-async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock, depth = 0 }) {
+async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock, depth = 0, state = null }) {
+  if (state && state.aborted) return new Map();
   const prompt = buildAnnotationPrompt(windowItems, mode, castPromptBlock);
   const t0 = Date.now();
-  const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline });
+  const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline, stopOn429: !!state });
 
+  if (res.status === 'rate_limited') {
+    if (state) state.aborted = true;
+    console.log(`[تحليل الضمائر] ${label}: 429 (حصة الموديل). أوقف باقي الطلبات الاختيارية.`);
+    return new Map();
+  }
   if (res.status !== 'ok') {
     console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
     return new Map();
@@ -788,7 +823,7 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
   if (map.size === 0) {
     const head = String(res.text || '').replace(/\s+/g, ' ').slice(0, 100);
     console.log(`[تحليل الضمائر] ${label}: ما رجع أي كود (finish=${res.finishReason || '-'} block=${res.blockReason || '-'}) الرد: "${head}"`);
-    const isAnswer = it => (mode === 'rescue' ? !!it.ask : !it.ctx);
+    const isAnswer = it => ((mode === 'rescue' || mode === 'verify') ? !!it.ask : !it.ctx);
     const answerable = windowItems.filter(isAnswer);
     if (depth < 1 && answerable.length >= 20 && deadline - Date.now() > 4000) {
       const half = Math.floor(answerable.length / 2);
@@ -802,7 +837,7 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
         return o;
       });
       console.log(`[تحليل الضمائر] ${label}: أقسم الطلب لنصفين وأعيده.`);
-      const common = { mode, keysArray, modelName, deadline, castPromptBlock, depth: depth + 1 };
+      const common = { mode, keysArray, modelName, deadline, castPromptBlock, depth: depth + 1, state };
       const [mA, mB] = await Promise.all([
         annotateWindow({ ...common, windowItems: demote(keepA), label: `${label} (نصف 1)` }),
         annotateWindow({ ...common, windowItems: demote(keepB), label: `${label} (نصف 2)` })
@@ -811,6 +846,175 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
     }
   }
   return map;
+}
+
+// ==================================================================================
+// ================== Patch 3: المشهد والأشخاص (بدل الحروف المنفصلة) ==================
+// ==================================================================================
+// الموديل يعطي أول شي قائمة الأشخاص بأجناسهم (شخص = جنس واحد ثابت)، وبعدين لكل سطر: منو يحچي ولمنو.
+// الجنس يطلع بالكود من الشخص، فنفس الشخص ما ينقلب جنسه بنص المشهد، وأشخاص الكاست يتصححون كلهم مرة وحدة.
+
+function buildRosterPrompt(windowItems, castPromptBlock) {
+  return `You will receive consecutive subtitle lines from ONE film or episode, in story order, as a JSON array of objects {"id": <number>, "t": "<m:ss start time>", "text": "<subtitle text>"}.
+Optional fields: "b":1 = a pause of several seconds before this line (often a new scene or a change of speakers); "turns": N = the text holds N speaker turns separated by "⏎"; "ctx":1 = read-only context from the neighbouring parts of the story.
+The subtitles can be in ANY language. Read the story first.
+STEP 1 - PEOPLE: list every person who speaks or is spoken to in the lines that are not "ctx". For each person give "id" ("P1", "P2", ...), "name" (the name used in the subtitles or in the known characters list below; if the person is never named, a short description such as "woman in black" or "waiter"), and "gender" ("M", "F", or "U" only if the story really does not show it). A person has ONE gender, valid for every line. If a person is a known character from the list below, use that name and that gender.
+STEP 2 - LINES: for every line that is not "ctx", say who speaks and who is addressed, using the person ids: "<id>:<speaker>><addressee>".
+- Use "G" for a group or mixed audience, "N" for none (narration, on-screen text, sound effects, songs, or talking to oneself), and "?" when you cannot tell.
+- If an item has "turns": N, give N pairs separated by "/", one per turn in order (each turn usually starts with "-"), for example "14:P1>P2/P2>P1".
+Evidence to use: names, titles and forms of address, who was just spoken to, the alternation of replies (in a conversation between two people the speakers alternate and each one is the addressee of the other, and the two can be a woman and a man), pauses ("b":1), "he said" / "she said", and grammatical gender inside the line (for example Portuguese "obrigada" = a woman is speaking, "obrigado" = a man; Spanish "estoy cansada"; French "je suis fatiguée"; Russian "я устала"). Do not guess randomly: use "?" or "U" when unsure.
+${castPromptBlock ? '\n' + castPromptBlock + '\n' : ''}
+Output ONLY valid JSON: {"people":[{"id":"P1","name":"Harry","gender":"M"}],"lines":["12:P1>P2","13:P2>P1","14:N>N"]}
+Lines:
+${JSON.stringify(windowItems)}`;
+}
+
+function parseRosterResponse(raw) {
+  if (!raw) return null;
+  const clean = String(raw).trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  let parsed = null;
+  try { parsed = JSON.parse(clean); }
+  catch (e) {
+    const a = clean.indexOf('{'), b = clean.lastIndexOf('}');
+    if (a >= 0 && b > a) { try { parsed = JSON.parse(clean.slice(a, b + 1)); } catch (e2) {} }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const people = new Map();
+  for (const p of (Array.isArray(parsed.people) ? parsed.people : [])) {
+    if (!p || p.id == null) continue;
+    const id = String(p.id).trim().toUpperCase();
+    let g = String(p.gender || 'U').trim().toUpperCase();
+    if (g !== 'M' && g !== 'F') g = 'U';
+    people.set(id, { id, name: String(p.name || '').trim().slice(0, 60), gender: g });
+  }
+  // احتياط: إذا الموديل كتب الاسم بدل P1 بالأسطر، نطابق بالاسم
+  people.nameIndex = new Map([...people.values()].filter(p => p.name).map(p => [normName(p.name), p]));
+  const lines = new Map();
+  for (const s of (Array.isArray(parsed.lines) ? parsed.lines : [])) {
+    const m = String(s).match(/^\s*(\d+)\s*[:=]\s*(.+?)\s*$/);
+    if (m) lines.set(Number(m[1]), m[2]);
+  }
+  return { people, lines };
+}
+
+// اسم الشخص بالفهرس (كاست/ملف). الأسماء الوصفية (woman in black) ما تتطابق بالكلمات المفردة.
+function lookupRegistry(name, index) {
+  if (!index || !index.size) return null;
+  const k = normName(name);
+  if (!k) return null;
+  let ent = index.map.get(k);
+  if (ent) return ent;
+  const noTitle = k.split(' ').filter(w => !HONORIFICS.has(w.replace(/\.$/, ''))).join(' ');
+  ent = noTitle ? index.map.get(noTitle) : null;
+  if (ent) return ent;
+  const words = String(name).trim().split(/\s+/);
+  if (!words.every(w => /^\p{Lu}/u.test(w))) return null;
+  for (const w of noTitle.split(' ')) {
+    if (w.length >= 3 && !ALIAS_STOP.has(w) && !HONORIFICS.has(w)) {
+      const e = index.map.get(w);
+      if (e) return e;
+    }
+  }
+  return null;
+}
+
+// الكاست يثبّت جنس الشخص، والملف يملأ U فقط
+function fixRosterGenders(people, index, stats) {
+  if (!index || !index.size) return;
+  for (const p of people.values()) {
+    const ent = lookupRegistry(p.name, index);
+    if (!ent) continue;
+    if (ent.tier === 'cast') {
+      if (p.gender !== ent.gender) {
+        if (p.gender === 'U') stats.filled++; else stats.changed++;
+        p.gender = ent.gender;
+      }
+    } else if (p.gender === 'U') {
+      p.gender = ent.gender;
+      stats.filled++;
+    }
+  }
+}
+
+function rosterLetter(token, people) {
+  const t = String(token || '').trim().toUpperCase();
+  if (t === 'G') return 'G';
+  if (t === 'N') return 'N';
+  const p = people.get(t) || (people.nameIndex && people.nameIndex.get(normName(token)));
+  return p ? p.gender : 'U';
+}
+
+// "P1>P2" أو "P1>P2/P2>P1" -> "FM" أو "FM/MF"
+function deriveRosterCode(spec, turns, people) {
+  const segs = String(spec).split('/');
+  if (segs.length !== (turns || 1)) return null;
+  const out = [];
+  for (const seg of segs) {
+    const parts = seg.split('>');
+    if (parts.length !== 2) return null;
+    const s = parts[0].trim().toUpperCase();
+    const a = parts[1].trim().toUpperCase();
+    const sl = rosterLetter(s, people);
+    let al = rosterLetter(a, people);
+    if (s === a && people.has(s)) al = 'N';   // يخاطب نفسه
+    out.push(sl + al);
+  }
+  return out.join('/');
+}
+
+// طلب "المشهد والأشخاص" لشريحة. يرجع Map(id -> كود) أو null إذا فشل (نرجع حينها لجولة الحروف)
+async function annotateRosterWindow({ windowItems, keysArray, modelName, deadline, label, castPromptBlock, regIndex, turnsById, rosterStats }) {
+  const prompt = buildRosterPrompt(windowItems, castPromptBlock);
+  const t0 = Date.now();
+  const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline });
+  if (res.status !== 'ok') {
+    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
+    return null;
+  }
+  const parsed = parseRosterResponse(res.text);
+  if (!parsed || parsed.lines.size === 0) {
+    const head = String(res.text || '').replace(/\s+/g, ' ').slice(0, 100);
+    console.log(`[تحليل الضمائر] ${label}: ما رجع جدول صالح (finish=${res.finishReason || '-'} block=${res.blockReason || '-'}) الرد: "${head}"`);
+    return null;
+  }
+  fixRosterGenders(parsed.people, regIndex, rosterStats);
+  const map = new Map();
+  for (const [id, spec] of parsed.lines) {
+    const turns = turnsById.get(id);
+    if (!turns) continue;
+    const code = deriveRosterCode(spec, turns, parsed.people);
+    if (code) map.set(id, code);
+  }
+  rosterStats.slices++;
+  rosterStats.people += parsed.people.size;
+  console.log(`[تحليل الضمائر] ${label}: ${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${Date.now() - t0}ms (${model}).`);
+  if (process.env.GENDER_DEBUG === '1') {
+    console.log(`[مشهد] ${label}: ` + [...parsed.people.values()].slice(0, 40).map(p => `${p.id}=${p.name || '?'}(${p.gender})`).join(', '));
+  }
+  return map;
+}
+
+// مشاهد فيها FF متتالية (امرأة مع امرأة): نادرة بمعظم الأعمال، فنسأل رأي ثاني عليها
+const isFFcode = c => !!c && c.split('/').every(seg => seg === 'FF');
+function findFFRuns(items, codeOf, minLen) {
+  const runs = [];
+  let cur = [];
+  let ff = 0;
+  const flush = () => {
+    while (cur.length && !isFFcode(codeOf(cur[cur.length - 1].id))) cur.pop();
+    if (ff >= minLen && cur.length) runs.push({ items: cur.slice(), ff });
+    cur = [];
+    ff = 0;
+  };
+  for (const it of items) {
+    const c = codeOf(it.id);
+    if (it.b === 1 && cur.length) flush();
+    if (isFFcode(c)) { cur.push(it); ff++; }
+    else if (c && /[MG]/.test(c)) flush();      // سطر فيه ذكر أو جماعة يقطع المشهد
+    else if (cur.length) cur.push(it);          // محايد (NN/UU/FU...) يبقى داخل المشهد
+  }
+  flush();
+  return runs;
 }
 
 // ==================================================================================
@@ -1033,10 +1237,10 @@ function applyEvidence(code, ev, stats) {
   }).join('/');
 }
 
-// الجولة الأولى: كل الأسطر بالتسلسل بشرائح مع تداخل. بعدها تُطبق الأدلة (سجل الشخصيات + NLP) ثم
-// الجولة الثانية: إعادة الأسطر اللي بقي فيها U فقط بسياق ±10 وبأكواد الجولة الأولى، وتُطبق الأدلة مرة ثانية.
+// الجولة 1: "المشهد والأشخاص" (وإذا فشلت شريحة نرجع لجولة الحروف لها). بعدها: أدلة -> إعادة U -> رأي ثاني للمشاهد
+// المشبوهة (FF متتالية) -> أدلة -> حفظ. الطلبات الاختيارية (إعادة U والرأي الثاني) تتوقف عند أول 429.
 // evidence: Map(id -> [{s,sT,a,aT}]) حسب أدوار المتكلمين.
-async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', evidence = new Map()) {
+async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', evidence = new Map(), regIndex = null) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
 
@@ -1047,6 +1251,8 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   const defaultCode = id => Array(turnsById.get(id) || 1).fill('UU').join('/');
   const conc = Math.max(1, Math.min(aliveKeyCount(keysArray), ANNOTATION_MAX_CONCURRENCY));
   const evStats = { overridden: 0, filled: 0 };
+  const rosterStats = { changed: 0, filled: 0, people: 0, slices: 0, fallbacks: 0 };
+  const optState = { aborted: false };
   const applyAllEvidence = () => {
     for (const it of pending) {
       const ev = evidence.get(it.id);
@@ -1056,8 +1262,15 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
       if (next !== base) coded.set(it.id, next);
     }
   };
+  const windowFor = (fromPos, toPos, askSet) => items.slice(fromPos, toPos).map(it => {
+    const o = { ...it };
+    const p = coded.get(it.id) || cache.get(it.id);
+    if (p) o.p = p;
+    if (askSet.has(it.id)) o.ask = 1; else o.ctx = 1;
+    return o;
+  });
 
-  // ---------- الجولة الأولى ----------
+  // ---------- الجولة الأولى: المشهد والأشخاص ----------
   if (pending.length > 0) {
     const ranges = makeCoreRanges(items.length, ANNOTATION_SLICE_SIZE);
     const tasks = [];
@@ -1068,10 +1281,23 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
       const to = Math.min(items.length, b + ANNOTATION_OVERLAP);
       const windowItems = items.slice(from, to).map((it, k) => ((from + k < a || from + k >= b) ? { ...it, ctx: 1 } : it));
       tasks.push(async () => {
-        const map = await annotateWindow({
-          windowItems, mode: 'main', keysArray, modelName, deadline,
-          label: `جولة 1 شريحة ${ri + 1}/${ranges.length}`, castPromptBlock
-        });
+        const need = core.filter(it => !cache.has(it.id));
+        let map = null;
+        if (ROSTER_ENABLED) {
+          map = await annotateRosterWindow({
+            windowItems, keysArray, modelName, deadline, castPromptBlock, regIndex, turnsById, rosterStats,
+            label: `جولة 1 (مشهد) شريحة ${ri + 1}/${ranges.length}`
+          });
+        }
+        const covered = map ? need.filter(it => map.has(it.id)).length : 0;
+        if (!map || covered < need.length * 0.5) {
+          rosterStats.fallbacks++;
+          const lm = await annotateWindow({
+            windowItems, mode: 'main', keysArray, modelName, deadline, castPromptBlock,
+            label: `جولة 1 (حروف) شريحة ${ri + 1}/${ranges.length}`
+          });
+          map = new Map([...lm, ...(map || [])]);   // نتيجة المشهد لها الأولوية
+        }
         for (const it of core) {
           if (cache.has(it.id)) continue;
           const c = normalizeCode(map.get(it.id), turnsById.get(it.id));
@@ -1081,12 +1307,15 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     });
     console.log(`[تحليل الضمائر] ${items.length} سطر بالتسلسل (من ${cues.length}) | ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${aliveKeyCount(keysArray)}).`);
     await runConcurrentPool(tasks, conc);
+    if (ROSTER_ENABLED) {
+      console.log(`[مشهد] ${rosterStats.slices} شريحة بنظام الأشخاص | ${rosterStats.people} شخص | الكاست غيّر جنس ${rosterStats.changed} شخص وملأ ${rosterStats.filled} | رجعت للحروف ${rosterStats.fallbacks} شريحة.`);
+    }
   }
 
   // الأدلة المؤكدة تتطبق قبل الإعادة، حتى ما نضيع طلبات على أسطر انحسمت
   applyAllEvidence();
 
-  // ---------- الجولة الثانية: إعادة الناقص وأسطر U فقط ----------
+  // ---------- الجولة الثانية: إعادة الناقص وأسطر U فقط (اختيارية) ----------
   const askList = pending.filter(it => {
     const c = coded.get(it.id);
     return !c || c.includes('U');
@@ -1107,21 +1336,13 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     if (cur.length) groups.push(cur);
 
     const tasks = groups.map((group, gi) => async () => {
+      if (optState.aborted) return;
       const first = posById.get(group[0].id);
       const last = posById.get(group[group.length - 1].id);
-      const from = Math.max(0, first - RESCUE_CONTEXT);
-      const to = Math.min(items.length, last + 1 + RESCUE_CONTEXT);
-      const askSet = new Set(group.map(it => it.id));
-      const windowItems = items.slice(from, to).map(it => {
-        const o = { ...it };
-        const p = coded.get(it.id) || cache.get(it.id);
-        if (p) o.p = p;
-        if (askSet.has(it.id)) o.ask = 1; else o.ctx = 1;
-        return o;
-      });
+      const windowItems = windowFor(Math.max(0, first - RESCUE_CONTEXT), Math.min(items.length, last + 1 + RESCUE_CONTEXT), new Set(group.map(it => it.id)));
       const map = await annotateWindow({
-        windowItems, mode: 'rescue', keysArray, modelName, deadline,
-        label: `جولة 2 (إعادة U) نافذة ${gi + 1}/${groups.length} [${group.length} سطر]`, castPromptBlock
+        windowItems, mode: 'rescue', keysArray, modelName, deadline, castPromptBlock, state: optState,
+        label: `جولة 2 (إعادة U) نافذة ${gi + 1}/${groups.length} [${group.length} سطر]`
       });
       for (const it of group) {
         const nc = normalizeCode(map.get(it.id), turnsById.get(it.id));
@@ -1132,8 +1353,48 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     await runConcurrentPool(tasks, conc);
   }
 
-  // ---------- أدلة مرة ثانية على نتائج الإعادة، ثم الحفظ بالكاش ----------
   applyAllEvidence();
+
+  // ---------- رأي ثاني: مشاهد مشبوهة (FF متتالية) ----------
+  if (!optState.aborted && deadline - Date.now() > 6000) {
+    const codeOf = id => coded.get(id) || cache.get(id);
+    const jobs = [];
+    for (const run of findFFRuns(items, codeOf, VERIFY_RUN_MIN)) {
+      if (!run.items.some(it => !cache.has(it.id))) continue;
+      for (let i = 0; i < run.items.length; i += 80) jobs.push({ items: run.items.slice(i, i + 80), ff: run.ff });
+    }
+    jobs.sort((x, y) => y.ff - x.ff);
+    const picked = jobs.slice(0, VERIFY_MAX_REQUESTS);
+    if (picked.length > 0) {
+      console.log(`[تحليل الضمائر] رأي ثاني: ${picked.length} طلب لمشاهد فيها FF متتالية (امرأة مع امرأة).`);
+      let changedLines = 0;
+      const vtasks = picked.map((job, vi) => async () => {
+        if (optState.aborted) return;
+        const first = posById.get(job.items[0].id);
+        const last = posById.get(job.items[job.items.length - 1].id);
+        const windowItems = windowFor(Math.max(0, first - VERIFY_CONTEXT), Math.min(items.length, last + 1 + VERIFY_CONTEXT), new Set(job.items.map(it => it.id)));
+        const map = await annotateWindow({
+          windowItems, mode: 'verify', keysArray, modelName, deadline, castPromptBlock, state: optState,
+          label: `رأي ثاني مشهد ${vi + 1}/${picked.length} [${job.items.length} سطر]`
+        });
+        for (const it of job.items) {
+          if (cache.has(it.id)) continue;
+          const nc = normalizeCode(map.get(it.id), turnsById.get(it.id));
+          if (!nc) continue;
+          const old = coded.get(it.id) || defaultCode(it.id);
+          const merged = mergeCodes(nc, old);        // الحرف اللي رجع U يبقى على قراءته الأولى
+          if (merged !== old) { coded.set(it.id, merged); changedLines++; }
+        }
+      });
+      await runConcurrentPool(vtasks, Math.min(conc, 4));
+      console.log(`[تحليل الضمائر] الرأي الثاني غيّر ${changedLines} سطر.`);
+      applyAllEvidence();
+    }
+  }
+  if (optState.aborted) {
+    console.log('[تحليل الضمائر] وصلت حصة الموديل (429) فأوقفت باقي الطلبات الاختيارية لأحمي مفاتيح الترجمة.');
+  }
+
   console.log(`[أدلة] غيّرت ${evStats.overridden} حرف من قرار الـ AI (دليل مؤكد من الكاست)، وملأت ${evStats.filled} حرف ناقص.`);
 
   for (const it of pending) {
@@ -1274,7 +1535,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       try {
         const tA = Date.now();
         const deadline = Date.now() + ANNOTATION_BUDGET_MS;
-        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, enhancedCastPrompt, evidence);
+        const annotations = await getAnnotations(cues, keysArray, modelName, cacheKey, deadline, enhancedCastPrompt, evidence, regIndex);
 
         let attached = 0;
         for (const it of toDo) {
