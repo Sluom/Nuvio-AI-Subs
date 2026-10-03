@@ -1432,6 +1432,8 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (fromCache > 0) console.log(`[كاش الأسطر] ${fromCache} سطر جاهز من قبل، أترجم الباقي (${toDo.length}) فقط.`);
 
   let enhancedCastPrompt = castPromptBlock || '';
+  const storyM = String(castPromptBlock || '').match(/STORY OVERVIEW:\n([\s\S]*?)\n\nKNOWN CHARACTERS/);
+console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${storyM[1].replace(/\s+/g, ' ')}` : '[القصة] غير مرفقة (ما في كاست)');
   // أدلة محلية من NLP (ضعيفة): تملأ الحروف اللي بقيت U فقط
   const localHints = new Map();
 
