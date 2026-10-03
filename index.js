@@ -256,13 +256,21 @@ function mkOsSub(url, name, isAss, isHi) {
     };
 }
 
-async function fetchLegacyData(url) {
-    try {
-        const response = await fetch(url, {
-            headers: { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': 'application/json' }
-        });
+const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
-        console.log(`[Legacy] ${response.status} <- ${url}`);
+async function fetchLegacyData(url, retryOn403 = false) {
+    try {
+        const agents = retryOn403 ? LEGACY_AGENTS : LEGACY_AGENTS.slice(0, 1);
+        let response;
+
+        for (let i = 0; i < agents.length; i++) {
+            const ua = agents[i];
+            response = await fetch(url, {
+                headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' }
+            });
+            console.log(`[Legacy] ${response.status}${i > 0 ? ` (محاولة ثانية: ${ua})` : ''} <- ${url}`);
+            if (response.status !== 403) break;
+        }
 
         if (!response.ok) return [];
         const data = await response.json();
@@ -295,7 +303,7 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
         ? `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`
         : `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
 
-    let results = await fetchLegacyData(primaryUrl);
+    let results = await fetchLegacyData(primaryUrl, true);
 
     if (hasSE && !results.some(r => r.format === 'ass' || r.format === 'ssa')) {
         const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
