@@ -1,4 +1,3 @@
-// tmdb.js — يجيب أسماء الشخصيات، جنس الممثلين، وملخص القصة من TMDB
 const axios = require('axios');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
@@ -36,14 +35,10 @@ function parseStremioId(id) {
   return { imdbId, season: Number.isInteger(season) ? season : null, episode: Number.isInteger(episode) ? episode : null };
 }
 
-function genderLetter(g) {
-  if (g === 1) return 'F';
-  if (g === 2) return 'M';
-  return null;
-}
+const genderLetter = g => (g === 1 ? 'F' : g === 2 ? 'M' : null);
 
 function cleanCharacter(name) {
-  let n = String(name || '')
+  const n = String(name || '')
     .replace(/\((?:[^)]*)\)/g, '')
     .replace(/\[(?:[^\]]*)\]/g, '')
     .split('/')[0]
@@ -70,7 +65,7 @@ async function getTmdbCast(stremioId, userKey = null) {
 
   const safeKeySuffix = userKey ? userKey.slice(-4) : 'env';
   const cacheKey = `${imdbId}:${season || ''}:${episode || ''}-${safeKeySuffix}`;
-  
+
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.t < CACHE_TTL_MS) return hit.data;
 
@@ -117,7 +112,7 @@ async function getTmdbCast(stremioId, userKey = null) {
           addEntry(list, seen, roles[0] && roles[0].character, p.name, p.gender, p.order);
         }
       }
-      
+
       if (!overviewText && tv) overviewText = tv.overview || '';
     }
 
@@ -141,7 +136,6 @@ async function getTmdbCast(stremioId, userKey = null) {
 
 module.exports = { getTmdbCast, parseStremioId };
 
-// ---------- اختبار مباشر: node tmdb.js tt0111161 ----------
 if (require.main === module) {
   (async () => {
     const id = process.argv[2];
