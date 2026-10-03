@@ -299,6 +299,7 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
 
     if (hasSE && !results.some(r => r.format === 'ass' || r.format === 'ssa')) {
         const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
+        console.log('[Legacy] أسماء ASS: ' + fallbackResults.filter(r => r.format === 'ass' || r.format === 'ssa').map(r => r.fileName).join(' | '));
         const filteredFallback = fallbackResults.filter(r => (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.fileName, episode));
         results = [...results, ...filteredFallback];
     }
