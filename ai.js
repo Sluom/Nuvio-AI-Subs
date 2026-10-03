@@ -1345,6 +1345,38 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     for (const it of pick) console.log(`[فحص] #${it.id} [${it.g || '--'}] ${flat(cues[it.id].text)} => ${flat(results[it.id])}`);
   }
 
+  // ===== أداة بحث/تشخيص (تطبع باللوق فقط، ما تغيّر الترجمة) =====
+  // GENDER_FIND=Seraphina|تفعلين هذا  -> كل سطر يطابق (بالأصل أو بالترجمة) مع سطرين قبل وبعد وكود كل سطر
+  // GENDER_DEBUG=1                    -> يطبع سجل الشخصيات: الاسم، الجنس، المصدر (cast = كاست، file = من قراءة الملف)
+  const FIND = String(process.env.GENDER_FIND || '').trim();
+  const DEBUG = process.env.GENDER_DEBUG === '1';
+  if ((FIND || DEBUG) && toDo.length > 0) {
+    const flat2 = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
+    if (DEBUG && regIndex) {
+      console.log(`[سجل] ${regIndex.entries.length} شخصية (كاست ${regIndex.castCount} + ملف ${regIndex.fileCount}):`);
+      regIndex.entries.slice(0, 80).forEach(e => console.log(`[سجل] ${e.name} = ${e.gender} (${e.tier})${e.aliases.length ? ' | ' + e.aliases.slice(0, 5).join(', ') : ''}`));
+    }
+    if (FIND) {
+      let re = null;
+      try { re = new RegExp(FIND, 'iu'); } catch (e) { console.log(`[بحث] تعبير غير صالح: ${e.message}`); }
+      if (re) {
+        const byId = new Map(toDo.map(it => [it.id, it]));
+        const hits = [];
+        cues.forEach((c, i) => { if (byId.has(i) && (re.test(flat2(c.text)) || re.test(flat2(results[i])))) hits.push(i); });
+        const MAX_HITS = 25;
+        console.log(`[بحث] "${FIND}": ${hits.length} سطر مطابق${hits.length > MAX_HITS ? ` (أطبع أول ${MAX_HITS})` : ''}`);
+        for (const i of hits.slice(0, MAX_HITS)) {
+          console.log(`[بحث] ----- #${i}`);
+          for (let j = Math.max(0, i - 2); j <= Math.min(cues.length - 1, i + 2); j++) {
+            const it = byId.get(j);
+            if (!it) continue;
+            console.log(`[بحث] ${j === i ? '>>' : '  '}#${j} [${it.g || '--'}] ${flat2(cues[j].text)} => ${flat2(results[j])}`);
+          }
+        }
+      }
+    }
+  }
+
   const missing = results.filter(r => r == null).length;
   if (missing > 0) {
     console.log(`[تنبيه] ${missing} سطر بقوا بنصهم الأصلي بعد كل المحاولات (محفوظ الباقي بالكاش).`);
