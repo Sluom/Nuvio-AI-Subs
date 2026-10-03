@@ -1334,6 +1334,17 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       .filter(ch => ch.length > 0);
   }
 
+  // ===== أداة فحص (تطبع باللوق فقط، ما تغيّر الترجمة): عينة عشوائية للتأكد من صحة الجنس يدوياً =====
+  // GENDER_SAMPLE=0 بـ Environment يوقفها. الافتراضي 40 سطر.
+  const SAMPLE_N = parseInt(process.env.GENDER_SAMPLE || '40', 10);
+  if (SAMPLE_N > 0 && toDo.length > 0) {
+    const flat = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
+    const pool = toDo.filter(it => results[it.id] != null);
+    const pick = pool.slice().sort(() => Math.random() - 0.5).slice(0, SAMPLE_N).sort((a, b) => a.id - b.id);
+    console.log(`[فحص] عينة ${pick.length} سطر عشوائي. الرمز بين [] = متكلم/مخاطَب (-- = بدون هنت):`);
+    for (const it of pick) console.log(`[فحص] #${it.id} [${it.g || '--'}] ${flat(cues[it.id].text)} => ${flat(results[it.id])}`);
+  }
+
   const missing = results.filter(r => r == null).length;
   if (missing > 0) {
     console.log(`[تنبيه] ${missing} سطر بقوا بنصهم الأصلي بعد كل المحاولات (محفوظ الباقي بالكاش).`);
