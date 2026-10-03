@@ -3,7 +3,6 @@ const axios = require('axios');
 const SUBDL_API = 'https://api.subdl.com/api/v1/subtitles';
 const SUBDL_DL = 'https://dl.subdl.com';
 
-// الكود في SubDL -> الكود المستخدم عندك بالـ index (بدون أي أولوية)
 const SUBDL_LANGS = {
   EN: 'eng', JA: 'jpn', TR: 'tur', FA: 'per', RU: 'rus',
   KO: 'kor', FR: 'fre', ES: 'spa', HI: 'hin', PT: 'por',
@@ -25,29 +24,17 @@ function detectLang(s) {
   return NAME_TO_CODE[name] || null;
 }
 
-// كشف نسخ الصم وضعاف السمع: الحقل الرسمي أولاً، ثم الأسماء البديلة
+const HI_REGEX = /\bsdh\b|\bcc\b|hearing[\s._-]*impaired|hard[\s._-]*of[\s._-]*hearing|\bhoh\b|closed[\s._-]*caption|\bdeaf\b|\bh\.i\b/;
+
 function isHearingImpaired(s, langCode) {
   if (s.hi === true || s.hi === 1 || s.hi === '1') return true;
 
   const text = [s.release_name, s.name, s.url]
     .filter(Boolean).map(x => String(x).toLowerCase()).join(' ');
 
-  const patterns = [
-    /\bsdh\b/,
-    /\bcc\b/,
-    /hearing[\s._-]*impaired/,
-    /hard[\s._-]*of[\s._-]*hearing/,
-    /\bhoh\b/,
-    /closed[\s._-]*caption/,
-    /\bdeaf\b/,
-    /\bh\.i\b/
-  ];
-  if (patterns.some(p => p.test(text))) return true;
+  if (HI_REGEX.test(text)) return true;
 
-  // "hi" لوحدها تعني Hearing Impaired، لكن نتجاهلها مع الهندية لأنها كود لغتها
-  if (langCode !== 'HI' && /[\s._-]hi[\s._-]/.test(` ${text} `)) return true;
-
-  return false;
+  return langCode !== 'HI' && /[\s._-]hi[\s._-]/.test(` ${text} `);
 }
 
 async function querySubDL(key, baseParams, extra) {
@@ -64,7 +51,6 @@ async function querySubDL(key, baseParams, extra) {
   return data.subtitles;
 }
 
-// رابط بدون ?api_key=... عشان المفتاح ما يوصل للمستخدمين
 const cleanPath = p => String(p).split('?')[0];
 
 async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
@@ -80,7 +66,7 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
   }
 
   const isSeries = season != null && episode != null;
-  const wanted = (languages && languages.length ? languages : ALL_LANGS);
+  const wanted = languages && languages.length ? languages : ALL_LANGS;
 
   const baseParams = {
     imdb_id: imdbId,
@@ -94,7 +80,6 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
   }
 
   try {
-    // طلب عادي (كل الترجمات) + طلب hi=1 (لمعرفة نسخ SDH فقط) بالتوازي
     const [normalRes, hiRes] = await Promise.allSettled([
       querySubDL(key, baseParams, {}),
       querySubDL(key, baseParams, { hi: '1' })
@@ -107,7 +92,6 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
       console.log(`[SubDL] فشل الطلب العادي لـ ${imdbId}: ${normalRes.reason.message}`);
     }
 
-    // روابط نسخ SDH المؤكدة من الحقل الرسمي
     const hiPaths = new Set(
       hiList.filter(s => s && s.url && s.hi === true).map(s => cleanPath(s.url))
     );
@@ -132,16 +116,10 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
       })
       .filter(Boolean);
 
-    // إزالة التكرار
     const seen = new Set();
-    const unique = list.filter(s => {
-      if (seen.has(s.url)) return false;
-      seen.add(s.url);
-      return true;
-    });
+    const unique = list.filter(s => !seen.has(s.url) && seen.add(s.url));
 
-    // الاحترافي أولاً، SDH/HI بالنهاية (sort مستقر)
-    unique.sort((a, b) => (a.hearingImpaired ? 1 : 0) - (b.hearingImpaired ? 1 : 0));
+    unique.sort((a, b) => (+a.hearingImpaired - +b.hearingImpaired) || ((b.lang === 'eng') - (a.lang === 'eng')));
 
     const hiCount = unique.filter(s => s.hearingImpaired).length;
     console.log(`[SubDL] رجّع ${unique.length} ترجمة لـ ${imdbId}${isSeries ? ` (S${season}E${episode})` : ''} (${hiCount} SDH/HI بالنهاية).`);
@@ -151,4 +129,5 @@ async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
     return [];
   }
 }
+
 module.exports = { getSubDLEnglish, SUBDL_LANGS };
