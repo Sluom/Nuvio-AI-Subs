@@ -221,6 +221,7 @@ function isHearingImpairedSub(sub) {
 
 const hiRank = s => (isHearingImpairedSub(s) ? 1 : 0);
 const isEng = s => /^en/i.test((s && s.lang) || '');
+const byEng = (a, b) => isEng(b) - isEng(a);
 const isHiFlag = v => ['1', 1, true].includes(v);
 
 function matchEpisode(fileName, targetEpisode) {
@@ -508,6 +509,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.json(m);
 });
 
+const WANTED_TRACKS = 6;
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
@@ -581,36 +583,41 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
         console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assOnly.filter(s => isHearingImpairedSub(s)).length} SDH, pushed to the back)`);
 
-        let srtSubs = [];
+        let osClean = [], osHi = [];
 
         if (subtitlesData.length > 0) {
-            const sortedSubs = subtitlesData
-                .filter(s => {
-                    const lang = (s.lang || '').toLowerCase();
-                    return TARGET_LANGS.some(l => lang.startsWith(l));
-                })
-                .sort((a, b) => (isEng(b) - isEng(a)) || (hiRank(a) - hiRank(b)));
+            const validSubs = subtitlesData.filter(s => {
+                const lang = (s.lang || '').toLowerCase();
+                return TARGET_LANGS.some(l => lang.startsWith(l));
+            });
 
-            console.log(`[SDH Filter] ${sortedSubs.filter(s => !isHearingImpairedSub(s)).length}/${sortedSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
+            console.log(`[SDH Filter] ${validSubs.filter(s => !isHearingImpairedSub(s)).length}/${validSubs.length} valid subtitle(s) are non-SDH for ${finalTargetId}`);
 
-            srtSubs = sortedSubs.filter(s => {
+            const srtOnly = validSubs.filter(s => {
                 const fname = (s.subtitleFileName || '').toLowerCase();
                 const url = (s.url || '').toLowerCase();
                 return !/\.(ass|ssa)$/.test(fname) && !/\.(ass|ssa)/.test(url);
             });
-        } else {
-            console.log(`[SubDL] OpenSubtitles ما رجّع أي ترجمة لـ ${finalTargetId}، أجرب SubDL...`);
 
-            const subdlSubs = [...(await getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode }))]
-                .sort((a, b) => isEng(b) - isEng(a));
-
-            if (subdlSubs.length > 0) {
-                srtSubs = subdlSubs;
-                console.log(`[SubDL] راح أستخدم ${subdlSubs.length} ترجمة من SubDL لـ ${finalTargetId}.`);
-            } else {
-                console.log(`[SubDL] ما لقيت شي بـ SubDL لـ ${finalTargetId}.`);
-            }
+            osClean = srtOnly.filter(s => !isHearingImpairedSub(s)).sort(byEng);
+            osHi = srtOnly.filter(s => isHearingImpairedSub(s)).sort(byEng);
         }
+
+        let subdlClean = [], subdlHi = [];
+
+        if (osClean.length < WANTED_TRACKS) {
+            console.log(`[SubDL] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL للتكملة...`);
+
+            const subdlSubs = await getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode }).catch(() => []);
+            subdlClean = subdlSubs.filter(s => !s.hearingImpaired).sort(byEng);
+            subdlHi = subdlSubs.filter(s => s.hearingImpaired).sort(byEng);
+
+            console.log(subdlClean.length + subdlHi.length > 0
+                ? `[SubDL] راح أستخدم ${subdlClean.length} غير SDH و ${subdlHi.length} SDH (احتياط) من SubDL لـ ${finalTargetId}.`
+                : `[SubDL] ما لقيت شي بـ SubDL لـ ${finalTargetId}.`);
+        }
+
+        const srtSubs = [...osClean, ...subdlClean, ...osHi, ...subdlHi];
 
         const transSubs = [];
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : '/stream-ai.srt';
@@ -620,7 +627,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
 
         if (srtSubs.length > 0) {
-            for (let i = 0; i < 6; i++) {
+            for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
                 transSubs.push({
                     id: `nuvio-ai-srt-${i + 1}`,
