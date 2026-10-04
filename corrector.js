@@ -76,9 +76,9 @@ function balancedBreak(line) {
 
 function polishArabicText(txt) {
   let t = String(txt == null ? '' : txt)
-    .replace(/\\+[nN]/g, '\n')                                              // \n أو \N حرفية صارت سطر جديد
-    .replace(/["“”]\(([^()"“”\n]+)\)["“”]/g, '($1)')                       // "(اسم)" -> (اسم)
-    .replace(/\(["“”]([^()"“”\n]+)["“”]\)/g, '"$1"');                      // ("اسم") -> "اسم"
+    .replace(/\\+[nN]/g, '\n')
+    .replace(/["“”]\(([^()"“”\n]+)\)["“”]/g, '($1)')
+    .replace(/\(["“”]([^()"“”\n]+)["“”]\)/g, '"$1"');
   let lines = t.split('\n').map(l => l.trim()).filter(Boolean);
   const out = [];
   for (const l of lines) out.push(...splitSpeakers(moveLeadingPunct(l)));
@@ -97,10 +97,8 @@ function cleanCorrectorOutput(txt) {
   return polishArabicText(fixArabicTypos(t));
 }
 
-// تصحيح أخطاء إملائية شائعة بالكود (كلمة كاملة فقط، بدون لمس كلمات صحيحة مثل إلى/على/دولة)
 const TYPO_FIX_RAW = {"لى": "لي", "فى": "في", "الذى": "الذي", "التى": "التي", "لكى": "لكي", "معى": "معي", "بى": "بي", "نفسى": "نفسي", "رأيى": "رأيي", "رأسى": "رأسي", "انتى": "أنتِ", "حتي": "حتى", "باقى": "باقي", "ثوانى": "ثواني", "ماضى": "ماضي", "أصدقائى": "أصدقائي", "أبنائى": "أبنائي", "اخى": "أخي", "رئيسى": "رئيسي", "سيدى": "سيدي", "عزيزى": "عزيزي", "زوجتى": "زوجتي", "عائلتى": "عائلتي", "صديقى": "صديقي", "محامى": "محامي", "عالى": "عالي", "غالى": "غالي", "كرسى": "كرسي", "مبانى": "مباني", "اغانى": "أغاني", "ليالى": "ليالي", "حرامى": "حرامي", "عادى": "عادي", "قاضى": "قاضي", "فاضى": "فاضي", "اعطنى": "أعطني", "دعنى": "دعني", "ارنى": "أرني", "اخبرنى": "أخبرني", "صدقنى": "صدقني", "اسمعنى": "اسمعني", "سامحنى": "سامحني", "توقفى": "توقفي", "اذهبى": "اذهبي", "انظرى": "انظري", "ابتعدى": "ابتعدي", "اهربى": "اهربي", "مستشفي": "مستشفى", "فوضي": "فوضى", "اعمي": "أعمى", "سيدتى": "سيدتي", "امى": "أمي", "ابنتى": "ابنتي", "مقهي": "مقهى", "حوالى": "حوالي", "شخصى": "شخصي", "طبيعى": "طبيعي", "حقيقى": "حقيقي", "نهائى": "نهائي", "مبدئى": "مبدئي", "كافى": "كافي", "شكوي": "شكوى", "فتوي": "فتوى", "حلوي": "حلوى", "متي": "متى", "عسي": "عسى", "جدوي": "جدوى", "فحوي": "فحوى", "قصوي": "قصوى", "رؤي": "رؤى", "منتدي": "منتدى", "مسعي": "مسعى", "مغزي": "مغزى", "افعي": "أفعى", "مأوي": "مأوى", "مثوي": "مثوى", "مصطفي": "مصطفى", "مجتبي": "مجتبى", "مستلقي": "مستلقى", "مرتضي": "مرتضى", "اللة": "الله", "واللة": "والله", "لة": "له", "عنة": "عنه", "منة": "منه", "علية": "عليه", "إلية": "إليه", "فية": "فيه", "معة": "معه", "نفسة": "نفسه", "هذة": "هذه", "مفاجأه": "مفاجأة", "دقيقه": "دقيقة", "حقيقه": "حقيقة", "طريقه": "طريقة", "فجأه": "فجأة", "عائله": "عائلة", "غرفه": "غرفة", "مشكله": "مشكلة", "فكره": "فكرة", "سياره": "سيارة", "قوه": "قوة", "لحظه": "لحظة", "مهمه": "مهمة", "فرصه": "فرصة", "رساله": "رسالة", "نهايه": "نهاية", "بدايه": "بداية", "جريمه": "جريمة", "امرأه": "امرأة", "طاقه": "طاقة", "علاقه": "علاقة", "معركه": "معركة", "رحله": "رحلة", "شجره": "شجرة", "لعبه": "لعبة", "فتره": "فترة", "ورقه": "ورقة", "شرطه": "شرطة", "خطوه": "خطوة", "حفله": "حفلة", "مكالمه": "مكالمة", "مدرسه": "مدرسة", "رؤيه": "رؤية", "رصاصه": "رصاصة", "قنبله": "قنبلة", "اسلحه": "أسلحة", "فرقه": "فرقة", "حقيبه": "حقيبة", "بصمه": "بصمة", "قهوه": "قهوة", "طاوله": "طاولة", "مسأله": "مسألة", "اسئله": "أسئلة", "رائعه": "رائعة", "سرعه": "سرعة", "نافذه": "نافذة", "شاشه": "شاشة", "فائده": "فائدة", "عاصفه": "عاصفة", "سفينه": "سفينة", "طائره": "طائرة", "سياده": "سيادة", "جلاله": "جلالة", "عمده": "عمدة", "محطه": "محطة", "شركه": "شركة", "ابوة": "أبوه", "اسمة": "اسمه", "مياة": "مياه", "وجة": "وجه", "اتجاة": "اتجاه", "انتباة": "انتباه", "شبة": "شبه", "سهوله": "سهولة", "صعوبه": "صعوبة", "مجموعه": "مجموعة", "مساحه": "مساحة", "عاهره": "عاهرة", "عصابه": "عصابة", "خزنه": "خزنة", "بوابه": "بوابة", "قمامه": "قمامة", "ادله": "أدلة", "مباشره": "مباشرة", "كامله": "كاملة", "جديده": "جديدة", "كبيره": "كبيرة", "صغيره": "صغيرة", "محكمه": "محكمة", "حكومه": "حكومة", "عقوبه": "عقوبة", "معجزه": "معجزة", "خريطه": "خريطة", "ثلاجه": "ثلاجة", "قائمه": "قائمة", "قضيه": "قضية", "ضحيه": "ضحية", "رهينه": "رهينة", "عشيقه": "عشيقة", "خطيئه": "خطيئه", "مستحيله": "مستحيلة", "غريبه": "غريبة", "مجنونه": "مجنونة", "مؤخره": "مؤخرة", "مقدمه": "مقدمة", "نتيجه": "نتيجة", "اجهزه": "أجهزة", "اسطوره": "أسطورة", "ثقه": "ثقة", "صدفه": "صدفة", "معامله": "معاملة", "مواجهه": "مواجهة", "سيطره": "سيطرة", "بيئه": "بيئة", "هيئه": "هيئة", "مائده": "مائدة", "بطاقه": "بطاقة", "طبيعه": "طبيعة", "فضيحه": "فضيحة", "مصلحه": "مصلحة", "اسطوانه": "أسطوانة", "استماره": "استمارة", "شريحه": "شريحة", "مكافأه": "مكافأة", "جرأه": "جرأة", "بأكملة": "بأكمله", "تجاة": "تجاه", "افواة": "أفواه", "اشباة": "أشباه", "دوله": "دولة", "مدينه": "مدينة", "اشاره": "إشارة", "قياده": "قيادة", "شهاده": "شهادة", "عقيده": "عقيدة", "جائزه": "جائزة", "سياسه": "سياسة", "شئ": "شيء", "شئيا": "شيئا", "سئ": "سيء", "مسئول": "مسؤول", "دايما": "دائما", "بطئ": "بطيء", "قرائة": "قراءة", "برائة": "براءة", "الأن": "الآن", "شئون": "شؤون", "كئوس": "كؤوس", "يقراء": "يقرأ", "مليئ": "مليء", "سيئه": "سيئة", "ذالك": "ذلك", "هاذا": "هذا", "لاكن": "لكن", "مالذي": "ما الذي", "مابك": "ما بك", "كفائة": "كفاءة", "مايحدث": "ما يحدث", "مابه": "ما به", "مابها": "ما بها", "ياأمي": "يا أمي", "ياأبي": "يا أبي", "ياأخي": "يا أخي", "ارجوك": "أرجوك", "يارجل": "يا رجل", "ياإلهي": "يا إلهي", "يارفاق": "يا رفاق", "ياشباب": "يا شباب", "لاشئ": "لا شيء", "ياسيدي": "يا سيدي", "ياصديقي": "يا صديقي", "هاكذا": "هكذا", "لااحد": "لا أحد", "يافتاة": "يا فتاة", "بالتاكيد": "بالتأكيد", "لابأس": "لا بأس", "لايمكن": "لا يمكن", "لااعرف": "لا أعرف", "لااعلم": "لا أعلم", "ماالامر": "ما الأمر", "ماالخطب": "ما الخطب", "ايها": "أيها", "ايتها": "أيتها", "كلشئ": "كل شيء", "ايشئ": "أي شيء", "ياولدي": "يا ولدي", "يابني": "يا بني", "طاريء": "طارئ", "هاديء": "هادئ", "مفاجيء": "مفاجئ", "دافيء": "دافئ", "مباديء": "مبادئ", "لاداعي": "لا داعي", "لامشكلة": "لا مشكلة", "مالعمل": "ما العمل", "ماالمشكلة": "ما المشكلة", "خاطيء": "خاطئ", "مخطيء": "مخطئ", "قاريء": "قارئ", "رجائا": "رجاء", "مسائا": "مساء", "هاؤلاء": "هؤلاء", "اولائك": "أولئك", "بالظبط": "بالضبط", "انشاءالله": "إن شاء الله", "بماان": "بما أن", "كيفحالك": "كيف حالك", "بخيرشكرا": "بخير شكرا"};
 const TYPO_ALL = new Map(Object.entries(TYPO_FIX_RAW));
-// الكلمات الطويلة (5+ حروف) أو اللي تبدأ بـ "ال" يُسمح لها بالبوادئ (و ف ب ل ك ال)، والقصيرة تُصحَّح وحدها فقط
 const TYPO_SAFE = new Map([...TYPO_ALL].filter(([k]) => k.length >= 5 || k.startsWith('ال')));
 const TYPO_PREFIX = new Set(['و', 'ف', 'ب', 'ل', 'ك']);
 
@@ -129,7 +127,6 @@ function fixArabicTypos(txt) {
   return String(txt == null ? '' : txt).replace(/[\p{L}\p{M}]+/gu, tok => (/[\u0600-\u06FF]/.test(tok) ? fixTypoToken(tok) : tok));
 }
 
-// دالة لمعالجة دفعة من الترجمات العربية (فقط تصحيح وإضافة علامات ترقيم، بالترتيب المنطقي LTR)
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -138,24 +135,21 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
+  // البرومبت المحدث: تم إزالة أوامر التفلسف (إضافة شارحة وأقواس) والتركيز حصراً على ترتيب ما هو موجود
   const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic text>"}.
-The text is ALREADY Arabic. Some entries have broken punctuation (typed in visual/reversed order), or no punctuation at all, or no cinematic formatting.
-Your ONLY job is to fix punctuation and formatting. DO NOT change the Arabic words, meaning or grammar. DO NOT translate.
+The text is ALREADY Arabic. Some entries have broken punctuation (typed in visual/reversed order), or no punctuation.
+Your ONLY job is to fix punctuation formatting. DO NOT change the Arabic words or meaning. DO NOT translate.
 
-WRITING DIRECTION (MANDATORY): write every entry in plain LOGICAL Unicode order, exactly as you would when translating an English subtitle into Arabic. Type the words in reading order and put each punctuation mark where it belongs logically, AFTER the word it follows: a sentence-ending period, "؟", "!" or "..." comes right after the last Arabic word; an opening bracket or quote comes BEFORE the words it wraps and the closing one AFTER them. The player renders right-to-left by itself. NEVER reorder punctuation visually, and NEVER output invisible direction characters (RLM, LRM, RLE, LRE, PDF, RLI, LRI, FSI, PDI, ALM).
-Examples of fixing reversed text: ".مرحبا بك" becomes "مرحبا بك."  |  "...إلى اللقاء" becomes "إلى اللقاء..."  |  "؟كيف حالك" becomes "كيف حالك؟"
+WRITING DIRECTION (MANDATORY): write every entry in plain LOGICAL Unicode order. Put each punctuation mark where it belongs logically: a sentence-ending period, "؟", or "!" comes right after the last Arabic word. An opening bracket '(' comes BEFORE the words it wraps and the closing ')' AFTER them. NEVER output invisible direction characters.
 
 Rules:
-1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. The input has ${items.length} entries: you MUST return exactly ${items.length} objects, one for EVERY input id, INCLUDING entries that need no change (return their text as is). Never merge, split or skip entries. Keep the same number of lines inside each entry.
-2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence.
-3. If an entry has no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block).
-4. Wrap place names, cities, companies and non-person proper nouns in parentheses: (الاسم) - but ONLY if the name is not already wrapped in parentheses or quotation marks.
-5. Wrap person names (characters) in quotation marks: "الاسم" - but ONLY if the name is not already wrapped in parentheses or quotation marks. NEVER wrap a name twice (never "(الاسم)" and never ("الاسم")): if the source already has (الاسم) or "الاسم", leave it exactly as it is.
-6. If the entire entry is off-screen narration or a voice-over, wrap it entirely in ONE pair of quotation marks.
-7. NEVER output square brackets [ ] : if the text contains them, remove the brackets and keep the words inside. Preserve other formatting tags (HTML tags and tags like {\\an8}).
-8. Dialogue turns MUST logically start with a dash, then a space, then the text (e.g., "- هل أنت بخير؟"). A sentence-ending mark (. ! ؟ ...) must NEVER be at the START of an entry; move it to the logical end.
-9. The two-character sequence \\N inside a text is a LINE BREAK marker between speaker lines: keep it exactly where it is. Do not replace it with a space, do not delete it, do not merge speaker lines.
-10. ONLY output the JSON array. No explanations.
+1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. You MUST return exactly ${items.length} objects. Keep the same number of lines inside each entry.
+2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence. Fix flipped or backwards brackets (e.g., if you see "word)" fix it to "(word)").
+3. Add a period (.) at the end of a complete sentence if it lacks punctuation. DO NOT add a period if the sentence clearly continues into the next entry.
+4. DO NOT add any dashes (-). Only keep a dash if it ALREADY exists in the original text. NEVER add a dash to a single speaker's line.
+5. The sequence \\N or \\n inside a text is a LINE BREAK marker. Keep it exactly where it is. NEVER merge two lines into one.
+6. NEVER output square brackets [ ] : if the text contains them, remove the brackets but keep the words inside. Preserve other formatting tags.
+7. ONLY output the JSON array. No explanations.
 ${ctxBlock}
 Content to correct:
 ${JSON.stringify(items)}`;
@@ -212,7 +206,6 @@ ${JSON.stringify(items)}`;
   return { status: 'api_exhausted', map: new Map() };
 }
 
-// دالة المداورة (Recovery) الخاصة بالمصحح العربي (مطابقة لدالة الترجمة)
 async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null) {
   const done = new Map();
   if (!items || items.length === 0) return done;
@@ -256,13 +249,12 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   return done;
 }
 
-// معالجة كافة الأسطر العربية: دفعات 600، والناقص يرجع فوراً لطابور مشترك يلتقطه أي مفتاح فاضي (قطع صغيرة بالتوازي)
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  const CHUNK = 600;          // حجم الدفعة الأولى
-  const RETRY_PIECE = 50;     // حجم قطعة إعادة الناقص (تتوزع على المفاتيح الفاضية)
-  const MAX_TRIES = 5;        // أقصى عدد محاولات لكل سطر
-  const cache = getLineCache('ARA_' + cacheKey);   // كاش منفصل للمصحح
+  const CHUNK = 600;
+  const RETRY_PIECE = 50;
+  const MAX_TRIES = 5;
+  const cache = getLineCache('ARA_' + cacheKey);
 
   const results = new Array(cues.length).fill(null);
   const toDo = [];
@@ -344,7 +336,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   const finalTexts = cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text)));
 
-  // CORRECTOR_DEBUG=1 : يطبع عينة أسطر بالشكل الخام (مع الرموز المخفية) لتشخيص مشاكل الاتجاه
   if (process.env.CORRECTOR_DEBUG === '1' && toDo.length > 0) {
     const cp = str => [...String(str)].map(ch => 'U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ');
     const step = Math.max(1, Math.floor(toDo.length / 12));
@@ -362,7 +353,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   };
 }
 
-// الدوال النهائية لتشغيل المصحح العربي (SRT و ASS) وتصديرها للـ index.js
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl); }
