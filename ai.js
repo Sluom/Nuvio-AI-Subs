@@ -487,25 +487,35 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
   return done;
 }
 
+// ================== تحميل ملف الترجمة (مع إعادة المحاولة بـ User-Agent ثاني عند 403 + مفتاح Subsource) ==================
 async function fetchAndExtractSub(subUrl) {
   const decodedUrl = decodeURIComponent(subUrl);
 
   const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
-  const headers = isOsOrg
-    ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
-    : { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' };
+  const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
+  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : ['Mozilla/5.0'];
 
-  let response;
-  try {
-    response = await axios.get(decodedUrl, {
-      responseType: 'arraybuffer', timeout: 15000,
-      headers
-    });
-  } catch (e) {
-    if (isOsOrg) console.log(`[Download] ${e.response?.status || e.code || 'ERR'} (VLSub) <- ${decodedUrl}`);
-    throw e;
+  let response = null;
+  let lastErr = null;
+  for (let i = 0; i < agents.length; i++) {
+    const ua = agents[i];
+    const headers = isOsOrg
+      ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
+      : { 'User-Agent': ua, 'Accept': '*/*' };
+    if (isSubsource && process.env.SUBSOURCE_API_KEY) headers['X-API-Key'] = String(process.env.SUBSOURCE_API_KEY).trim();
+    try {
+      response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
+      lastErr = null;
+      if (isOsOrg) console.log(`[Download] ${response.status} (${ua}) <- ${decodedUrl}`);
+      break;
+    } catch (e) {
+      lastErr = e;
+      const st = e.response?.status || e.code || 'ERR';
+      if (isOsOrg || isSubsource) console.log(`[Download] ${st} (${ua}) <- ${decodedUrl}`);
+      if (!(isOsOrg && e.response?.status === 403 && i < agents.length - 1)) break;
+    }
   }
-  if (isOsOrg) console.log(`[Download] ${response.status} (VLSub) <- ${decodedUrl}`);
+  if (!response) throw lastErr;
 
   let buffer = Buffer.from(response.data);
   if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
@@ -1762,7 +1772,16 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
 // ================== مسار المصحح العربي (Arabic Correction Path) ==================
 // ==================================================================================
 
-// دالة لمعالجة دفعة من الترجمات العربية (فقط تصحيح وإضافة علامات ترقيم LTR/RTL)
+// تنظيف مخرجات المصحح: بدون أقواس مربعة وبدون رموز اتجاه مخفية
+const CORRECTOR_STRIP_BRACKETS = true;
+function cleanCorrectorOutput(txt) {
+  let t = String(txt == null ? '' : txt)
+    .replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '');
+  if (CORRECTOR_STRIP_BRACKETS) t = t.replace(/[\[\]]/g, '');
+  return t.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+// دالة لمعالجة دفعة من الترجمات العربية (فقط تصحيح وإضافة علامات ترقيم، بالترتيب المنطقي LTR)
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -1772,17 +1791,20 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     : '';
 
   const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic text>"}.
-This text is ALREADY translated into Arabic. However, its punctuation is often reversed due to old RTL/LTR display tricks, or it completely lacks punctuation and cinematic formatting.
-Your ONLY job is to FIX the punctuation and formatting so it reads perfectly from Right-To-Left. DO NOT change the Arabic words, meaning, or grammar. DO NOT translate.
+The text is ALREADY Arabic. Some entries have broken punctuation (typed in visual/reversed order), or no punctuation at all, or no cinematic formatting.
+Your ONLY job is to fix punctuation and formatting. DO NOT change the Arabic words, meaning or grammar. DO NOT translate.
+
+WRITING DIRECTION (MANDATORY): write every entry in plain LOGICAL Unicode order, exactly as you would when translating an English subtitle into Arabic. Type the words in reading order and put each punctuation mark where it belongs logically, AFTER the word it follows: a sentence-ending period, "؟", "!" or "..." comes right after the last Arabic word; an opening bracket or quote comes BEFORE the words it wraps and the closing one AFTER them. The player renders right-to-left by itself. NEVER reorder punctuation visually, and NEVER output invisible direction characters (RLM, LRM, RLE, LRE, PDF, RLI, LRI, FSI, PDI, ALM).
+Examples of fixing reversed text: ".مرحبا بك" becomes "مرحبا بك."  |  "...إلى اللقاء" becomes "إلى اللقاء..."  |  "؟كيف حالك" becomes "كيف حالك؟"
 
 Rules:
-1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. Never merge, split, or skip entries.
-2. Fix reversed punctuation: For example, turn \`"...مشاهدة العدو"\` into \`"مشاهدة العدو..."\` and \`(مواجهة (بيتو"\` into \`"(مواجهة بيتو)"\`. Ensure question marks (؟) and exclamation marks (!) are placed correctly at the logical end of the Arabic sentence.
-3. If there is no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block to verify).
-4. Wrap place names, cities, companies, and non-person proper nouns in parentheses: (الاسم).
+1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. Never merge, split or skip entries. Keep the same number of lines inside each entry.
+2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence.
+3. If an entry has no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block).
+4. Wrap place names, cities, companies and non-person proper nouns in parentheses: (الاسم).
 5. Wrap person names (characters) in quotation marks: "الاسم".
-6. If the entire entry is off-screen narration or voice-over, wrap it entirely in ONE pair of quotation marks.
-7. Preserve all square brackets [ ] and formatting tags (like HTML or {\\an8}).
+6. If the entire entry is off-screen narration or a voice-over, wrap it entirely in ONE pair of quotation marks.
+7. NEVER output square brackets [ ] : if the text contains them, remove the brackets and keep the words inside. Preserve other formatting tags (HTML tags and tags like {\\an8}).
 8. ONLY output the JSON array. No explanations.
 ${ctxBlock}
 Content to correct:
@@ -1884,12 +1906,12 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   return done;
 }
 
-// معالجة كافة الأسطر العربية وتوزيعها على المفاتيح (دفعة = 300)
+// معالجة كافة الأسطر العربية وتوزيعها على المفاتيح (دفعة = 600، كاش منفصل عن الترجمة)
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  const CHUNK = 600; // حجم الدفعة للمصحح 300 كما طلب المستخدم
-  const concurrency = Math.max(1, keysArray.length); // استغلال كل المفاتيح
-  const cache = getLineCache(cacheKey);
+  const CHUNK = 600;
+  const concurrency = Math.max(1, keysArray.length);
+  const cache = getLineCache('ARA_' + cacheKey);
 
   const results = new Array(cues.length).fill(null);
   const toDo = [];
@@ -1898,18 +1920,16 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   cues.forEach((c, i) => {
     if (!needsTranslation(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
-    toDo.push({ id: i, text: prepCueText(c.text) });
+    toDo.push({ id: i, text: c.text });
   });
 
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
 
-  const tTrans = Date.now();
   let pendingChunks = [];
   for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
 
   for (let pass = 0; pass <= MAX_RETRY_PASSES && pendingChunks.length > 0; pass++) {
     if (pass > 0) {
-      const left = pendingChunks.reduce((n, ch) => n + ch.length, 0);
       if (keysArray.every(k => deadKeys.has(k))) break;
       console.log(`[جولة إعادة المصحح ${pass}/${MAX_RETRY_PASSES} 🔁] راحة ثم إعادة...`);
       await delay(5000 + Math.random() * 3000);
@@ -1919,8 +1939,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       const ctx = buildChunkContext(cues, chunk);
       const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
       for (const [id, text] of map) {
-        results[id] = text;
-        cache.set(id, text);
+        const clean = cleanCorrectorOutput(text) || cleanCorrectorOutput(cues[id].text);
+        results[id] = clean;
+        cache.set(id, clean);
       }
     });
 
@@ -1935,7 +1956,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | ناقص=${missing} | الزمن=${Date.now() - tStart}ms`);
 
   return {
-    texts: cues.map((c, i) => normalizeLineBreakArtifacts(results[i] || c.text)),
+    texts: cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text))),
     missing
   };
 }
@@ -1952,7 +1973,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
 
-  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=300 | مفاتيح=${keysArray.length}`);
+  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
   const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
 
   let srtOutput = '';
@@ -1982,7 +2003,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
 
-  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=300 | مفاتيح=${keysArray.length}`);
+  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
   const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
 
   const assLines = [];
