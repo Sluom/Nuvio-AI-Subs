@@ -4,7 +4,7 @@ const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 const { getSubDLEnglish } = require('./subdl');
 const { getArabicSubsForCorrection } = require('./araFetch');
-const { handleCorrectionSrt, handleCorrectionAss } = require('./ai');
+const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
 
 const app = express();
 app.use(cors());
