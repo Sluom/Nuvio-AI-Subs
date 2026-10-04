@@ -313,7 +313,8 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
         const filteredFallback = fallbackResults.filter(r => (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.fileName, episode));
         results = [...results, ...filteredFallback];
     }
-    return results;
+    // OpenSubtitles.org (legacy): ASS فقط، الـ SRT مستبعد
+    return results.filter(r => r.format === 'ass' || r.format === 'ssa');
 }
 
 async function fetchMirrorEnglish(imdbId, season, episode, type) {
@@ -584,7 +585,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 season: assSeason, 
                 episode: assEpisode, 
                 type: finalType,
-                subdlKey: process.env.SUBDL_API_KEY || '' 
+                subdlKey: process.env.SUBDL_API_KEY || '',
+                subsourceKey: process.env.SUBSOURCE_API_KEY || ''
             });
             console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.srt.length} ترجمة SRT عربية و ${arabicSubs.ass.length} ترجمة ASS عربية للعمل ${finalTargetId}`);
         } catch (err) { 
