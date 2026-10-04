@@ -170,7 +170,20 @@ function repairParens(text) {
   }
   return lines.map(fixLineParens).join('\n');
 }
-
+// تنصيص موزع على سطرين بشكل معكوس: "X \n "Y  ->  "X \n Y"
+function fixSplitQuotes(text) {
+  const lines = text.split('\n');
+  if (lines.length !== 2) return text;
+  const a = lines[0].trim(), b = lines[1].trim();
+  if (DASH_RE.test(a) || DASH_RE.test(b)) return text;
+  const cnt = s => (s.match(/["“”]/g) || []).length;
+  if (cnt(a) !== 1 || cnt(b) !== 1) return text;
+  if (!/["“”]$/.test(a) || !/^["“”]/.test(b)) return text;
+  const aCore = a.replace(/\s*["“”]$/, '');
+  if (!aCore || TERM_CHARS.includes(aCore[aCore.length - 1])) return text; // الجملة انتهت: ما نلمسها
+  const bCore = b.replace(/^["“”]\s*/, '');
+  return '"' + aCore + '\n' + bCore + '"';
+}
 function polishArabicText(txt) {
   let t = String(txt == null ? '' : txt)
     .replace(/\\+[nN]/g, '\n')
@@ -183,7 +196,7 @@ function polishArabicText(txt) {
   if (CORRECTOR_WRAP_AT > 0 && res.length === 1 && !DASH_RE.test(res[0]) && visibleLen(res[0]) > CORRECTOR_WRAP_AT) {
     res = balancedBreak(res[0]);
   }
-  return res.join('\n');
+  return fixSplitQuotes(res.join('\n'));
 }
 
 function cleanCorrectorOutput(txt) {
