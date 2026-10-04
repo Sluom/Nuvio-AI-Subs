@@ -16,12 +16,72 @@ const {
 
 // تنظيف مخرجات المصحح: بدون أقواس مربعة وبدون رموز اتجاه مخفية
 const CORRECTOR_STRIP_BRACKETS = true;
+const CORRECTOR_WRAP_AT = 42;   // أي سطر مفرد أطول من هذا ينكسر لسطرين متوازنين (0 = إيقاف)
+
+// ترتيب الأسطر وعلامات الترقيم بالكود (لا يعتمد على الموديل)
+const TERM_CHARS = '.…!؟?،,؛';
+const HAS_ARABIC = /[\u0600-\u06FF]/;
+const DASH_RE = /^[-–—]/;
+
+function visibleLen(s) { return String(s).replace(/<[^>]*>|\{[^}]*\}/g, '').length; }
+
+// نقطة/علامة نهاية في أول السطر (أو قبل شرطة الحوار) تنتقل لآخره
+function moveLeadingPunct(line) {
+  const m = line.match(/^([.…!؟?،,؛]+)\s*(.+)$/);
+  if (!m) return line;
+  const lead = m[1], rest = m[2];
+  if (!HAS_ARABIC.test(rest)) return line;
+  const beforeDash = DASH_RE.test(rest);
+  // "..." أو "…" في بداية جملة (تكملة كلام) سليمة، وغيرها بأول السطر خطأ
+  if ((lead === '…' || /^\.{3,}$/.test(lead)) && !beforeDash) return line;
+  const core = rest.replace(/["'”“)\]»\s]+$/, '');
+  if (core && TERM_CHARS.includes(core[core.length - 1])) return rest;   // آخر السطر فيه علامة أصلاً: نحذف الزائدة من الأول
+  return rest + lead;
+}
+
+function splitSpeakers(line) {
+  if (!DASH_RE.test(line)) return [line];
+  const parts = line.split(/\s+(?=[-–—]\s)/).map(p => p.trim()).filter(Boolean);
+  return parts.length > 1 ? parts : [line];
+}
+
+function balancedBreak(line) {
+  const words = line.split(' ');
+  if (words.length < 3) return [line];
+  let best = -1, bestDiff = Infinity;
+  let acc = 0;
+  const total = visibleLen(line);
+  for (let i = 0; i < words.length - 1; i++) {
+    acc += visibleLen(words[i]) + (i ? 1 : 0);
+    const diff = Math.abs(acc - (total - acc - 1));
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  if (best < 0) return [line];
+  const a = words.slice(0, best + 1).join(' '), b = words.slice(best + 1).join(' ');
+  return (visibleLen(a) >= 8 && visibleLen(b) >= 8) ? [a, b] : [line];
+}
+
+function polishArabicText(txt) {
+  let t = String(txt == null ? '' : txt)
+    .replace(/\\+[nN]/g, '\n')                                              // \n أو \N حرفية صارت سطر جديد
+    .replace(/["“”]\(([^()"“”\n]+)\)["“”]/g, '($1)')                       // "(اسم)" -> (اسم)
+    .replace(/\(["“”]([^()"“”\n]+)["“”]\)/g, '"$1"');                      // ("اسم") -> "اسم"
+  let lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  const out = [];
+  for (const l of lines) out.push(...splitSpeakers(moveLeadingPunct(l)));
+  let res = out.map(l => moveLeadingPunct(l));
+  if (CORRECTOR_WRAP_AT > 0 && res.length === 1 && !DASH_RE.test(res[0]) && visibleLen(res[0]) > CORRECTOR_WRAP_AT) {
+    res = balancedBreak(res[0]);
+  }
+  return res.join('\n');
+}
+
 function cleanCorrectorOutput(txt) {
   let t = String(txt == null ? '' : txt)
     .replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '');
   if (CORRECTOR_STRIP_BRACKETS) t = t.replace(/[\[\]]/g, '');
   t = t.replace(/[ \t]{2,}/g, ' ').trim();
-  return fixArabicTypos(t);
+  return polishArabicText(fixArabicTypos(t));
 }
 
 // تصحيح أخطاء إملائية شائعة بالكود (كلمة كاملة فقط، بدون لمس كلمات صحيحة مثل إلى/على/دولة)
@@ -77,11 +137,13 @@ Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. The input has ${items.length} entries: you MUST return exactly ${items.length} objects, one for EVERY input id, INCLUDING entries that need no change (return their text as is). Never merge, split or skip entries. Keep the same number of lines inside each entry.
 2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence.
 3. If an entry has no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block).
-4. Wrap place names, cities, companies and non-person proper nouns in parentheses: (الاسم).
-5. Wrap person names (characters) in quotation marks: "الاسم".
+4. Wrap place names, cities, companies and non-person proper nouns in parentheses: (الاسم) - but ONLY if the name is not already wrapped in parentheses or quotation marks.
+5. Wrap person names (characters) in quotation marks: "الاسم" - but ONLY if the name is not already wrapped in parentheses or quotation marks. NEVER wrap a name twice (never "(الاسم)" and never ("الاسم")): if the source already has (الاسم) or "الاسم", leave it exactly as it is.
 6. If the entire entry is off-screen narration or a voice-over, wrap it entirely in ONE pair of quotation marks.
 7. NEVER output square brackets [ ] : if the text contains them, remove the brackets and keep the words inside. Preserve other formatting tags (HTML tags and tags like {\\an8}).
-8. ONLY output the JSON array. No explanations.
+8. A sentence-ending mark (. ! ؟ ...) must NEVER be at the START of an entry or before a dash: move it to the end of its sentence.
+9. The two-character sequence \\N inside a text is a LINE BREAK marker between speaker lines: keep it exactly where it is. Do not replace it with a space, do not delete it, do not merge speaker lines.
+10. ONLY output the JSON array. No explanations.
 ${ctxBlock}
 Content to correct:
 ${JSON.stringify(items)}`;
@@ -268,8 +330,22 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const missing = results.filter(r => r == null).length;
   console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
 
+  const finalTexts = cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text)));
+
+  // CORRECTOR_DEBUG=1 : يطبع عينة أسطر بالشكل الخام (مع الرموز المخفية) لتشخيص مشاكل الاتجاه
+  if (process.env.CORRECTOR_DEBUG === '1' && toDo.length > 0) {
+    const cp = str => [...String(str)].map(ch => 'U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ');
+    const step = Math.max(1, Math.floor(toDo.length / 12));
+    for (let k = 0; k < toDo.length && k < step * 12; k += step) {
+      const id = toDo[k].id;
+      const f = finalTexts[id];
+      const chars = [...f];
+      console.log(`[فحص مصحح] #${id} أصل=${JSON.stringify(cues[id].text)} | ناتج=${JSON.stringify(f)} | أول=${cp(chars.slice(0, 2).join(''))} | آخر=${cp(chars.slice(-2).join(''))}`);
+    }
+  }
+
   return {
-    texts: cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text))),
+    texts: finalTexts,
     missing
   };
 }
