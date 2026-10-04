@@ -106,6 +106,11 @@ function sameWords(orig, out) {
   return levenshtein(a, b) <= Math.max(2, Math.floor(a.length * 0.06));
 }
 
+// ---------- حارس الأقواس والتنصيص: الموديل ممنوع يزيد أو ينقص منها ----------
+function bracketQuoteCount(s) {
+  return (String(s == null ? '' : s).replace(/<[^>]*>|\{[^}]*\}/g, '').match(/[()"“”]/g) || []).length;
+}
+
 // ---------- إصلاح الأقواس بالكود (احتياط لا يعتمد على الموديل) ----------
 function parenInfo(line) {
   const stack = [], strayClose = [];
@@ -122,13 +127,13 @@ function appendClosing(line) {
 function wordEndAfter(line, p) {
   let i = p + 1;
   while (i < line.length && /\s/.test(line[i])) i++;
-  while (i < line.length && !/[\s.…!؟?،,؛()]/.test(line[i])) i++;
+  while (i < line.length && !/[\s.…!؟?،,؛()"“”]/.test(line[i])) i++;
   return i;
 }
 function wordStartBefore(line, p) {
   let i = p;
   while (i > 0 && /\s/.test(line[i - 1])) i--;
-  while (i > 0 && !/[\s(]/.test(line[i - 1])) i--;
+  while (i > 0 && !/[\s("“”]/.test(line[i - 1])) i--;
   return i;
 }
 function fixLineParens(line) {
@@ -142,8 +147,14 @@ function fixLineParens(line) {
     return line.replace(/[()]/g, c => (c === '(' ? ')' : '('));
   }
   let out = line;
+  let strays = info.strayOpen.slice();
+  // فتح زائد بأول السطر + فتح زائد ثاني: الأول إغلاق مقلوب، نحذفه
+  if (strays.length >= 2 && out.slice(0, strays[0]).replace(/[-–—\s"“”]/g, '') === '') {
+    out = out.slice(0, strays[0]) + out.slice(strays[0] + 1);
+    strays = strays.slice(1).map(p => p - 1);
+  }
   // أقواس فتح بلا إغلاق: نغلقها بعد الكلمة التالية
-  for (const p of info.strayOpen.slice().reverse()) {
+  for (const p of strays.slice().reverse()) {
     const end = wordEndAfter(out, p);
     if (end > p + 1) out = out.slice(0, end) + ')' + out.slice(end);
     else out = out.slice(0, p) + out.slice(p + 1);
@@ -170,6 +181,7 @@ function repairParens(text) {
   }
   return lines.map(fixLineParens).join('\n');
 }
+
 // تنصيص موزع على سطرين بشكل معكوس: "X \n "Y  ->  "X \n Y"
 function fixSplitQuotes(text) {
   const lines = text.split('\n');
@@ -184,6 +196,7 @@ function fixSplitQuotes(text) {
   const bCore = b.replace(/^["“”]\s*/, '');
   return '"' + aCore + '\n' + bCore + '"';
 }
+
 function polishArabicText(txt) {
   let t = String(txt == null ? '' : txt)
     .replace(/\\+[nN]/g, '\n')
@@ -258,7 +271,7 @@ STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonym
 Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}] with exactly one object per input id, in the same order, including entries that need no change.
 2. A sentence-ending mark (. ! ؟ ...) goes at the END of its sentence, never at the start of an entry or before a dash.
-3. Brackets () and quotation marks "" MUST be properly paired. They may enclose a single word, a phrase, or the ENTIRE line. Read the context to identify the matching pair, enclose the target text in logical RTL order, and fix any misplaced punctuation (e.g., move a period outside or inside logically).
+3. NEVER add or remove any bracket ( ) or quotation mark ". The output must contain exactly the same number of brackets and quotation marks as the input. You may only MOVE existing brackets so each pair is in the right place. Never put brackets around a word that had none. Leave straight quotation marks " exactly where they are.
 4. A dash "-" that marks a speaker turn belongs at the START of that turn.
 5. The sequence \\N or \\n is a LINE BREAK marker: keep each line break where it is. NEVER merge two lines into one.
 6. NEVER output square brackets [ ].
@@ -395,7 +408,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     rawOut.set(id, text);
     const orig = cues[id].text;
     let src = text;
-    if (!sameWords(orig, text)) { rejected++; src = orig; }   // الموديل غيّر كلمة: نرفض رده ونطبق التنظيف بالكود على الأصل
+    // الموديل غيّر كلمة، أو زاد/نقص قوس أو تنصيص: نرفض رده ونطبق التنظيف بالكود على الأصل
+    if (!sameWords(orig, text) || bracketQuoteCount(text) !== bracketQuoteCount(orig)) { rejected++; src = orig; }
     const clean = cleanCorrectorOutput(src) || cleanCorrectorOutput(orig);
     results[id] = clean;
     cache.set(id, clean);
@@ -457,7 +471,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   const unprocessed = toDo.filter(it => results[it.id] == null);
   const missing = unprocessed.length;
-  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | رفض لتغيير كلمات=${rejected} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
+  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | رفض (كلمات/أقواس)=${rejected} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
 
   const finalTexts = cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text)));
 
