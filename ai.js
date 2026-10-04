@@ -1887,7 +1887,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
 // معالجة كافة الأسطر العربية وتوزيعها على المفاتيح (دفعة = 300)
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  const CHUNK = 300; // حجم الدفعة للمصحح 300 كما طلب المستخدم
+  const CHUNK = 600; // حجم الدفعة للمصحح 300 كما طلب المستخدم
   const concurrency = Math.max(1, keysArray.length); // استغلال كل المفاتيح
   const cache = getLineCache(cacheKey);
 
