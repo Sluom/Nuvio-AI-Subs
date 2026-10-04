@@ -73,12 +73,9 @@ function balancedBreak(line) {
   const a = words.slice(0, best + 1).join(' '), b = words.slice(best + 1).join(' ');
   return (visibleLen(a) >= 8 && visibleLen(b) >= 8) ? [a, b] : [line];
 }
-
 function polishArabicText(txt) {
   let t = String(txt == null ? '' : txt)
-    .replace(/\\+[nN]/g, '\n')
-    .replace(/["“”]\(([^()"“”\n]+)\)["“”]/g, '($1)')
-    .replace(/\(["“”]([^()"“”\n]+)["“”]\)/g, '"$1"');
+    .replace(/\\+[nN]/g, '\n');
   let lines = t.split('\n').map(l => l.trim()).filter(Boolean);
   const out = [];
   for (const l of lines) out.push(...splitSpeakers(moveLeadingPunct(l)));
@@ -88,6 +85,7 @@ function polishArabicText(txt) {
   }
   return res.join('\n');
 }
+
 
 function cleanCorrectorOutput(txt) {
   let t = String(txt == null ? '' : txt)
