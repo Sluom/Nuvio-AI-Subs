@@ -245,7 +245,7 @@ STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonym
 Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}] with exactly one object per input id, in the same order, including entries that need no change.
 2. A sentence-ending mark (. ! ؟ ...) goes at the END of its sentence, never at the start of an entry or before a dash.
-3. Brackets and parentheses must be balanced and in logical order: "(" BEFORE the word it encloses and ")" AFTER it. If a pair is reversed, or is split by a line break, rebuild it around the word(s) it belongs to. If a name is already inside (...) or "...", keep it exactly like that and never wrap it twice.
+3. Brackets () and quotation marks "" MUST be properly paired. They may enclose a single word, a phrase, or the ENTIRE line. Read the context to identify the matching pair, enclose the target text in logical RTL order, and fix any misplaced punctuation (e.g., move a period outside or inside logically).
 4. A dash "-" that marks a speaker turn belongs at the START of that turn.
 5. The sequence \\N or \\n is a LINE BREAK marker: keep each line break where it is. NEVER merge two lines into one.
 6. NEVER output square brackets [ ].
