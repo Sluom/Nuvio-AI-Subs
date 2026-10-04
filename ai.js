@@ -1778,8 +1778,42 @@ function cleanCorrectorOutput(txt) {
   let t = String(txt == null ? '' : txt)
     .replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '');
   if (CORRECTOR_STRIP_BRACKETS) t = t.replace(/[\[\]]/g, '');
-  return t.replace(/[ \t]{2,}/g, ' ').trim();
+  t = t.replace(/[ \t]{2,}/g, ' ').trim();
+  return fixArabicTypos(t);
 }
+
+// تصحيح أخطاء إملائية شائعة بالكود (كلمة كاملة فقط، بدون لمس كلمات صحيحة مثل إلى/على/دولة)
+const TYPO_FIX_RAW = {"لى": "لي", "فى": "في", "الذى": "الذي", "التى": "التي", "لكى": "لكي", "معى": "معي", "بى": "بي", "نفسى": "نفسي", "رأيى": "رأيي", "رأسى": "رأسي", "انتى": "أنتِ", "حتي": "حتى", "باقى": "باقي", "ثوانى": "ثواني", "ماضى": "ماضي", "أصدقائى": "أصدقائي", "أبنائى": "أبنائي", "اخى": "أخي", "رئيسى": "رئيسي", "سيدى": "سيدي", "عزيزى": "عزيزي", "زوجتى": "زوجتي", "عائلتى": "عائلتي", "صديقى": "صديقي", "محامى": "محامي", "عالى": "عالي", "غالى": "غالي", "كرسى": "كرسي", "مبانى": "مباني", "اغانى": "أغاني", "ليالى": "ليالي", "حرامى": "حرامي", "عادى": "عادي", "قاضى": "قاضي", "فاضى": "فاضي", "اعطنى": "أعطني", "دعنى": "دعني", "ارنى": "أرني", "اخبرنى": "أخبرني", "صدقنى": "صدقني", "اسمعنى": "اسمعني", "سامحنى": "سامحني", "توقفى": "توقفي", "اذهبى": "اذهبي", "انظرى": "انظري", "ابتعدى": "ابتعدي", "اهربى": "اهربي", "مستشفي": "مستشفى", "فوضي": "فوضى", "اعمي": "أعمى", "سيدتى": "سيدتي", "امى": "أمي", "ابنتى": "ابنتي", "مقهي": "مقهى", "حوالى": "حوالي", "شخصى": "شخصي", "طبيعى": "طبيعي", "حقيقى": "حقيقي", "نهائى": "نهائي", "مبدئى": "مبدئي", "كافى": "كافي", "شكوي": "شكوى", "فتوي": "فتوى", "حلوي": "حلوى", "متي": "متى", "عسي": "عسى", "جدوي": "جدوى", "فحوي": "فحوى", "قصوي": "قصوى", "رؤي": "رؤى", "منتدي": "منتدى", "مسعي": "مسعى", "مغزي": "مغزى", "افعي": "أفعى", "مأوي": "مأوى", "مثوي": "مثوى", "مصطفي": "مصطفى", "مجتبي": "مجتبى", "مستلقي": "مستلقى", "مرتضي": "مرتضى", "اللة": "الله", "واللة": "والله", "لة": "له", "عنة": "عنه", "منة": "منه", "علية": "عليه", "إلية": "إليه", "فية": "فيه", "معة": "معه", "نفسة": "نفسه", "هذة": "هذه", "مفاجأه": "مفاجأة", "دقيقه": "دقيقة", "حقيقه": "حقيقة", "طريقه": "طريقة", "فجأه": "فجأة", "عائله": "عائلة", "غرفه": "غرفة", "مشكله": "مشكلة", "فكره": "فكرة", "سياره": "سيارة", "قوه": "قوة", "لحظه": "لحظة", "مهمه": "مهمة", "فرصه": "فرصة", "رساله": "رسالة", "نهايه": "نهاية", "بدايه": "بداية", "جريمه": "جريمة", "امرأه": "امرأة", "طاقه": "طاقة", "علاقه": "علاقة", "معركه": "معركة", "رحله": "رحلة", "شجره": "شجرة", "لعبه": "لعبة", "فتره": "فترة", "ورقه": "ورقة", "شرطه": "شرطة", "خطوه": "خطوة", "حفله": "حفلة", "مكالمه": "مكالمة", "مدرسه": "مدرسة", "رؤيه": "رؤية", "رصاصه": "رصاصة", "قنبله": "قنبلة", "اسلحه": "أسلحة", "فرقه": "فرقة", "حقيبه": "حقيبة", "بصمه": "بصمة", "قهوه": "قهوة", "طاوله": "طاولة", "مسأله": "مسألة", "اسئله": "أسئلة", "رائعه": "رائعة", "سرعه": "سرعة", "نافذه": "نافذة", "شاشه": "شاشة", "فائده": "فائدة", "عاصفه": "عاصفة", "سفينه": "سفينة", "طائره": "طائرة", "سياده": "سيادة", "جلاله": "جلالة", "عمده": "عمدة", "محطه": "محطة", "شركه": "شركة", "ابوة": "أبوه", "اسمة": "اسمه", "مياة": "مياه", "وجة": "وجه", "اتجاة": "اتجاه", "انتباة": "انتباه", "شبة": "شبه", "سهوله": "سهولة", "صعوبه": "صعوبة", "مجموعه": "مجموعة", "مساحه": "مساحة", "عاهره": "عاهرة", "عصابه": "عصابة", "خزنه": "خزنة", "بوابه": "بوابة", "قمامه": "قمامة", "ادله": "أدلة", "مباشره": "مباشرة", "كامله": "كاملة", "جديده": "جديدة", "كبيره": "كبيرة", "صغيره": "صغيرة", "محكمه": "محكمة", "حكومه": "حكومة", "عقوبه": "عقوبة", "معجزه": "معجزة", "خريطه": "خريطة", "ثلاجه": "ثلاجة", "قائمه": "قائمة", "قضيه": "قضية", "ضحيه": "ضحية", "رهينه": "رهينة", "عشيقه": "عشيقة", "خطيئه": "خطيئة", "مستحيله": "مستحيلة", "غريبه": "غريبة", "مجنونه": "مجنونة", "مؤخره": "مؤخرة", "مقدمه": "مقدمة", "نتيجه": "نتيجة", "اجهزه": "أجهزة", "اسطوره": "أسطورة", "ثقه": "ثقة", "صدفه": "صدفة", "معامله": "معاملة", "مواجهه": "مواجهة", "سيطره": "سيطرة", "بيئه": "بيئة", "هيئه": "هيئة", "مائده": "مائدة", "بطاقه": "بطاقة", "طبيعه": "طبيعة", "فضيحه": "فضيحة", "مصلحه": "مصلحة", "اسطوانه": "أسطوانة", "استماره": "استمارة", "شريحه": "شريحة", "مكافأه": "مكافأة", "جرأه": "جرأة", "بأكملة": "بأكمله", "تجاة": "تجاه", "افواة": "أفواه", "اشباة": "أشباه", "دوله": "دولة", "مدينه": "مدينة", "اشاره": "إشارة", "قياده": "قيادة", "شهاده": "شهادة", "عقيده": "عقيدة", "جائزه": "جائزة", "سياسه": "سياسة", "شئ": "شيء", "شئيا": "شيئا", "سئ": "سيء", "مسئول": "مسؤول", "دايما": "دائما", "بطئ": "بطيء", "قرائة": "قراءة", "برائة": "براءة", "الأن": "الآن", "شئون": "شؤون", "كئوس": "كؤوس", "يقراء": "يقرأ", "مليئ": "مليء", "سيئه": "سيئة", "ذالك": "ذلك", "هاذا": "هذا", "لاكن": "لكن", "مالذي": "ما الذي", "مابك": "ما بك", "كفائة": "كفاءة", "مايحدث": "ما يحدث", "مابه": "ما به", "مابها": "ما بها", "ياأمي": "يا أمي", "ياأبي": "يا أبي", "ياأخي": "يا أخي", "ارجوك": "أرجوك", "يارجل": "يا رجل", "ياإلهي": "يا إلهي", "يارفاق": "يا رفاق", "ياشباب": "يا شباب", "لاشئ": "لا شيء", "ياسيدي": "يا سيدي", "ياصديقي": "يا صديقي", "هاكذا": "هكذا", "لااحد": "لا أحد", "يافتاة": "يا فتاة", "بالتاكيد": "بالتأكيد", "لابأس": "لا بأس", "لايمكن": "لا يمكن", "لااعرف": "لا أعرف", "لااعلم": "لا أعلم", "ماالامر": "ما الأمر", "ماالخطب": "ما الخطب", "ايها": "أيها", "ايتها": "أيتها", "كلشئ": "كل شيء", "ايشئ": "أي شيء", "ياولدي": "يا ولدي", "يابني": "يا بني", "طاريء": "طارئ", "هاديء": "هادئ", "مفاجيء": "مفاجئ", "دافيء": "دافئ", "مباديء": "مبادئ", "لاداعي": "لا داعي", "لامشكلة": "لا مشكلة", "مالعمل": "ما العمل", "ماالمشكلة": "ما المشكلة", "خاطيء": "خاطئ", "مخطيء": "مخطئ", "قاريء": "قارئ", "رجائا": "رجاء", "مسائا": "مساء", "هاؤلاء": "هؤلاء", "اولائك": "أولئك", "بالظبط": "بالضبط", "انشاءالله": "إن شاء الله", "بماان": "بما أن", "كيفحالك": "كيف حالك", "بخيرشكرا": "بخير شكرا"};
+const TYPO_ALL = new Map(Object.entries(TYPO_FIX_RAW));
+// الكلمات الطويلة (5+ حروف) أو اللي تبدأ بـ "ال" يُسمح لها بالبوادئ (و ف ب ل ك ال)، والقصيرة تُصحَّح وحدها فقط
+const TYPO_SAFE = new Map([...TYPO_ALL].filter(([k]) => k.length >= 5 || k.startsWith('ال')));
+const TYPO_PREFIX = new Set(['و', 'ف', 'ب', 'ل', 'ك']);
+
+function fixTypoToken(tok) {
+  if (TYPO_ALL.has(tok)) return TYPO_ALL.get(tok);
+  let pre = '';
+  let rest = tok;
+  for (let n = 0; n < 3 && rest.length > 2; n++) {
+    if (rest.startsWith('لل') && rest.length > 4) {
+      const r = rest.slice(2);
+      if (TYPO_SAFE.has(r)) return pre + 'لل' + TYPO_SAFE.get(r);
+    }
+    if (rest.startsWith('ال') && rest.length > 4) {
+      const r = rest.slice(2);
+      if (TYPO_SAFE.has(r)) return pre + 'ال' + TYPO_SAFE.get(r);
+    }
+    if (!TYPO_PREFIX.has(rest[0])) break;
+    pre += rest[0];
+    rest = rest.slice(1);
+    if (TYPO_SAFE.has(rest)) return pre + TYPO_SAFE.get(rest);
+  }
+  return tok;
+}
+
+function fixArabicTypos(txt) {
+  return String(txt == null ? '' : txt).replace(/[\p{L}\p{M}]+/gu, tok => (/[\u0600-\u06FF]/.test(tok) ? fixTypoToken(tok) : tok));
+}
+
 
 // دالة لمعالجة دفعة من الترجمات العربية (فقط تصحيح وإضافة علامات ترقيم، بالترتيب المنطقي LTR)
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
@@ -1798,7 +1832,7 @@ WRITING DIRECTION (MANDATORY): write every entry in plain LOGICAL Unicode order,
 Examples of fixing reversed text: ".مرحبا بك" becomes "مرحبا بك."  |  "...إلى اللقاء" becomes "إلى اللقاء..."  |  "؟كيف حالك" becomes "كيف حالك؟"
 
 Rules:
-1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. Never merge, split or skip entries. Keep the same number of lines inside each entry.
+1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. The input has ${items.length} entries: you MUST return exactly ${items.length} objects, one for EVERY input id, INCLUDING entries that need no change (return their text as is). Never merge, split or skip entries. Keep the same number of lines inside each entry.
 2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence.
 3. If an entry has no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block).
 4. Wrap place names, cities, companies and non-person proper nouns in parentheses: (الاسم).
@@ -1841,7 +1875,7 @@ ${JSON.stringify(items)}`;
           console.log(`[حارس الأرقام - مصحح] الرد فيه ${extraIds} رقم ما طلبته. أرفضه.`);
           return { status: 'bad_ids', map: new Map() };
         }
-        if (items.length >= 80) console.log(`[مصحح عربي - نجاح] دفعة ${items.length} سطر عبر ...${cleanKey.slice(-4)}`);
+        if (items.length >= 40) console.log(`[مصحح عربي - نجاح] طلب ${items.length} سطر، رجع ${map.size} عبر ...${cleanKey.slice(-4)}`);
         return { status: 'ok', map };
       }
 
@@ -1906,12 +1940,13 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   return done;
 }
 
-// معالجة كافة الأسطر العربية وتوزيعها على المفاتيح (دفعة = 600، كاش منفصل عن الترجمة)
+// معالجة كافة الأسطر العربية: دفعات 600، والناقص يرجع فوراً لطابور مشترك يلتقطه أي مفتاح فاضي (قطع صغيرة بالتوازي)
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  const CHUNK = 600;
-  const concurrency = Math.max(1, keysArray.length);
-  const cache = getLineCache('ARA_' + cacheKey);
+  const CHUNK = 600;          // حجم الدفعة الأولى
+  const RETRY_PIECE = 50;     // حجم قطعة إعادة الناقص (تتوزع على المفاتيح الفاضية)
+  const MAX_TRIES = 5;        // أقصى عدد محاولات لكل سطر
+  const cache = getLineCache('ARA_' + cacheKey);   // كاش منفصل للمصحح
 
   const results = new Array(cues.length).fill(null);
   const toDo = [];
@@ -1925,35 +1960,71 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
 
-  let pendingChunks = [];
-  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
+  const queue = [];
+  for (let i = 0; i < toDo.length; i += CHUNK) queue.push({ items: toDo.slice(i, i + CHUNK), tries: 0 });
 
-  for (let pass = 0; pass <= MAX_RETRY_PASSES && pendingChunks.length > 0; pass++) {
-    if (pass > 0) {
-      if (keysArray.every(k => deadKeys.has(k))) break;
-      console.log(`[جولة إعادة المصحح ${pass}/${MAX_RETRY_PASSES} 🔁] راحة ثم إعادة...`);
-      await delay(5000 + Math.random() * 3000);
+  let inFlight = 0;
+  let requeued = 0;
+  const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), 35));
+
+  const applyLine = (id, text) => {
+    const clean = cleanCorrectorOutput(text) || cleanCorrectorOutput(cues[id].text);
+    results[id] = clean;
+    cache.set(id, clean);
+  };
+
+  const requeueLeft = (job, leftover, why) => {
+    if (!leftover.length) return;
+    if (job.tries + 1 >= MAX_TRIES) {
+      console.log(`[مصحح - تجاوز] ${leftover.length} سطر بعد ${MAX_TRIES} محاولات، يبقون بنصهم الأصلي.`);
+      return;
     }
+    let pieces = 0;
+    for (let p = 0; p < leftover.length; p += RETRY_PIECE) {
+      queue.unshift({ items: leftover.slice(p, p + RETRY_PIECE), tries: job.tries + 1 });
+      pieces++;
+    }
+    requeued += leftover.length;
+    console.log(`[مصحح - إعادة لحظية ⚡] ${why}: ${leftover.length} سطر → ${pieces} قطعة (≤${RETRY_PIECE}) تلتقطها المفاتيح الفاضية فوراً.`);
+  };
 
-    const tasks = pendingChunks.map(chunk => async () => {
-      const ctx = buildChunkContext(cues, chunk);
-      const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
-      for (const [id, text] of map) {
-        const clean = cleanCorrectorOutput(text) || cleanCorrectorOutput(cues[id].text);
-        results[id] = clean;
-        cache.set(id, clean);
+  async function worker() {
+    while (true) {
+      if (keysArray.every(k => deadKeys.has(k))) return;
+      const job = queue.shift();
+      if (!job) {
+        if (inFlight === 0) return;
+        await delay(100);
+        continue;
       }
-    });
-
-    await runConcurrentPool(tasks, pass === 0 ? concurrency : Math.min(2, concurrency));
-
-    pendingChunks = pendingChunks
-      .map(ch => ch.filter(it => results[it.id] == null))
-      .filter(ch => ch.length > 0);
+      inFlight++;
+      try {
+        const ctx = buildChunkContext(cues, job.items);
+        const r = await correctChunkStrict(job.items, keysArray, modelName, ctx);
+        if (r.status === 'ok') {
+          const wanted = new Set(job.items.map(it => it.id));
+          for (const [id, text] of r.map) if (wanted.has(id) && text) applyLine(id, text);
+          const leftover = job.items.filter(it => results[it.id] == null);
+          requeueLeft(job, leftover, `ناقص ${leftover.length} من ${job.items.length}`);
+        } else if (r.status === 'api_exhausted' || r.status === 'no_keys') {
+          requeueLeft(job, job.items.filter(it => results[it.id] == null), `السيرفر مختنق (${r.status})`);
+          await delay(2000 + Math.random() * 2000);
+        } else {
+          requeueLeft(job, job.items.filter(it => results[it.id] == null), `رد غير صالح (${r.status})`);
+        }
+      } catch (e) {
+        console.log(`[مصحح] خطأ بمهمة: ${e && e.message}`);
+        requeueLeft(job, job.items.filter(it => results[it.id] == null), 'خطأ');
+      } finally {
+        inFlight--;
+      }
+    }
   }
 
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
   const missing = results.filter(r => r == null).length;
-  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | ناقص=${missing} | الزمن=${Date.now() - tStart}ms`);
+  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
 
   return {
     texts: cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text))),
@@ -1964,66 +2035,4 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 // الدوال النهائية لتشغيل المصحح العربي (SRT و ASS) وتصديرها للـ index.js
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
-  catch (e) {
-    console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
-    return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة العربية الأصلي.\n\n", missing: 0, total: 0, failed: true };
-  }
-
-  const cues = extractCuesUniversal(originalText);
-  if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
-
-  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
-
-  let srtOutput = '';
-  let counter = 1;
-  cues.forEach((c, idx) => {
-    let text = finalCorrections[idx];
-    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
-    if (sTime.length === 10) sTime = '0' + sTime;
-    if (eTime.length === 10) eTime = '0' + eTime;
-    if (sTime.split(',')[1].length === 2) sTime += '0';
-    if (eTime.split(',')[1].length === 2) eTime += '0';
-    srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
-    counter++;
-  });
-  return { content: srtOutput, missing, total: cues.length, failed: false };
-}
-
-async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
-  let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
-  catch (e) {
-    console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
-    return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
-  }
-
-  const cues = extractCuesUniversal(originalText);
-  if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
-
-  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
-
-  const assLines = [];
-  cues.forEach((c, idx) => {
-    let text = finalCorrections[idx];
-    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\n/g, '\\N')}`);
-  });
-  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
-}
-
-module.exports = {
-  handleTranslationSrt,
-  handleTranslationAss,
-  handleTranslationSrtDetailed,
-  handleTranslationAssDetailed,
-  handleCorrectionSrt,   // تصدير دالة المصحح
-  handleCorrectionAss,   // تصدير دالة المصحح
-  normalizeLineBreakArtifacts,
-  parseRobustJsonArray,
-  parseIdTranslations,
-  translateItemsWithRecovery
-};
+  try { originalTe
