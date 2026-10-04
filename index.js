@@ -3,6 +3,11 @@ const cors = require('cors');
 const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 const { getSubDLEnglish } = require('./subdl');
+// --- إضافة 1: استدعاء دالة الجلب العربي (ومسارات التصحيح لاحقاً) ---
+const { getArabicSubsForCorrection } = require('./araFetch');
+// TODO: Uncomment next line after creating handleCorrection functions in ai.js
+// const { handleCorrectionSrt, handleCorrectionAss } = require('./ai');
+// -------------------------------------------------------------------
 
 const app = express();
 app.use(cors());
@@ -71,11 +76,11 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
 
                 if (r.missing === 0) {
-                    if (round > 1) console.log(`[${label}] Track ${trackNum}: اكتملت الترجمة بعد ${round} جولات ✅`);
+                    if (round > 1) console.log(`[${label}] Track ${trackNum}: اكتملت الترجمة/التصحيح بعد ${round} جولات ✅`);
                     return;
                 }
 
-                console.log(`[${label}] Track ${trackNum}: ناقص ${r.missing} من ${r.total} سطر (جولة ${round}/${MAX_BACKGROUND_ROUNDS}). الترجمة الحالية جاهزة للمستخدم.`);
+                console.log(`[${label}] Track ${trackNum}: ناقص ${r.missing} من ${r.total} سطر (جولة ${round}/${MAX_BACKGROUND_ROUNDS}). النتيجة الحالية جاهزة للمستخدم.`);
                 if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
             }
         } catch (e) {
@@ -512,7 +517,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 
     const m = { ...MANIFEST };
     if (req.params.config) {
-        m.description = '✅ مفعل! جاهز للترجمة التلقائية.';
+        m.description = '✅ مفعل! جاهز للترجمة التلقائية والمصحيح العربي.';
         m.name = 'Nuvio AI Subs (Active)';
     }
     res.json(m);
@@ -575,6 +580,22 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
+        // --- إضافة 2: جلب الترجمات العربية قبل بناء المصفوفة ---
+        let arabicSubs = { srt: [], ass: [] };
+        try {
+            arabicSubs = await getArabicSubsForCorrection({
+                imdbId: assImdbId, 
+                season: assSeason, 
+                episode: assEpisode, 
+                type: finalType,
+                subdlKey: process.env.SUBDL_API_KEY || '' 
+            });
+            console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.srt.length} ترجمة SRT عربية و ${arabicSubs.ass.length} ترجمة ASS عربية للعمل ${finalTargetId}`);
+        } catch (err) { 
+            console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message); 
+        }
+        // ----------------------------------------------------
+
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
 
@@ -632,8 +653,38 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : '/stream-ai.srt';
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : '/stream-ai.ass';
 
+        // مسارات المصحح العربي
+        const streamAraSrt = configParam ? `/${configParam}/stream-ara.srt` : '/stream-ara.srt';
+        const streamAraAss = configParam ? `/${configParam}/stream-ara.ass` : '/stream-ara.ass';
+        
         let extraParams = `&id=${finalTargetId}`;
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
+
+        // --- إضافة 3: دفع الترجمات العربية أولاً في القائمة ---
+        if (arabicSubs.srt.length > 0) {
+            const maxAraSrt = Math.min(4, arabicSubs.srt.length);
+            for (let i = 0; i < maxAraSrt; i++) {
+                transSubs.push({
+                    id: `nuvio-ara-srt-${i + 1}`,
+                    url: `${baseUrl}${streamAraSrt}?url=${encodeURIComponent(arabicSubs.srt[i].url)}&track=${i + 1}${extraParams}`,
+                    lang: 'ara',
+                    title: `Nuvio AI Arabic SRT ${i + 1}`
+                });
+            }
+        }
+
+        if (arabicSubs.ass.length > 0) {
+            const maxAraAss = Math.min(2, arabicSubs.ass.length);
+            for (let i = 0; i < maxAraAss; i++) {
+                transSubs.push({
+                    id: `nuvio-ara-ass-${i + 1}`,
+                    url: `${baseUrl}${streamAraAss}?url=${encodeURIComponent(arabicSubs.ass[i].url)}&track=${i + 1}${extraParams}`,
+                    lang: 'ara',
+                    title: `Nuvio AI Arabic ASS ${i + 1}`
+                });
+            }
+        }
+        // ----------------------------------------------------
 
         if (srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
@@ -708,6 +759,17 @@ app.all(['/stream-ai.srt', '/:config/stream-ai.srt'],
 
 app.all(['/stream-ai.ass', '/:config/stream-ai.ass'],
     streamRoute('ass', 'ASS', 'text/x-ssa; charset=utf-8', handleTranslationAssDetailed, ASS_WAIT));
+
+// --- إضافة 4: مسارات التشغيل للمصحح العربي ---
+// TODO: Uncomment next lines after creating handleCorrection functions in ai.js
+/*
+app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
+    streamRoute('srt', 'ARA-SRT', 'application/x-subrip; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
+
+app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
+    streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+*/
+// ---------------------------------------------
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
