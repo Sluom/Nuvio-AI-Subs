@@ -3,11 +3,8 @@ const cors = require('cors');
 const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 const { getSubDLEnglish } = require('./subdl');
-// --- إضافة 1: استدعاء دالة الجلب العربي (ومسارات التصحيح لاحقاً) ---
 const { getArabicSubsForCorrection } = require('./araFetch');
-// TODO: Uncomment next line after creating handleCorrection functions in ai.js
-// const { handleCorrectionSrt, handleCorrectionAss } = require('./ai');
-// -------------------------------------------------------------------
+const { handleCorrectionSrt, handleCorrectionAss } = require('./ai');
 
 const app = express();
 app.use(cors());
@@ -580,7 +577,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
-        // --- إضافة 2: جلب الترجمات العربية قبل بناء المصفوفة ---
         let arabicSubs = { srt: [], ass: [] };
         try {
             arabicSubs = await getArabicSubsForCorrection({
@@ -594,7 +590,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         } catch (err) { 
             console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message); 
         }
-        // ----------------------------------------------------
 
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
@@ -653,14 +648,12 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : '/stream-ai.srt';
         const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : '/stream-ai.ass';
 
-        // مسارات المصحح العربي
         const streamAraSrt = configParam ? `/${configParam}/stream-ara.srt` : '/stream-ara.srt';
         const streamAraAss = configParam ? `/${configParam}/stream-ara.ass` : '/stream-ara.ass';
         
         let extraParams = `&id=${finalTargetId}`;
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
 
-        // --- إضافة 3: دفع الترجمات العربية أولاً في القائمة ---
         if (arabicSubs.srt.length > 0) {
             const maxAraSrt = Math.min(4, arabicSubs.srt.length);
             for (let i = 0; i < maxAraSrt; i++) {
@@ -684,7 +677,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        // ----------------------------------------------------
 
         if (srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
@@ -760,16 +752,11 @@ app.all(['/stream-ai.srt', '/:config/stream-ai.srt'],
 app.all(['/stream-ai.ass', '/:config/stream-ai.ass'],
     streamRoute('ass', 'ASS', 'text/x-ssa; charset=utf-8', handleTranslationAssDetailed, ASS_WAIT));
 
-// --- إضافة 4: مسارات التشغيل للمصحح العربي ---
-// TODO: Uncomment next lines after creating handleCorrection functions in ai.js
-/*
 app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
     streamRoute('srt', 'ARA-SRT', 'application/x-subrip; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
 
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
-*/
-// ---------------------------------------------
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
