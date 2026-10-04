@@ -798,7 +798,6 @@ async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeo
   }
   return { res, model };
 }
-
 // طلب تحليل واحد بنظام الحروف (شريحة أو نافذة إعادة/رأي ثاني). يرجع Map(id -> كود خام)
 // state: إذا انمرر، الطلب "اختياري": أول 429 يوقف كل الطلبات الاختيارية (حتى ما نحرق مفاتيح الترجمة).
 // إذا رجع الطلب بدون أي كود: يسجل السبب ويقسم الطلب لنصفين ويعيده مرة وحدة (يعزل الأسطر اللي تسبب الرفض).
@@ -851,9 +850,6 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
 // ==================================================================================
 // ================== Patch 3: المشهد والأشخاص (بدل الحروف المنفصلة) ==================
 // ==================================================================================
-// الموديل يعطي أول شي قائمة الأشخاص بأجناسهم (شخص = جنس واحد ثابت)، وبعدين لكل سطر: منو يحچي ولمنو.
-// الجنس يطلع بالكود من الشخص، فنفس الشخص ما ينقلب جنسه بنص المشهد، وأشخاص الكاست يتصححون كلهم مرة وحدة.
-
 function buildRosterPrompt(windowItems, castPromptBlock) {
   return `You will receive consecutive subtitle lines from ONE film or episode, in story order, as a JSON array of objects {"id": <number>, "t": "<m:ss start time>", "text": "<subtitle text>"}.
 Optional fields: "b":1 = a pause of several seconds before this line (often a new scene or a change of speakers); "turns": N = the text holds N speaker turns separated by "⏎"; "ctx":1 = read-only context from the neighbouring parts of the story.
@@ -887,7 +883,6 @@ function parseRosterResponse(raw) {
     if (g !== 'M' && g !== 'F') g = 'U';
     people.set(id, { id, name: String(p.name || '').trim().slice(0, 60), gender: g });
   }
-  // احتياط: إذا الموديل كتب الاسم بدل P1 بالأسطر، نطابق بالاسم
   people.nameIndex = new Map([...people.values()].filter(p => p.name).map(p => [normName(p.name), p]));
   const lines = new Map();
   for (const s of (Array.isArray(parsed.lines) ? parsed.lines : [])) {
@@ -897,7 +892,6 @@ function parseRosterResponse(raw) {
   return { people, lines };
 }
 
-// اسم الشخص بالفهرس (كاست/ملف). الأسماء الوصفية (woman in black) ما تتطابق بالكلمات المفردة.
 function lookupRegistry(name, index) {
   if (!index || !index.size) return null;
   const k = normName(name);
@@ -918,7 +912,6 @@ function lookupRegistry(name, index) {
   return null;
 }
 
-// الكاست يثبّت جنس الشخص، والملف يملأ U فقط
 function fixRosterGenders(people, index, stats) {
   if (!index || !index.size) return;
   for (const p of people.values()) {
@@ -944,7 +937,6 @@ function rosterLetter(token, people) {
   return p ? p.gender : 'U';
 }
 
-// "P1>P2" أو "P1>P2/P2>P1" -> "FM" أو "FM/MF"
 function deriveRosterCode(spec, turns, people) {
   const segs = String(spec).split('/');
   if (segs.length !== (turns || 1)) return null;
@@ -956,13 +948,12 @@ function deriveRosterCode(spec, turns, people) {
     const a = parts[1].trim().toUpperCase();
     const sl = rosterLetter(s, people);
     let al = rosterLetter(a, people);
-    if (s === a && people.has(s)) al = 'N';   // يخاطب نفسه
+    if (s === a && people.has(s)) al = 'N';
     out.push(sl + al);
   }
   return out.join('/');
 }
 
-// طلب "المشهد والأشخاص" لشريحة. يرجع Map(id -> كود) أو null إذا فشل (نرجع حينها لجولة الحروف)
 async function annotateRosterWindow({ windowItems, keysArray, modelName, deadline, label, castPromptBlock, regIndex, turnsById, rosterStats }) {
   const prompt = buildRosterPrompt(windowItems, castPromptBlock);
   const t0 = Date.now();
@@ -994,7 +985,6 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   return map;
 }
 
-// مشاهد فيها FF متتالية (امرأة مع امرأة): نادرة بمعظم الأعمال، فنسأل رأي ثاني عليها
 const isFFcode = c => !!c && c.split('/').every(seg => seg === 'FF');
 function findFFRuns(items, codeOf, minLen) {
   const runs = [];
@@ -1010,23 +1000,14 @@ function findFFRuns(items, codeOf, minLen) {
     const c = codeOf(it.id);
     if (it.b === 1 && cur.length) flush();
     if (isFFcode(c)) { cur.push(it); ff++; }
-    else if (c && /[MG]/.test(c)) flush();      // سطر فيه ذكر أو جماعة يقطع المشهد
-    else if (cur.length) cur.push(it);          // محايد (NN/UU/FU...) يبقى داخل المشهد
+    else if (c && /[MG]/.test(c)) flush();
+    else if (cur.length) cur.push(it);
   }
   flush();
   return runs;
 }
 
-// ==================================================================================
 // ================== Patch 2: سجل الشخصيات + أدلة بدرجات ثقة ==================
-// ==================================================================================
-// الفكرة: طلب واحد يقرأ الملف كامل ويطلع الشخصيات وألقابها وأجناسها، ندمجها مع كاست AniList/TMDB.
-// بعدين أي نداء صريح (Harry, ...) أو تعريف نفس (I'm Harry / Eu sou Harry) أو بطاقة متكلم (HARRY: ...)
-// يعطي دليل بدرجة ثقة:
-//   cast = الاسم جاي من AniList/TMDB  -> يثبّت حرفه حتى لو الـ AI قال غير هذا
-//   file = الاسم جاي من قراءة الملف   -> يملأ الحرف فقط إذا الـ AI رجع U
-// يشتغل بأي لغة لأنه مطابقة نصية على الأسماء، مو تحليل نحوي إنجليزي.
-
 const registryCaches = new Map();
 const MAX_REGISTRY_CACHES = 40;
 
@@ -1082,7 +1063,6 @@ function parseRegistry(raw) {
   return out;
 }
 
-// طلب واحد على الملف كامل. يرجع [{name, aliases, gender}]. يتخزن بالكاش حسب الملف.
 async function getCharacterRegistry(cues, keysArray, modelName, cacheKey, castPromptBlock) {
   if (registryCaches.has(cacheKey)) return registryCaches.get(cacheKey);
 
@@ -1124,7 +1104,6 @@ ${body}`;
   return registry;
 }
 
-// يدمج الكاست (AniList/TMDB) مع سجل الملف ويبني فهرس الأسماء والألقاب
 function buildRegistryIndex(castPromptBlock, registry) {
   const entries = parseCastEntries(castPromptBlock);
   const castByKey = new Map(entries.map(e => [normName(e.name), e]));
@@ -1132,7 +1111,6 @@ function buildRegistryIndex(castPromptBlock, registry) {
   for (const r of registry || []) {
     const hit = castByKey.get(normName(r.name)) || (r.aliases || []).map(a => castByKey.get(normName(a))).find(Boolean);
     if (hit) {
-      // نفس الشخصية بالكاست: نأخذ ألقابها فقط إذا الجنس متفق، وإذا مختلف نتجاهل سجل الملف
       if (hit.gender === r.gender) hit.aliases.push(r.name, ...(r.aliases || []));
       continue;
     }
@@ -1175,7 +1153,6 @@ function buildRegistryIndex(castPromptBlock, registry) {
   return index;
 }
 
-// أسماء الملف (اللي مو بالكاست) نرسلها للـ AI كسياق إضافي
 function registryPromptBlock(index) {
   if (!index) return '';
   const lines = index.entries
@@ -1186,27 +1163,23 @@ function registryPromptBlock(index) {
   return 'CHARACTERS INFERRED FROM THE WHOLE SUBTITLE FILE (M = male, F = female; inferred by reading the whole story, may contain mistakes; the context of the line overrides them):\n' + lines.join('\n');
 }
 
-// دليل لكل دور متكلم بالسطر: [{ s, sT, a, aT }]  (s/a = جنس المتكلم/المخاطَب، sT/aT = درجة الثقة)
 function registryEvidenceForCue(rawText, index) {
   if (!index || !index.size) return null;
   const turns = splitTurns(rawText).map(t => String(t).replace(/[’‘`]/g, "'"));
   let any = false;
   const ev = turns.map(t => {
     const e = {};
-    // مخاطَب: نداء صريح بالبداية (Harry, ...) أو بالنهاية (..., Harry.)
     let hit = null;
     let m = index.startRe.exec(t);
     if (m) hit = m[1];
     else {
       m = index.endRe.exec(t);
-      // "It's me, Harry." هذا تعريف مو نداء
       if (m && !/\b(?:it'?s|it is|this is|that'?s|i'?m|i am)\s+me\s*$/i.test(t.slice(0, m.index))) hit = m[1];
     }
     if (hit && startsCapital(hit)) {
       const ent = index.map.get(normName(hit));
       if (ent) { e.a = ent.gender; e.aT = ent.tier; any = true; }
     }
-    // متكلم: تعريف نفس (I'm Harry / Eu sou Harry) أو بطاقة متكلم (HARRY: ...)
     const mi = index.introRe.exec(t) || index.labelRe.exec(t);
     if (mi && startsCapital(mi[1])) {
       const ent = index.map.get(normName(mi[1]));
@@ -1217,7 +1190,6 @@ function registryEvidenceForCue(rawText, index) {
   return any ? ev : null;
 }
 
-// يطبق الدليل على الكود: cast يثبّت حرفه، file يملأ U فقط
 function applyEvidence(code, ev, stats) {
   const segs = String(code).split('/');
   if (!ev || segs.length !== ev.length) return code;
@@ -1237,9 +1209,6 @@ function applyEvidence(code, ev, stats) {
   }).join('/');
 }
 
-// الجولة 1: "المشهد والأشخاص" (وإذا فشلت شريحة نرجع لجولة الحروف لها). بعدها: أدلة -> إعادة U -> رأي ثاني للمشاهد
-// المشبوهة (FF متتالية) -> أدلة -> حفظ. الطلبات الاختيارية (إعادة U والرأي الثاني) تتوقف عند أول 429.
-// evidence: Map(id -> [{s,sT,a,aT}]) حسب أدوار المتكلمين.
 async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', evidence = new Map(), regIndex = null) {
   const cache = getAnnotationCache(cacheKey);
   const tStart = Date.now();
@@ -1270,7 +1239,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     return o;
   });
 
-  // ---------- الجولة الأولى: المشهد والأشخاص ----------
   if (pending.length > 0) {
     const ranges = makeCoreRanges(items.length, ANNOTATION_SLICE_SIZE);
     const tasks = [];
@@ -1296,7 +1264,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
             windowItems, mode: 'main', keysArray, modelName, deadline, castPromptBlock,
             label: `جولة 1 (حروف) شريحة ${ri + 1}/${ranges.length}`
           });
-          map = new Map([...lm, ...(map || [])]);   // نتيجة المشهد لها الأولوية
+          map = new Map([...lm, ...(map || [])]);
         }
         for (const it of core) {
           if (cache.has(it.id)) continue;
@@ -1312,10 +1280,8 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     }
   }
 
-  // الأدلة المؤكدة تتطبق قبل الإعادة، حتى ما نضيع طلبات على أسطر انحسمت
   applyAllEvidence();
 
-  // ---------- الجولة الثانية: إعادة الناقص وأسطر U فقط (اختيارية) ----------
   const askList = pending.filter(it => {
     const c = coded.get(it.id);
     return !c || c.includes('U');
@@ -1355,7 +1321,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
 
   applyAllEvidence();
 
-  // ---------- رأي ثاني: مشاهد مشبوهة (FF متتالية) ----------
   if (!optState.aborted && deadline - Date.now() > 6000) {
     const codeOf = id => coded.get(id) || cache.get(id);
     const jobs = [];
@@ -1382,7 +1347,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
           const nc = normalizeCode(map.get(it.id), turnsById.get(it.id));
           if (!nc) continue;
           const old = coded.get(it.id) || defaultCode(it.id);
-          const merged = mergeCodes(nc, old);        // الحرف اللي رجع U يبقى على قراءته الأولى
+          const merged = mergeCodes(nc, old);
           if (merged !== old) { coded.set(it.id, merged); changedLines++; }
         }
       });
@@ -1433,11 +1398,10 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
 
   let enhancedCastPrompt = castPromptBlock || '';
   const storyM = String(castPromptBlock || '').match(/STORY OVERVIEW:\n([\s\S]*?)\n\nKNOWN CHARACTERS/);
-console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${storyM[1].replace(/\s+/g, ' ')}` : '[القصة] غير مرفقة (ما في كاست)');
-  // أدلة محلية من NLP (ضعيفة): تملأ الحروف اللي بقيت U فقط
+  console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${storyM[1].replace(/\s+/g, ' ')}` : '[القصة] غير مرفقة (ما في كاست)');
+  
   const localHints = new Map();
 
-  // ================== Patch 2: سجل الشخصيات من الملف كامل (طلب واحد) ==================
   let regIndex = null;
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0) {
     try {
@@ -1451,7 +1415,6 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
     }
   }
 
-  // ================== التحليل النحوي المحلي (إنجليزي فقط) وتخمين الأسماء ==================
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0 && nlp && genderDetect) {
     const known = new Map();
     const lines = enhancedCastPrompt.split('\n');
@@ -1467,7 +1430,6 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
       const doc = nlp(it.text);
       const people = doc.people().out('array');
 
-      // تخمين أسماء الشخصيات الجانبية الجديدة أوفلاين
       for (let p of people) {
         const cleanP = p.replace(/[^\w\s]/g, '').trim().toLowerCase();
         if (cleanP && cleanP.length > 2 && !known.has(cleanP) && !dynamicNames.has(cleanP)) {
@@ -1480,14 +1442,11 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
 
       let addresseeG = 'U', speakerG = 'U';
 
-      // نعالج الجملة فقط إذا احتوت على اسم شخص واحد لضمان عدم الخلط
       if (people.length === 1) {
          const pName = people[0].replace(/[^\w\s]/g, '').trim().toLowerCase();
          const pGen = known.get(pName) || dynamicNames.get(pName);
          if (pGen) {
-            // المخاطَب فقط بنداء صريح (Harry, ... أو ..., Harry.) مو أي اسم يمر بالجملة
             if (isVocativeName(it.text, pName)) addresseeG = pGen;
-            // "I am X" / "my name is X": المتحدث هو الاسم
             if (doc.match('(i am|im|my name is) #Person').found) speakerG = pGen;
          }
       }
@@ -1505,9 +1464,7 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
       console.log(`[التحليل النحوي] ${localHints.size} سطر فيه دليل محلي (يُستخدم فقط لملء الحروف اللي ما حسمها الـ AI).`);
     }
   }
-  // =====================================================================================
 
-  // ================== الأدلة: سجل الشخصيات (ثقة حسب المصدر) + NLP (ضعيف) ==================
   const evidence = new Map();
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0) {
     cues.forEach((c, i) => {
@@ -1556,7 +1513,6 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
   if (toDo.length > 0) {
     let ruleFixes = 0;
     for (const it of toDo) {
-      // الأسطر ذات عدة متكلمين (g فيه "/") تبقى كما هي
       if (it.g && it.g.includes('/')) continue;
       const adj = applyVocativeRules(cues[it.id].text, it.g);
       if (adj && adj !== it.g) { it.g = adj; ruleFixes++; }
@@ -1580,9 +1536,7 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
     }
 
     const tasks = pendingChunks.map(chunk => async () => {
-      // سياق قراءة فقط (قبل/بعد الدفعة) من الملف الأصلي لحل الجمل المقطوعة بين الدفعات
       const ctx = buildChunkContext(cues, chunk);
-      // نرسل البرومبت المحسن (اللي يحتوي على الأسماء الجانبية) للترجمة النهائية أيضاً
       const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx);
       for (const [id, text] of map) {
         results[id] = text;
@@ -1597,8 +1551,6 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
       .filter(ch => ch.length > 0);
   }
 
-  // ===== أداة فحص (تطبع باللوق فقط، ما تغيّر الترجمة): عينة عشوائية للتأكد من صحة الجنس يدوياً =====
-  // GENDER_SAMPLE=0 بـ Environment يوقفها. الافتراضي 40 سطر.
   const SAMPLE_N = parseInt(process.env.GENDER_SAMPLE || '40', 10);
   if (SAMPLE_N > 0 && toDo.length > 0) {
     const flat = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
@@ -1608,9 +1560,6 @@ console.log(storyM ? `[القصة] مرفقة (${storyM[1].length} حرف): ${st
     for (const it of pick) console.log(`[فحص] #${it.id} [${it.g || '--'}] ${flat(cues[it.id].text)} => ${flat(results[it.id])}`);
   }
 
-  // ===== أداة بحث/تشخيص (تطبع باللوق فقط، ما تغيّر الترجمة) =====
-  // GENDER_FIND=Seraphina|تفعلين هذا  -> كل سطر يطابق (بالأصل أو بالترجمة) مع سطرين قبل وبعد وكود كل سطر
-  // GENDER_DEBUG=1                    -> يطبع سجل الشخصيات: الاسم، الجنس، المصدر (cast = كاست، file = من قراءة الملف)
   const FIND = String(process.env.GENDER_FIND || '').trim();
   const DEBUG = process.env.GENDER_DEBUG === '1';
   if ((FIND || DEBUG) && toDo.length > 0) {
@@ -1809,11 +1758,249 @@ async function handleTranslationAss(subUrl, keysArray, modelName) {
   return (await handleTranslationAssDetailed(subUrl, keysArray, modelName)).content;
 }
 
+// ==================================================================================
+// ================== مسار المصحح العربي (Arabic Correction Path) ==================
+// ==================================================================================
+
+// دالة لمعالجة دفعة من الترجمات العربية (فقط تصحيح وإضافة علامات ترقيم LTR/RTL)
+async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
+  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
+
+  const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
+    ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
+    : '';
+
+  const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic text>"}.
+This text is ALREADY translated into Arabic. However, its punctuation is often reversed due to old RTL/LTR display tricks, or it completely lacks punctuation and cinematic formatting.
+Your ONLY job is to FIX the punctuation and formatting so it reads perfectly from Right-To-Left. DO NOT change the Arabic words, meaning, or grammar. DO NOT translate.
+
+Rules:
+1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. Never merge, split, or skip entries.
+2. Fix reversed punctuation: For example, turn \`"...مشاهدة العدو"\` into \`"مشاهدة العدو..."\` and \`(مواجهة (بيتو"\` into \`"(مواجهة بيتو)"\`. Ensure question marks (؟) and exclamation marks (!) are placed correctly at the logical end of the Arabic sentence.
+3. If there is no punctuation, add it professionally. Add a period (.) at the end of a complete sentence. DO NOT add a period if the sentence clearly continues into the next entry (check the context block to verify).
+4. Wrap place names, cities, companies, and non-person proper nouns in parentheses: (الاسم).
+5. Wrap person names (characters) in quotation marks: "الاسم".
+6. If the entire entry is off-screen narration or voice-over, wrap it entirely in ONE pair of quotation marks.
+7. Preserve all square brackets [ ] and formatting tags (like HTML or {\\an8}).
+8. ONLY output the JSON array. No explanations.
+${ctxBlock}
+Content to correct:
+${JSON.stringify(items)}`;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const activeKey = await acquireKey(keysArray);
+    if (!activeKey) return { status: 'no_keys', map: new Map() };
+
+    const cleanKey = String(activeKey).trim();
+    const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
+
+    try {
+      const r = await axios.post(url, {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig,
+        safetySettings: SAFETY_SETTINGS_OFF
+      }, {
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey, 'x-goog-api-client': GEMINI_CLIENT_HEADER },
+        timeout: 60000,
+        httpAgent, httpsAgent,
+        maxContentLength: MAX_AI_RESPONSE_BYTES
+      });
+
+      const parts = r.data?.candidates?.[0]?.content?.parts || [];
+      const responseText = parts.map(p => p?.text || '').join('');
+      const map = parseIdTranslations(responseText);
+
+      if (map) {
+        const allowedIds = new Set(items.map(i => i.id));
+        let extraIds = 0;
+        for (const id of map.keys()) if (!allowedIds.has(id)) extraIds++;
+        if (extraIds > Math.max(3, Math.floor(items.length * 0.02))) {
+          console.log(`[حارس الأرقام - مصحح] الرد فيه ${extraIds} رقم ما طلبته. أرفضه.`);
+          return { status: 'bad_ids', map: new Map() };
+        }
+        if (items.length >= 80) console.log(`[مصحح عربي - نجاح] دفعة ${items.length} سطر عبر ...${cleanKey.slice(-4)}`);
+        return { status: 'ok', map };
+      }
+
+      return { status: 'bad_format', map: new Map() };
+    } catch (e) {
+      const status = e.response?.status || 0;
+      if (isGeminiAuthFailure(e)) {
+        deadKeys.add(activeKey);
+        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status})`);
+        continue;
+      }
+      const cd = cooldownForStatus(status);
+      keyCooldowns.set(activeKey, Date.now() + cd);
+      console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      if (attempt < 3) await delay(2000 + (Math.random() * 2000));
+    }
+  }
+  return { status: 'api_exhausted', map: new Map() };
+}
+
+// دالة المداورة (Recovery) الخاصة بالمصحح العربي (مطابقة لدالة الترجمة)
+async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null) {
+  const done = new Map();
+  if (!items || items.length === 0) return done;
+
+  let pending = items;
+
+  for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
+    const result = await correctChunkStrict(pending, keysArray, modelName, ctx);
+
+    if (result.status === 'api_exhausted' || result.status === 'no_keys') {
+      console.log(`[تجاوز طارئ - مصحح] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على التزامن.`);
+      break;
+    }
+
+    if ((result.status === 'bad_ids' || result.status === 'bad_format') && pending.length > 60) {
+      const mid = Math.ceil(pending.length / 2);
+      console.log(`[حارس الأرقام - مصحح] أقسم الدفعة (${pending.length}) لنصفين وأعيد.`);
+      const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx);
+      const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx);
+      for (const [id, text] of left) done.set(id, text);
+      for (const [id, text] of right) done.set(id, text);
+      pending = pending.filter(it => !done.has(it.id));
+      break;
+    }
+
+    if (result.status === 'ok') {
+      const wanted = new Set(pending.map(it => it.id));
+      for (const [id, text] of result.map) {
+        if (wanted.has(id) && text) done.set(id, text);
+      }
+    }
+
+    const before = pending.length;
+    pending = pending.filter(it => !done.has(it.id));
+
+    if (pending.length > 0 && round < MAX_MISSING_RETRIES) {
+      console.log(`[إعادة الناقص - مصحح 🔁] ناقص ${pending.length} من ${before}. أعيد طلبهم...`);
+    }
+  }
+
+  return done;
+}
+
+// معالجة كافة الأسطر العربية وتوزيعها على المفاتيح (دفعة = 300)
+async function correctAllCues(cues, keysArray, modelName, cacheKey) {
+  const tStart = Date.now();
+  const CHUNK = 300; // حجم الدفعة للمصحح 300 كما طلب المستخدم
+  const concurrency = Math.max(1, keysArray.length); // استغلال كل المفاتيح
+  const cache = getLineCache(cacheKey);
+
+  const results = new Array(cues.length).fill(null);
+  const toDo = [];
+  let fromCache = 0;
+
+  cues.forEach((c, i) => {
+    if (!needsTranslation(c.text)) { results[i] = c.text; return; }
+    if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
+    toDo.push({ id: i, text: prepCueText(c.text) });
+  });
+
+  if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
+
+  const tTrans = Date.now();
+  let pendingChunks = [];
+  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
+
+  for (let pass = 0; pass <= MAX_RETRY_PASSES && pendingChunks.length > 0; pass++) {
+    if (pass > 0) {
+      const left = pendingChunks.reduce((n, ch) => n + ch.length, 0);
+      if (keysArray.every(k => deadKeys.has(k))) break;
+      console.log(`[جولة إعادة المصحح ${pass}/${MAX_RETRY_PASSES} 🔁] راحة ثم إعادة...`);
+      await delay(5000 + Math.random() * 3000);
+    }
+
+    const tasks = pendingChunks.map(chunk => async () => {
+      const ctx = buildChunkContext(cues, chunk);
+      const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
+      for (const [id, text] of map) {
+        results[id] = text;
+        cache.set(id, text);
+      }
+    });
+
+    await runConcurrentPool(tasks, pass === 0 ? concurrency : Math.min(2, concurrency));
+
+    pendingChunks = pendingChunks
+      .map(ch => ch.filter(it => results[it.id] == null))
+      .filter(ch => ch.length > 0);
+  }
+
+  const missing = results.filter(r => r == null).length;
+  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | ناقص=${missing} | الزمن=${Date.now() - tStart}ms`);
+
+  return {
+    texts: cues.map((c, i) => normalizeLineBreakArtifacts(results[i] || c.text)),
+    missing
+  };
+}
+
+// الدوال النهائية لتشغيل المصحح العربي (SRT و ASS) وتصديرها للـ index.js
+async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+  let originalText = "";
+  try { originalText = await fetchAndExtractSub(subUrl); }
+  catch (e) {
+    console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
+    return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة العربية الأصلي.\n\n", missing: 0, total: 0, failed: true };
+  }
+
+  const cues = extractCuesUniversal(originalText);
+  if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
+
+  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=300 | مفاتيح=${keysArray.length}`);
+  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
+
+  let srtOutput = '';
+  let counter = 1;
+  cues.forEach((c, idx) => {
+    let text = finalCorrections[idx];
+    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
+    let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
+    if (sTime.length === 10) sTime = '0' + sTime;
+    if (eTime.length === 10) eTime = '0' + eTime;
+    if (sTime.split(',')[1].length === 2) sTime += '0';
+    if (eTime.split(',')[1].length === 2) eTime += '0';
+    srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
+    counter++;
+  });
+  return { content: srtOutput, missing, total: cues.length, failed: false };
+}
+
+async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+  let originalText = "";
+  try { originalText = await fetchAndExtractSub(subUrl); }
+  catch (e) {
+    console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
+    return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
+  }
+
+  const cues = extractCuesUniversal(originalText);
+  if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
+
+  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=300 | مفاتيح=${keysArray.length}`);
+  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
+
+  const assLines = [];
+  cues.forEach((c, idx) => {
+    let text = finalCorrections[idx];
+    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
+    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\n/g, '\\N')}`);
+  });
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
+}
+
 module.exports = {
   handleTranslationSrt,
   handleTranslationAss,
   handleTranslationSrtDetailed,
   handleTranslationAssDetailed,
+  handleCorrectionSrt,   // تصدير دالة المصحح
+  handleCorrectionAss,   // تصدير دالة المصحح
   normalizeLineBreakArtifacts,
   parseRobustJsonArray,
   parseIdTranslations,
