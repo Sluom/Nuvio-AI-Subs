@@ -135,20 +135,17 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
-  // البرومبت المحدث: تم إزالة أوامر التفلسف (إضافة شارحة وأقواس) والتركيز حصراً على ترتيب ما هو موجود
+  // البرومبت المحدث: تم إزالة كلمة الأقواس والتنسيق، واعتماد فكرتك للأوامر الميكانيكية المباشرة
   const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic text>"}.
-The text is ALREADY Arabic. Some entries have broken punctuation (typed in visual/reversed order), or no punctuation.
-Your ONLY job is to fix punctuation formatting. DO NOT change the Arabic words or meaning. DO NOT translate.
-
-WRITING DIRECTION (MANDATORY): write every entry in plain LOGICAL Unicode order. Put each punctuation mark where it belongs logically: a sentence-ending period, "؟", or "!" comes right after the last Arabic word. An opening bracket '(' comes BEFORE the words it wraps and the closing ')' AFTER them. NEVER output invisible direction characters.
+Your ONLY job is to change the position of specific punctuation marks. DO NOT change words, meaning, or any other symbols.
 
 Rules:
-1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. You MUST return exactly ${items.length} objects. Keep the same number of lines inside each entry.
-2. Fix reversed or misplaced punctuation. Question marks (؟) and exclamation marks (!) go at the logical end of the sentence. Fix flipped or backwards brackets (e.g., if you see "word)" fix it to "(word)").
-3. Add a period (.) at the end of a complete sentence if it lacks punctuation. DO NOT add a period if the sentence clearly continues into the next entry.
-4. DO NOT add any dashes (-). Only keep a dash if it ALREADY exists in the original text. NEVER add a dash to a single speaker's line.
+1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}]. Keep the exact same number of lines inside each entry.
+2. If you see a period (.), question mark (؟), or exclamation mark (!) at the START of an Arabic sentence, move it to the END of the sentence.
+3. If you see a dash (-) at the END of a sentence, move it to the START of the sentence.
+4. Add a period (.) at the end of a complete sentence if it lacks punctuation completely. DO NOT add a period if the sentence clearly continues into the next entry.
 5. The sequence \\N or \\n inside a text is a LINE BREAK marker. Keep it exactly where it is. NEVER merge two lines into one.
-6. NEVER output square brackets [ ] : if the text contains them, remove the brackets but keep the words inside. Preserve other formatting tags.
+6. DO NOT touch, add, remove, or fix ANY other characters, symbols, or formatting. Just do the specific moves mentioned above.
 7. ONLY output the JSON array. No explanations.
 ${ctxBlock}
 Content to correct:
