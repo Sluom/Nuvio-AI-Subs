@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 
 // التصدير بالأعلى (الدوال تُرفع تلقائياً) حتى لا يضيع لو انقطع آخر الملف عند النسخ
 module.exports = { getArabicSubsForCorrection };
@@ -7,6 +8,11 @@ module.exports = { getArabicSubsForCorrection };
 const cleanPath = p => String(p).split('?')[0];
 
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
+
+const VERIFY_LIMIT = 12;          // أقصى عدد روابط تُحمَّل وتُفحص
+const VERIFY_TIMEOUT_MS = 12000;
+const RESULT_TTL = 30 * 60 * 1000;
+const resultCache = new Map();
 
 // 1. OpenSubtitles Legacy (rest.opensubtitles.org): ASS فقط. الـ SRT مستبعد نهائياً من هذا المصدر.
 async function fetchOsLegacyArabic(imdbId, season, episode) {
@@ -61,7 +67,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
     }
 }
 
-// 2. OpenSubtitles Mirror (strem.io) - بدون تغيير
+// 2. OpenSubtitles Mirror (strem.io)
 async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const isSeries = type === 'series' || type === 'anime' || !!season;
@@ -96,10 +102,10 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     }
 }
 
-// 3. SubDL (مع لوغات واضحة)
+// 3. SubDL (المفتاح من إعدادات الإضافة فقط)
 async function fetchSubDLArabic(imdbId, season, episode, apiKey) {
-    const key = String(apiKey || process.env.SUBDL_API_KEY || '').trim();
-    if (!key) { console.log('[جلب عربي - SubDL] لا يوجد مفتاح (SUBDL_API_KEY) - تم التخطي.'); return []; }
+    const key = String(apiKey || '').trim();
+    if (!key) { console.log('[جلب عربي - SubDL] لا يوجد مفتاح SubDL في إعدادات الإضافة - تم التخطي.'); return []; }
     if (!imdbId) return [];
     const isSeries = season != null && episode != null;
 
@@ -171,8 +177,8 @@ function subsourceEpisodeOk(name, season, episode) {
 const ssErr = e => `${e.response?.status || e.code || ''} ${e.response?.data?.message || e.message}`.trim();
 
 async function fetchSubsourceArabic(imdbId, season, episode, apiKey) {
-    const key = String(apiKey || process.env.SUBSOURCE_API_KEY || '').trim();
-    if (!key) { console.log('[جلب عربي - Subsource] لا يوجد مفتاح (SUBSOURCE_API_KEY) - تم التخطي.'); return []; }
+    const key = String(apiKey || '').trim();
+    if (!key) { console.log('[جلب عربي - Subsource] لا يوجد مفتاح Subsource في إعدادات الإضافة - تم التخطي.'); return []; }
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const isSeries = season != null && episode != null;
     const headers = { 'X-API-Key': key, 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' };
@@ -244,9 +250,41 @@ async function fetchSubsourceArabic(imdbId, season, episode, apiKey) {
     }
 }
 
+// فحص حقيقي: يحمّل الملف، يتأكد أنه عربي وفيه أسطر كافية، ويحسب بصمة لحذف المكرر
+async function verifyArabicSub(s, subsourceKey) {
+    const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
+    try {
+        const text = await Promise.race([
+            fetchAndExtractSub(s.url, subsourceKey),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS))
+        ]);
+        const cues = extractCuesUniversal(text);
+        const arabic = (text.match(/[\u0600-\u06FF]/g) || []).length;
+        if (cues.length < 10 || arabic < 200) {
+            console.log(`[فحص عربي] ✗ ${s._source}: ليس عربياً أو فارغ (cues=${cues.length}, arabic=${arabic}) <- ${s.url}`);
+            return null;
+        }
+        const sig = crypto.createHash('md5')
+            .update(cues.map(c => c.text).join('').replace(/[^\p{L}\p{N}]+/gu, ''))
+            .digest('hex');
+        return { ...s, _sig: sig };
+    } catch (e) {
+        console.log(`[فحص عربي] ✗ ${s._source}: ${e.message} <- ${s.url}`);
+        return null;
+    }
+}
+
 // الدالة الرئيسية
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     console.log(`[جلب عربي] جاري البحث عن ترجمات عربية جاهزة للتصحيح للعمل: ${imdbId}...`);
+
+    const keyHash = crypto.createHash('md5').update(`${subdlKey || ''}|${subsourceKey || ''}`).digest('hex').slice(0, 8);
+    const cacheKey = `${imdbId}:${season}:${episode}:${keyHash}`;
+    const hit = resultCache.get(cacheKey);
+    if (hit && Date.now() - hit.time < RESULT_TTL) {
+        console.log('[جلب عربي] النتيجة من الكاش.');
+        return hit.value;
+    }
 
     const names = ['OS Legacy (ASS)', 'OS Mirror', 'SubDL', 'Subsource'];
     const settled = await Promise.allSettled([
@@ -261,10 +299,14 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     });
     console.log('[جلب عربي] ملخص المصادر: ' + settled.map((r, i) => `${names[i]}=${r.status === 'fulfilled' ? r.value.length : 'خطأ'}`).join(' | '));
 
-    const allSubs = settled.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+    // تناوب بين المصادر: واحد من كل مصدر بالدور، حتى لا تأتي كل المسارات من مصدر واحد
+    const lists = settled.map(r => (r.status === 'fulfilled' ? r.value : []));
+    const interleaved = [];
+    const maxLen = Math.max(0, ...lists.map(l => l.length));
+    for (let i = 0; i < maxLen; i++) for (const l of lists) if (l[i]) interleaved.push(l[i]);
 
     const seenUrls = new Set();
-    const uniqueSubs = allSubs.filter(s => {
+    const uniqueSubs = interleaved.filter(s => {
         if (!s || !s.url) return false;
         const clean = cleanPath(s.url);
         if (seenUrls.has(clean)) return false;
@@ -272,12 +314,18 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         return true;
     });
 
-    const srtSubs = uniqueSubs.filter(s => s.format === 'srt');
-    const assSubs = uniqueSubs.filter(s => s.format === 'ass');
+    const toVerify = uniqueSubs.slice(0, VERIFY_LIMIT);
+    const verified = (await Promise.all(toVerify.map(s => verifyArabicSub(s, subsourceKey)))).filter(Boolean);
 
-    console.log(`[جلب عربي] النتيجة النهائية: ${srtSubs.length} ملف SRT، و ${assSubs.length} ملف ASS.`);
+    const seenSig = new Set();
+    const good = verified.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
 
-    return { srt: srtSubs, ass: assSubs };
+    const srtSubs = good.filter(s => s.format === 'srt');
+    const assSubs = good.filter(s => s.format === 'ass');
+
+    console.log(`[جلب عربي] بعد الفحص: ${verified.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${srtSubs.length} SRT و ${assSubs.length} ASS.`);
+
+    const value = { srt: srtSubs, ass: assSubs };
+    if (good.length > 0) resultCache.set(cacheKey, { time: Date.now(), value });
+    return value;
 }
-
-module.exports = { getArabicSubsForCorrection };
