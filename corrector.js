@@ -106,9 +106,64 @@ function sameWords(orig, out) {
   return levenshtein(a, b) <= Math.max(2, Math.floor(a.length * 0.06));
 }
 
-// ---------- حارس الأقواس والتنصيص: الموديل ممنوع يزيد أو ينقص منها ----------
-function bracketQuoteCount(s) {
-  return (String(s == null ? '' : s).replace(/<[^>]*>|\{[^}]*\}/g, '').match(/[()"“”]/g) || []).length;
+// ---------- تجهيز السطر للموديل: نمسح الترقيم (نقاط، فواصل، تنصيص، أقواس) ونُبقي الشرطة وفواصل الأسطر والنقاط الثلاث والوسوم ----------
+const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
+const LINE_SPLIT = /\\+[nN]|\r?\n/;
+
+function stripPunctPart(s) {
+  return s
+    .replace(/["“”«»()\[\]]/g, '')
+    .replace(/(?<!\d)[.,:]+|[.,:]+(?!\d)/g, ' ')   // لا نمسّ 3.5 و 12:30 و 1,600
+    .replace(/[!؟?،؛;]+/g, ' ');
+}
+
+function prepareForModel(rawText) {
+  const out = [];
+  for (const rawLine of String(rawText == null ? '' : rawText).split(LINE_SPLIT)) {
+    let l = rawLine.trim();
+    if (!l) continue;
+    const tagPrefix = l.match(LEAD_TAGS)[0];
+    l = l.slice(tagPrefix.length).trim();
+    let dash = false;
+    // شرطة الحوار: تُسحب للبداية سواء كانت بالبداية أو متأخرة بالنهاية
+    if (/^[-–—]\s*/.test(l)) { dash = true; l = l.replace(/^[-–—]\s*/, ''); }
+    if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
+    l = l.split(/(\{[^}]*\}|<[^>]*>|\.{3,}|…)/)
+      .map((part, i) => (i % 2 ? part : stripPunctPart(part)))
+      .join('').replace(/[ \t]{2,}/g, ' ').trim();
+    if (!l) continue;
+    out.push(tagPrefix.trim() + (dash ? '- ' : '') + l);
+  }
+  return out.join('\\N');
+}
+
+// تلميح التنصيص من النص الأصلي: whole = كل السطر اقتباس واحد، open = الاقتباس يكمل بالترجمة اللي بعدها، close = بدأ قبلها
+function quoteHint(rawText) {
+  const t = String(rawText == null ? '' : rawText).replace(/\{[^}]*\}|<[^>]*>/g, '');
+  const lines = t.split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  if (lines.some(l => /^[-–—]/.test(l) || /[-–—]$/.test(l))) return null;
+  const total = (t.match(/["“”]/g) || []).length;
+  if (!total) return null;
+  let edge = 0, startFirst = false, endLast = false;
+  lines.forEach((l, i) => {
+    const st = /^["“”]/.test(l);
+    const en = /["“”][.…!؟?،,؛\s]*$/.test(l);
+    const onlyQuote = l.replace(/[.…!؟?،,؛\s]/g, '').length === 1;
+    if (st) { edge++; if (i === 0) startFirst = true; }
+    if (en && !(st && onlyQuote)) { edge++; if (i === lines.length - 1) endLast = true; }
+  });
+  if (edge !== total) return null;              // في تنصيص وسط السطر: ما نحكم عليه
+  if (total % 2 === 0) return 'whole';
+  if (total === 1) { if (startFirst) return 'open'; if (endLast) return 'close'; }
+  return null;
+}
+
+// شكل النص: عدد الأسطر وعدد الأسطر اللي تبدأ بشرطة (حارس: الموديل ممنوع يغيّرهم)
+function shapeOf(text) {
+  const lines = String(text == null ? '' : text).split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  const dashes = lines.filter(l => /^[-–—]/.test(l.replace(LEAD_TAGS, ''))).length;
+  return lines.length + ':' + dashes;
 }
 
 // ---------- إصلاح الأقواس بالكود (احتياط لا يعتمد على الموديل) ----------
@@ -262,22 +317,24 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
-  const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic text>"}.
-Many entries come from old files written in "visual order": punctuation, brackets and quotation marks are in reversed or wrong places (a period at the START of a sentence, ")" where "(" belongs, a bracket pair split across two lines, a dash at the end).
-Your job: RE-LAY every entry so its punctuation, brackets, quotes and dashes are in correct LOGICAL Unicode order for modern right-to-left Arabic.
+  const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
+All the punctuation of every entry was REMOVED on purpose: no periods, commas, question marks, quotation marks or parentheses. Only the speaker dashes "-", the line-break markers \\N, and any "..." that existed were kept.
+Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
 
-STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no spelling fixes, no gender changes. Only punctuation, brackets, quotation marks and dashes may move, be added or be removed.
+STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no spelling fixes, no gender changes. You may only ADD punctuation marks, quotation marks and parentheses. There is nothing to translate and nothing to guess about who is speaking.
 
 Rules:
-1. Return a JSON array: [{"id": <same number>, "text": "<corrected text>"}] with exactly one object per input id, in the same order, including entries that need no change.
-2. A sentence-ending mark (. ! ؟ ...) goes at the END of its sentence, never at the start of an entry or before a dash.
-3. NEVER add or remove any bracket ( ) or quotation mark ". The output must contain exactly the same number of brackets and quotation marks as the input. You may only MOVE existing brackets so each pair is in the right place. Never put brackets around a word that had none. Leave straight quotation marks " exactly where they are.
-4. A dash "-" that marks a speaker turn belongs at the START of that turn.
-5. The sequence \\N or \\n is a LINE BREAK marker: keep each line break where it is. NEVER merge two lines into one.
-6. NEVER output square brackets [ ].
-7. ONLY output the JSON array. No explanations.
+1. Return a JSON array: [{"id": <same number>, "text": "<the same words with punctuation>"}] with exactly one object per input id, in the same order. Never output "q".
+2. Keep every \\N line break exactly where it is. NEVER merge lines, split lines or add lines.
+3. Keep every dash "-" exactly at the start of its line. Never add a dash to a line that has none.
+4. Sentence marks: end each sentence with . or ! or ؟ as the meaning requires, and use ، and ؛ where natural. Keep every existing "..." exactly where it is. Use the read-only context to see whether a sentence continues in the next entry or continues from the previous one: do NOT end an entry with a full stop if its sentence continues in the next entry.
+5. PERSON NAMES (names of people or characters, even when a prefix such as ل ب و ك ف is attached to the word): wrap the whole word in quotation marks, like "كيلوا". Never use parentheses for people.
+6. OTHER PROPER NOUNS that are not people (places, cities, countries, companies, brands, organizations, food or dish names): wrap them in parentheses, like (طوكيو). Never use quotation marks for them. If you are not sure that a word is a name, leave it with no mark at all.
+7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.
+8. NEVER output square brackets [ ].
+9. ONLY output the JSON array. No explanations.
 ${ctxBlock}
-Content to correct:
+Content to punctuate:
 ${JSON.stringify(items)}`;
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -383,16 +440,22 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const RETRY_PIECE = 50;     // حجم قطعة إعادة الناقص
   const MAX_TRIES = 5;        // محاولات الأسطر الناقصة من ردود سليمة
   const MAX_RL = 12;          // محاولات بسبب الخنق (429): لا تُحسب من الـ 5
-  const cache = getLineCache('ARA_' + cacheKey);   // كاش منفصل للمصحح
+  const cache = getLineCache('ARB2_' + cacheKey);  // كاش منفصل للمصحح (نسخة جديدة: إعادة كتابة الترقيم)
 
   const results = new Array(cues.length).fill(null);
   const toDo = [];
+  const sentText = new Map();   // id -> النص المجهز (بلا ترقيم) اللي أُرسل للموديل
   let fromCache = 0;
 
   cues.forEach((c, i) => {
     if (!needsTranslation(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
-    toDo.push({ id: i, text: c.text });
+    const prepared = prepareForModel(c.text);
+    sentText.set(i, prepared);
+    const item = { id: i, text: prepared };
+    const q = quoteHint(c.text);
+    if (q) item.q = q;
+    toDo.push(item);
   });
 
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
@@ -408,8 +471,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     rawOut.set(id, text);
     const orig = cues[id].text;
     let src = text;
-    // الموديل غيّر كلمة، أو زاد/نقص قوس أو تنصيص: نرفض رده ونطبق التنظيف بالكود على الأصل
-    if (!sameWords(orig, text) || bracketQuoteCount(text) !== bracketQuoteCount(orig)) { rejected++; src = orig; }
+    // الموديل غيّر كلمة، أو غيّر عدد الأسطر/الشرطات: نرفض رده ونطبق التنظيف بالكود على الأصل
+    if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) { rejected++; src = orig; }
     const clean = cleanCorrectorOutput(src) || cleanCorrectorOutput(orig);
     results[id] = clean;
     cache.set(id, clean);
@@ -444,7 +507,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       }
       inFlight++;
       try {
-        const ctx = buildChunkContext(cues, job.items);
+        const ctx0 = buildChunkContext(cues, job.items);
+        const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
         const r = await correctChunkStrict(job.items, keysArray, modelName, ctx);
         const left = () => job.items.filter(it => results[it.id] == null);
         if (r.status === 'ok') {
@@ -471,13 +535,13 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   const unprocessed = toDo.filter(it => results[it.id] == null);
   const missing = unprocessed.length;
-  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | رفض (كلمات/أقواس)=${rejected} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
+  console.log(`[ملخص المصحح] أسطر=${cues.length} | للتصحيح=${toDo.length} | أُعيد لحظياً=${requeued} | رفض (كلمات/أسطر/شرطات)=${rejected} | ناقص=${missing} | عمّال=${workerCount} | الزمن=${Date.now() - tStart}ms`);
 
   const finalTexts = cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text)));
 
   // تشخيص: CORRECTOR_DEBUG=1 (عينة) و CORRECTOR_FIND=كلمة (أسطر تحتوي كلمة)
   const seq = str => [...String(str)].filter(ch => ch === '(' || ch === ')').map(ch => (ch === '(' ? 'O' : 'C')).join(' ') || '-';
-  const show = (tag, id) => console.log(`[${tag}] #${id} أصل=${JSON.stringify(cues[id].text)} | خام=${JSON.stringify(rawOut.has(id) ? rawOut.get(id) : null)} | ناتج=${JSON.stringify(finalTexts[id])} | أقواس(أصل/خام/ناتج)=${seq(cues[id].text)} / ${rawOut.has(id) ? seq(rawOut.get(id)) : '?'} / ${seq(finalTexts[id])}`);
+  const show = (tag, id) => console.log(`[${tag}] #${id} أصل=${JSON.stringify(cues[id].text)} | مرسل=${JSON.stringify(sentText.has(id) ? sentText.get(id) : null)} | خام=${JSON.stringify(rawOut.has(id) ? rawOut.get(id) : null)} | ناتج=${JSON.stringify(finalTexts[id])} | أقواس(أصل/خام/ناتج)=${seq(cues[id].text)} / ${rawOut.has(id) ? seq(rawOut.get(id)) : '?'} / ${seq(finalTexts[id])}`);
   if (process.env.CORRECTOR_DEBUG === '1' && toDo.length > 0) {
     const step = Math.max(1, Math.floor(toDo.length / 12));
     for (let k = 0; k < toDo.length && k < step * 12; k += step) show('فحص مصحح', toDo[k].id);
