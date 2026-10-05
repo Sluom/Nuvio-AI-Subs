@@ -52,7 +52,7 @@ const globalTranslationQueue = new RequestQueue(1);
 const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label, targetId, kitsuId }) {
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, extraKeys, trackNum, label, targetId, kitsuId }) {
     translationCache[cacheKey] = { status: 'pending' };
     const dropIfNotDone = () => {
         const cur = translationCache[cacheKey];
@@ -62,7 +62,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId);
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys);
 
                 if (r.failed) {
                     console.error(`[${label}] Track ${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
@@ -372,7 +372,7 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.2',
+    version: '1.9.3',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
     resources: ['subtitles'],
@@ -388,14 +388,17 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
+// الإعدادات كلها تأتي من رابط الإضافة (مفاتيح Gemini + TMDB + SubDL + Subsource). لا شيء من متغيرات ريندر.
 function parseConfig(raw, onError) {
-    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '' };
+    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '' };
     if (!raw) return cfg;
     try {
         const d = JSON.parse(decodeURIComponent(raw));
         if (Array.isArray(d.keys)) cfg.keys = d.keys;
         if (d.model) cfg.model = d.model;
         if (d.tmdbKey) cfg.tmdbKey = d.tmdbKey;
+        if (d.subdlKey) cfg.subdlKey = String(d.subdlKey).trim();
+        if (d.subsourceKey) cfg.subsourceKey = String(d.subsourceKey).trim();
     } catch (e) {
         if (onError) onError(e);
     }
@@ -411,15 +414,19 @@ const MODELS = [
     ['gemini-2.5-flash', 'Gemini 2.5 Flash']
 ];
 
+const attr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
+
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
-    const { keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey } =
-        parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
+    const {
+        keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey,
+        subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey
+    } = parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
 
     const keyRowsHtml = existingKeys.length > 0
         ? existingKeys.map((key, i) => {
-            const k = String(key).replace(/"/g, '&quot;');
+            const k = attr(key);
             return i === 0
                 ? `<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)" value="${k}"></div>`
                 : `<div class="key-row"><input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)" value="${k}"><button class="remove-btn" onclick="this.parentElement.remove()">X</button></div>`;
@@ -460,7 +467,15 @@ ${existingKeys.length > 0 ? `<div class="status-banner">✅ تم تحميل ${ex
 <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
 <div class="input-group" style="margin-top:20px">
 <label>مفتاح TMDB API (اختياري - لمعرفة أسماء وجنس الشخصيات)</label>
-<input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="${existingTmdbKey.replace(/"/g, '&quot;')}">
+<input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="${attr(existingTmdbKey)}">
+</div>
+<div class="input-group" style="margin-top:20px">
+<label>مفتاح SubDL API (اختياري - مصدر ترجمات إضافي)</label>
+<input type="text" id="subdl-key" placeholder="مفتاح SubDL" value="${attr(existingSubdlKey)}">
+</div>
+<div class="input-group">
+<label>مفتاح Subsource API (اختياري - مصدر ترجمات عربية إضافي)</label>
+<input type="text" id="subsource-key" placeholder="مفتاح Subsource" value="${attr(existingSubsourceKey)}">
 </div>
 <div class="input-group" style="margin-top:20px">
 <label>نموذج الترجمة (Translation Model)</label>
@@ -485,8 +500,12 @@ const keys=[];
 document.querySelectorAll('.api-key').forEach(i=>{const v=i.value.trim();if(v)keys.push(v);});
 if(keys.length===0){alert('الرجاء إدخال مفتاح API واحد على الأقل!');return null;}
 const tmdbKey=document.getElementById('tmdb-key').value.trim();
+const subdlKey=document.getElementById('subdl-key').value.trim();
+const subsourceKey=document.getElementById('subsource-key').value.trim();
 const config={keys:keys,model:document.getElementById('model-select').value};
 if(tmdbKey)config.tmdbKey=tmdbKey;
+if(subdlKey)config.subdlKey=subdlKey;
+if(subsourceKey)config.subsourceKey=subsourceKey;
 return encodeURIComponent(JSON.stringify(config));
 }
 function generateInstallLink(){
@@ -530,6 +549,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     res.setHeader('Content-Type', 'application/json');
 
     const configParam = req.params.config ? encodeURIComponent(req.params.config) : '';
+    const addonCfg = parseConfig(req.params.config);
 
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
@@ -581,16 +601,16 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         let arabicSubs = { srt: [], ass: [] };
         try {
             arabicSubs = await getArabicSubsForCorrection({
-                imdbId: assImdbId, 
-                season: assSeason, 
-                episode: assEpisode, 
+                imdbId: assImdbId,
+                season: assSeason,
+                episode: assEpisode,
                 type: finalType,
-                subdlKey: process.env.SUBDL_API_KEY || '',
-                subsourceKey: process.env.SUBSOURCE_API_KEY || ''
+                subdlKey: addonCfg.subdlKey,
+                subsourceKey: addonCfg.subsourceKey
             });
             console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.srt.length} ترجمة SRT عربية و ${arabicSubs.ass.length} ترجمة ASS عربية للعمل ${finalTargetId}`);
-        } catch (err) { 
-            console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message); 
+        } catch (err) {
+            console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
         }
 
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
@@ -635,7 +655,9 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         if (osClean.length < WANTED_TRACKS) {
             console.log(`[SubDL] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL للتكملة...`);
 
-            const subdlSubs = await getSubDLEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode }).catch(() => []);
+            const subdlSubs = await getSubDLEnglish({
+                imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey
+            }).catch(() => []);
             subdlClean = subdlSubs.filter(s => !s.hearingImpaired).sort(byEng);
             subdlHi = subdlSubs.filter(s => s.hearingImpaired).sort(byEng);
 
@@ -652,7 +674,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
 
         const streamAraSrt = configParam ? `/${configParam}/stream-ara.srt` : '/stream-ara.srt';
         const streamAraAss = configParam ? `/${configParam}/stream-ara.ass` : '/stream-ara.ass';
-        
+
         let extraParams = `&id=${finalTargetId}`;
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
 
@@ -738,8 +760,13 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     }
 
     if (!cached) {
-        const { keys: userKeys, model: userModel, tmdbKey: userTmdbKey } = parseConfig(req.params.config);
-        startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, trackNum, label, targetId, kitsuId });
+        const cfg = parseConfig(req.params.config);
+        startTranslationJob({
+            cacheKey, handler, targetUrl,
+            userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
+            extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey },
+            trackNum, label, targetId, kitsuId
+        });
     }
 
     sendSub(res, mime, `Trans-Wait-${label}.${ext}`, waitBody);
@@ -759,6 +786,59 @@ app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
 
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+
+// ===== فحص مؤقت (احذفه بعد الانتهاء): /<config>/debug/ara/tt1032846 =====
+const DBG_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+app.get(['/debug/ara/:id', '/:config/debug/ara/:id'], async (req, res) => {
+    const cfg = parseConfig(req.params.config);
+    const [imdbId, season, episode] = req.params.id.split(':');
+    const safeDecode = u => { try { return decodeURIComponent(u); } catch (e) { return u; } };
+
+    const probe = async (url, headers) => {
+        try {
+            const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers, validateStatus: () => true });
+            const buf = Buffer.from(r.data);
+            const kind = buf[0] === 0x50 && buf[1] === 0x4b ? 'zip' : (buf[0] === 0x1f && buf[1] === 0x8b ? 'gzip' : 'text');
+            return {
+                status: r.status, bytes: buf.length, kind, server: r.headers.server || '',
+                snippet: r.status >= 400 ? buf.toString('utf-8').replace(/\s+/g, ' ').slice(0, 100) : ''
+            };
+        } catch (e) { return { status: e.code || 'ERR', error: e.message }; }
+    };
+
+    try {
+        const found = await getArabicSubsForCorrection({
+            imdbId, season: season || null, episode: episode || null,
+            type: season ? 'series' : 'movie',
+            subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey
+        });
+        const all = [...found.srt, ...found.ass];
+
+        const results = await Promise.all(all.map(async (s, i) => {
+            const url = safeDecode(s.url);
+            const isOs = /dl\.opensubtitles\.org/i.test(url);
+            const isSs = /api\.subsource\.net/i.test(url);
+            const isSubdl = /dl\.subdl\.com/i.test(url);
+
+            const old = isOs
+                ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
+                : { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' };
+            if (isSs && cfg.subsourceKey) old['X-API-Key'] = cfg.subsourceKey;
+
+            const nw = { 'User-Agent': DBG_BROWSER_UA, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+            if (isSubdl) nw['Referer'] = 'https://subdl.com/';
+            if (isSs && cfg.subsourceKey) nw['X-API-Key'] = cfg.subsourceKey;
+
+            const [oldHeaders, newHeaders] = await Promise.all([probe(url, old), isOs ? Promise.resolve(null) : probe(url, nw)]);
+            return { n: i + 1, source: s._source, fmt: s.format, url, oldHeaders, newHeaders };
+        }));
+
+        res.json({ imdbId, hasSubdlKey: !!cfg.subdlKey, hasSubsourceKey: !!cfg.subsourceKey, total: all.length, results });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
