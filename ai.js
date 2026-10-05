@@ -1636,7 +1636,7 @@ function parseExternalIds(targetId) {
   return out;
 }
 
-async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let castPromptBlock = '';
   const { imdbId, tvdbId } = parseExternalIds(targetId);
 
@@ -1709,7 +1709,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let castPromptBlock = '';
   const { imdbId, tvdbId } = parseExternalIds(targetId);
 
