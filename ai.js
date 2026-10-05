@@ -1676,7 +1676,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n", missing: 0, total: 0, failed: true };
@@ -1749,7 +1749,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي (ASS): ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`, missing: 0, total: 0, failed: true };
