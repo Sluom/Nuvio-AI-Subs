@@ -124,13 +124,15 @@ function prepareForModel(rawText) {
     if (!l) continue;
     const tagPrefix = l.match(LEAD_TAGS)[0];
     l = l.slice(tagPrefix.length).trim();
-    let dash = false;
-    // شرطة الحوار: تُسحب للبداية سواء كانت بالبداية أو متأخرة بالنهاية
-    if (/^[-–—]\s*/.test(l)) { dash = true; l = l.replace(/^[-–—]\s*/, ''); }
-    if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
+    // أولاً نمسح الترقيم (حتى لا تختبئ الشرطة وراء نقطة مثل "نعم -.")
     l = l.split(/(\{[^}]*\}|<[^>]*>|\.{3,}|…)/)
       .map((part, i) => (i % 2 ? part : stripPunctPart(part)))
       .join('').replace(/[ \t]{2,}/g, ' ').trim();
+    // ثم شرطة الحوار: تُسحب للبداية سواء كانت بالبداية أو متأخرة بالنهاية
+    let dash = false;
+    if (/^[-–—]\s*/.test(l)) { dash = true; l = l.replace(/^[-–—]\s*/, ''); }
+    if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
+    l = l.trim();
     if (!l) continue;
     out.push(tagPrefix.trim() + (dash ? '- ' : '') + l);
   }
