@@ -53,11 +53,12 @@ async function querySubDL(key, baseParams, extra) {
 
 const cleanPath = p => String(p).split('?')[0];
 
+// المفتاح يأتي فقط من إعدادات الإضافة (apiKey). لا يوجد قراءة من متغيرات البيئة.
 async function getSubDLEnglish({ imdbId, season, episode, apiKey, languages }) {
-  const key = String(apiKey || process.env.SUBDL_API_KEY || '').trim();
+  const key = String(apiKey || '').trim();
 
   if (!key) {
-    console.log('[SubDL] المتغير SUBDL_API_KEY مفقود بريندر، تخطيت SubDL.');
+    console.log('[SubDL] لا يوجد مفتاح SubDL في إعدادات الإضافة، تخطيت SubDL.');
     return [];
   }
   if (!imdbId || !/^tt\d+$/.test(imdbId)) {
