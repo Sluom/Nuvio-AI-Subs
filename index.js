@@ -654,7 +654,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
 
         let extClean = [], extHi = [];
 
-        if (osClean.length < WANTED_TRACKS) {
+        if (true) {
             console.log(`[SubDL/Subsource] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL و Subsource للتكملة...`);
 
             const [subdlSubs, subsourceSubs] = await Promise.all([
