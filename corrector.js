@@ -462,11 +462,11 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   return done;
 }
 
-// معالجة كافة الأسطر العربية: دفعات 350، والناقص يرجع فوراً لطابور مشترك (قطع 50) تلتقطه المفاتيح الفاضية
+// معالجة كافة الأسطر العربية: دفعات 350، والناقص يرجع فوراً لطابور مشترك (قطع 100) تلتقطه المفاتيح الفاضية
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
   const CHUNK = CORRECTOR_CHUNK;   // حجم الدفعة الأولى
-  const RETRY_PIECE = 50;     // حجم قطعة إعادة الناقص
+  const RETRY_PIECE = 100;     // حجم قطعة إعادة الناقص
   const MAX_TRIES = 5;        // محاولات الأسطر الناقصة من ردود سليمة
   const MAX_RL = 12;          // محاولات بسبب الخنق (429): لا تُحسب من الـ 5
   const cache = getLineCache('ARB2_' + cacheKey);  // كاش منفصل للمصحح (نسخة جديدة: إعادة كتابة الترقيم)
