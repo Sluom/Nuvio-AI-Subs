@@ -17,9 +17,11 @@ const {
 // تنظيف مخرجات المصحح: بدون أقواس مربعة وبدون رموز اتجاه مخفية
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;   // أي سطر مفرد أطول من هذا ينكسر لسطرين متوازنين (0 = إيقاف)
+const CORRECTOR_CHUNK = 350;       // حجم الدفعة الأولى
+const CORRECTOR_MAX_WORKERS = 8;   // أقصى عدد مفاتيح تعمل بالتوازي
 
 // ترتيب الأسطر وعلامات الترقيم بالكود (لا يعتمد على الموديل)
-const TERM_CHARS = '.…!؟?،,؛';
+const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const DASH_RE = /^[-–—]/;
 
@@ -34,16 +36,20 @@ function moveLeadingPunct(line) {
   if (/^[-–—]\s*/.test(t)) { hasDash = true; t = t.replace(/^[-–—]\s*/, ''); }
   if (/\s*[-–—]$/.test(t)) { hasDash = true; t = t.replace(/\s*[-–—]$/, ''); }
 
-  // 2. علامة نهاية في أول السطر تنتقل لآخره
-  const m = t.match(/^([.…!؟?،,؛]+)\s*(.+)$/);
+  // 2. علامة نهاية في أول السطر تنتقل لآخره (والنقطتان : تنتقل دائماً لآخره)
+  const m = t.match(/^([.…!؟?،,؛:]+)\s*(.+)$/);
   if (m) {
     const lead = m[1], rest = m[2];
     if (HAS_ARABIC.test(rest) && !(lead === '…' || /^\.{3,}$/.test(lead))) {
-      const core = rest.replace(/["'”“)\]»\s]+$/, '');
-      if (core && !TERM_CHARS.includes(core[core.length - 1])) {
-        t = rest + lead;
+      if (lead.includes(':')) {
+        t = rest.replace(/[.…!؟?،,؛\s]+$/, '') + ':';
       } else {
-        t = rest;
+        const core = rest.replace(/["'”“)\]»\s]+$/, '');
+        if (core && !TERM_CHARS.includes(core[core.length - 1])) {
+          t = rest + lead;
+        } else {
+          t = rest;
+        }
       }
     }
   }
@@ -106,7 +112,7 @@ function sameWords(orig, out) {
   return levenshtein(a, b) <= Math.max(2, Math.floor(a.length * 0.06));
 }
 
-// ---------- تجهيز السطر للموديل: نمسح الترقيم (نقاط، فواصل، تنصيص، أقواس) ونُبقي الشرطة وفواصل الأسطر والنقاط الثلاث والوسوم ----------
+// ---------- تجهيز السطر للموديل: نمسح الترقيم (نقاط، فواصل، تنصيص، أقواس) ونُبقي الشرطة وفواصل الأسطر والنقاط الثلاث والوسوم، وتبقى ؟ ! : منقولة لآخر السطر ----------
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const LINE_SPLIT = /\\+[nN]|\r?\n/;
 
@@ -124,17 +130,38 @@ function prepareForModel(rawText) {
     if (!l) continue;
     const tagPrefix = l.match(LEAD_TAGS)[0];
     l = l.slice(tagPrefix.length).trim();
-    // أولاً نمسح الترقيم (حتى لا تختبئ الشرطة وراء نقطة مثل "نعم -.")
+
+    // نسحب علامات ؟ ! ونقطتين : من أول السطر أو آخره قبل المسح، وتُلحق بآخر السطر
+    let mark = '', colon = false;
+    let dash0 = '';
+    const dm = l.match(/^[-–—]\s*/);
+    if (dm) { dash0 = '-'; l = l.slice(dm[0].length); }
+    let lm;
+    while ((lm = l.match(/^([!؟?:]+)\s*(?=\S)/))) {
+      if (lm[1].includes(':')) colon = true;
+      mark += lm[1].replace(/:/g, '');
+      l = l.slice(lm[0].length);
+    }
+    const tm = l.match(/(?<!\d)([!؟?:]+)[\s."”)]*$/);
+    if (tm) {
+      if (tm[1].includes(':')) colon = true;
+      mark = tm[1].replace(/:/g, '') + mark;
+      l = l.slice(0, tm.index);
+    }
+    l = (dash0 ? '- ' : '') + l;
+
+    // مسح باقي الترقيم (النقاط الثلاث والوسوم تبقى)
     l = l.split(/(\{[^}]*\}|<[^>]*>|\.{3,}|…)/)
       .map((part, i) => (i % 2 ? part : stripPunctPart(part)))
       .join('').replace(/[ \t]{2,}/g, ' ').trim();
-    // ثم شرطة الحوار: تُسحب للبداية سواء كانت بالبداية أو متأخرة بالنهاية
+
+    // شرطة الحوار: تُسحب للبداية سواء كانت بالبداية أو متأخرة بالنهاية
     let dash = false;
     if (/^[-–—]\s*/.test(l)) { dash = true; l = l.replace(/^[-–—]\s*/, ''); }
     if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
     l = l.trim();
     if (!l) continue;
-    out.push(tagPrefix.trim() + (dash ? '- ' : '') + l);
+    out.push(tagPrefix.trim() + (dash ? '- ' : '') + l + (colon ? ':' : mark));
   }
   return out.join('\\N');
 }
@@ -320,7 +347,7 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     : '';
 
   const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
-All the punctuation of every entry was REMOVED on purpose: no periods, commas, question marks, quotation marks or parentheses. Only the speaker dashes "-", the line-break markers \\N, and any "..." that existed were kept.
+Most punctuation of every entry was REMOVED on purpose. What was kept: the speaker dashes "-", the line-break markers \\N, any "...", and any "?", "!", "؟" or ":" that stands at the very end of a line.
 Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
 
 STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no spelling fixes, no gender changes. You may only ADD punctuation marks, quotation marks and parentheses. There is nothing to translate and nothing to guess about who is speaking.
@@ -329,7 +356,7 @@ Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<the same words with punctuation>"}] with exactly one object per input id, in the same order. Never output "q".
 2. Keep every \\N line break exactly where it is. NEVER merge lines, split lines or add lines.
 3. Keep every dash "-" exactly at the start of its line. Never add a dash to a line that has none.
-4. Sentence marks: end each sentence with . or ! or ؟ as the meaning requires, and use ، and ؛ where natural. Keep every existing "..." exactly where it is. Use the read-only context to see whether a sentence continues in the next entry or continues from the previous one: do NOT end an entry with a full stop if its sentence continues in the next entry.
+4. Sentence marks: end each sentence with . or ! or ؟ as the meaning requires, and use ، and ؛ where natural. Keep every existing "..." exactly where it is. Use the read-only context to see whether a sentence continues in the next entry or continues from the previous one: do NOT end an entry with a full stop if its sentence continues in the next entry. Any line that already ends with "؟", "!" or ":" keeps it EXACTLY; never remove it, never change it, never add another mark after it.
 5. PERSON NAMES (names of people or characters, even when a prefix such as ل ب و ك ف is attached to the word): wrap the whole word in quotation marks, like "كيلوا". Never use parentheses for people.
 6. OTHER PROPER NOUNS that are not people (places, cities, countries, companies, brands, organizations, food or dish names): wrap them in parentheses, like (طوكيو). Never use quotation marks for them. If you are not sure that a word is a name, leave it with no mark at all.
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.
@@ -435,10 +462,10 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   return done;
 }
 
-// معالجة كافة الأسطر العربية: دفعات 600، والناقص يرجع فوراً لطابور مشترك (قطع 50) تلتقطه المفاتيح الفاضية
+// معالجة كافة الأسطر العربية: دفعات 350، والناقص يرجع فوراً لطابور مشترك (قطع 50) تلتقطه المفاتيح الفاضية
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  const CHUNK = 600;          // حجم الدفعة الأولى
+  const CHUNK = CORRECTOR_CHUNK;   // حجم الدفعة الأولى
   const RETRY_PIECE = 50;     // حجم قطعة إعادة الناقص
   const MAX_TRIES = 5;        // محاولات الأسطر الناقصة من ردود سليمة
   const MAX_RL = 12;          // محاولات بسبب الخنق (429): لا تُحسب من الـ 5
@@ -467,7 +494,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   let inFlight = 0, requeued = 0, rejected = 0, pauseUntil = 0;
   const rawOut = new Map();
-  const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), 35));
+  const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
 
   const applyLine = (id, text) => {
     rawOut.set(id, text);
@@ -581,7 +608,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
 
-  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
+  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
   const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
 
   let srtOutput = '';
@@ -612,7 +639,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
 
-  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=600 | مفاتيح=${keysArray.length}`);
+  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
   const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
 
   const assLines = [];
