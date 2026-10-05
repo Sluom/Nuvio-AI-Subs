@@ -569,11 +569,12 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 }
 
 // الدوال النهائية لتشغيل المصحح العربي (SRT و ASS) وتصديرها للـ index.js
-async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
+  
   catch (e) {
-    console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
+    console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message} <- ${subUrl}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة العربية الأصلي.\n\n", missing: 0, total: 0, failed: true };
   }
 
@@ -599,9 +600,10 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
-async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId) {
+async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
+  
   catch (e) {
     console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
