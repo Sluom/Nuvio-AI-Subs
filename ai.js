@@ -487,13 +487,24 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
   return done;
 }
 
-// ================== تحميل ملف الترجمة (مع إعادة المحاولة بـ User-Agent ثاني عند 403 + مفتاح Subsource) ==================
-async function fetchAndExtractSub(subUrl) {
-  const decodedUrl = decodeURIComponent(subUrl);
+// ================== تحميل ملف الترجمة (UA متصفح + Referer لـ SubDL + مفتاح Subsource يأتي من إعدادات الإضافة + كاش) ==================
+const subTextCache = new Map();
+const SUB_CACHE_TTL = 30 * 60 * 1000;
+const SUB_CACHE_MAX = 60;
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+function safeDecode(u) { try { return decodeURIComponent(u); } catch (e) { return u; } }
+
+async function fetchAndExtractSub(subUrl, subsourceKey = '') {
+  const decodedUrl = safeDecode(subUrl);
+  const hit = subTextCache.get(decodedUrl);
+  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
+
+  const ssKey = String(subsourceKey || '').trim();
   const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
   const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
-  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : ['Mozilla/5.0'];
+  const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
+  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
 
   let response = null;
   let lastErr = null;
@@ -501,18 +512,18 @@ async function fetchAndExtractSub(subUrl) {
     const ua = agents[i];
     const headers = isOsOrg
       ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
-      : { 'User-Agent': ua, 'Accept': '*/*' };
-    if (isSubsource && process.env.SUBSOURCE_API_KEY) headers['X-API-Key'] = String(process.env.SUBSOURCE_API_KEY).trim();
+      : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+    if (isSubdl) headers['Referer'] = 'https://subdl.com/';
+    if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
     try {
       response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
       lastErr = null;
-      if (isOsOrg) console.log(`[Download] ${response.status} (${ua}) <- ${decodedUrl}`);
       break;
     } catch (e) {
       lastErr = e;
       const st = e.response?.status || e.code || 'ERR';
-      if (isOsOrg || isSubsource) console.log(`[Download] ${st} (${ua}) <- ${decodedUrl}`);
-      if (!(isOsOrg && e.response?.status === 403 && i < agents.length - 1)) break;
+      console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
+      if (!(e.response?.status === 403 && i < agents.length - 1)) break;
     }
   }
   if (!response) throw lastErr;
@@ -524,7 +535,10 @@ async function fetchAndExtractSub(subUrl) {
     const entry = zip.getEntries().find(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
     if (entry) buffer = entry.getData();
   }
-  return fixArabicEncoding(buffer).toString('utf-8');
+  const text = fixArabicEncoding(buffer).toString('utf-8');
+  subTextCache.set(decodedUrl, { time: Date.now(), text });
+  if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
+  return text;
 }
 
 function prepCueText(t) {
