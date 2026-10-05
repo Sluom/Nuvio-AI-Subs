@@ -2,7 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
-const { getSubDLEnglish } = require('./subdl');
+const { getSubDL } = require('./subdl');
+const { getSubSource } = require('./subsource');
 const { getArabicSubsForCorrection } = require('./araFetch');
 const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
 
@@ -553,6 +554,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
 
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
+    targetId = targetId.replace(/[.\s]+$/, '');   // يشيل أي نقطة أو فراغ بآخر الـ ID
 
     const baseUrl = getBaseUrl(req);
 
@@ -650,23 +652,28 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             osHi = srtOnly.filter(s => isHearingImpairedSub(s)).sort(byEng);
         }
 
-        let subdlClean = [], subdlHi = [];
+        let extClean = [], extHi = [];
 
         if (osClean.length < WANTED_TRACKS) {
-            console.log(`[SubDL] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL للتكملة...`);
+            console.log(`[SubDL/Subsource] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL و Subsource للتكملة...`);
 
-            const subdlSubs = await getSubDLEnglish({
-                imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey
-            }).catch(() => []);
-            subdlClean = subdlSubs.filter(s => !s.hearingImpaired).sort(byEng);
-            subdlHi = subdlSubs.filter(s => s.hearingImpaired).sort(byEng);
+            const [subdlSubs, subsourceSubs] = await Promise.all([
+                getSubDL({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey }).catch(() => []),
+                getSubSource({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subsourceKey, language: 'english' }).catch(() => [])
+            ]);
 
-            console.log(subdlClean.length + subdlHi.length > 0
-                ? `[SubDL] راح أستخدم ${subdlClean.length} غير SDH و ${subdlHi.length} SDH (احتياط) من SubDL لـ ${finalTargetId}.`
-                : `[SubDL] ما لقيت شي بـ SubDL لـ ${finalTargetId}.`);
+            // واحد من كل مصدر بالدور
+            const extSubs = [];
+            for (let i = 0; i < Math.max(subdlSubs.length, subsourceSubs.length); i++) {
+                if (subdlSubs[i]) extSubs.push(subdlSubs[i]);
+                if (subsourceSubs[i]) extSubs.push(subsourceSubs[i]);
+            }
+            extClean = extSubs.filter(s => !s.hearingImpaired).sort(byEng);
+            extHi = extSubs.filter(s => s.hearingImpaired).sort(byEng);
+            console.log(`[SubDL/Subsource] راح أستخدم ${extClean.length} غير SDH و ${extHi.length} SDH (احتياط).`);
         }
 
-        const srtSubs = [...osClean, ...subdlClean, ...osHi, ...subdlHi];
+        const srtSubs = [...osClean, ...extClean, ...osHi, ...extHi];
 
         const transSubs = [];
         const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : '/stream-ai.srt';
@@ -786,59 +793,6 @@ app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
 
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
-
-// ===== فحص مؤقت (احذفه بعد الانتهاء): /<config>/debug/ara/tt1032846 =====
-const DBG_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
-app.get(['/debug/ara/:id', '/:config/debug/ara/:id'], async (req, res) => {
-    const cfg = parseConfig(req.params.config);
-    const [imdbId, season, episode] = req.params.id.split(':');
-    const safeDecode = u => { try { return decodeURIComponent(u); } catch (e) { return u; } };
-
-    const probe = async (url, headers) => {
-        try {
-            const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers, validateStatus: () => true });
-            const buf = Buffer.from(r.data);
-            const kind = buf[0] === 0x50 && buf[1] === 0x4b ? 'zip' : (buf[0] === 0x1f && buf[1] === 0x8b ? 'gzip' : 'text');
-            return {
-                status: r.status, bytes: buf.length, kind, server: r.headers.server || '',
-                snippet: r.status >= 400 ? buf.toString('utf-8').replace(/\s+/g, ' ').slice(0, 100) : ''
-            };
-        } catch (e) { return { status: e.code || 'ERR', error: e.message }; }
-    };
-
-    try {
-        const found = await getArabicSubsForCorrection({
-            imdbId, season: season || null, episode: episode || null,
-            type: season ? 'series' : 'movie',
-            subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey
-        });
-        const all = [...found.srt, ...found.ass];
-
-        const results = await Promise.all(all.map(async (s, i) => {
-            const url = safeDecode(s.url);
-            const isOs = /dl\.opensubtitles\.org/i.test(url);
-            const isSs = /api\.subsource\.net/i.test(url);
-            const isSubdl = /dl\.subdl\.com/i.test(url);
-
-            const old = isOs
-                ? { 'User-Agent': 'VLSub 0.10.3', 'X-User-Agent': 'VLSub 0.10.3', 'Accept': '*/*' }
-                : { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' };
-            if (isSs && cfg.subsourceKey) old['X-API-Key'] = cfg.subsourceKey;
-
-            const nw = { 'User-Agent': DBG_BROWSER_UA, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
-            if (isSubdl) nw['Referer'] = 'https://subdl.com/';
-            if (isSs && cfg.subsourceKey) nw['X-API-Key'] = cfg.subsourceKey;
-
-            const [oldHeaders, newHeaders] = await Promise.all([probe(url, old), isOs ? Promise.resolve(null) : probe(url, nw)]);
-            return { n: i + 1, source: s._source, fmt: s.format, url, oldHeaders, newHeaders };
-        }));
-
-        res.json({ imdbId, hasSubdlKey: !!cfg.subdlKey, hasSubsourceKey: !!cfg.subsourceKey, total: all.length, results });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
