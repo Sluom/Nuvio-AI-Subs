@@ -176,11 +176,14 @@ function fixArabicEncoding(buffer) {
     try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) {}
   }
   const utf8Text = buffer.toString('utf-8');
-  if (!utf8Text.includes('\uFFFD')) return buffer;
-  if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
+  const badCount = (utf8Text.match(/\uFFFD/g) || []).length;
+  if (badCount === 0) return buffer;
+  const arCount = (utf8Text.match(/[\u0600-\u06FF]/g) || []).length;
+  if (arCount > badCount * 3) return buffer;
   try {
     const decodedWin = iconv.decode(buffer, 'windows-1256');
-    if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
+    const winAr = (decodedWin.match(/[\u0600-\u06FF]/g) || []).length;
+    if (winAr > arCount) return Buffer.from(decodedWin, 'utf-8');
   } catch (e) {}
   try {
     const decodedIso = iconv.decode(buffer, 'iso-8859-6');
