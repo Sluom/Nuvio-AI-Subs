@@ -3,20 +3,17 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 
-// التصدير بالأعلى (الدوال تُرفع تلقائياً) حتى لا يضيع لو انقطع آخر الملف عند النسخ
 module.exports = { getArabicSubsForCorrection };
 
-// دالة بسيطة لتنظيف الروابط ومنع التكرار
 const cleanPath = p => String(p).split('?')[0];
 
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
-const VERIFY_LIMIT = 12;          // أقصى عدد روابط تُحمَّل وتُفحص
+const VERIFY_LIMIT = 12;
 const VERIFY_TIMEOUT_MS = 12000;
 const RESULT_TTL = 30 * 60 * 1000;
 const resultCache = new Map();
 
-// 1. OpenSubtitles Legacy (rest.opensubtitles.org): ASS فقط. الـ SRT مستبعد نهائياً من هذا المصدر.
 async function fetchOsLegacyArabic(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt0*/, '');
@@ -46,7 +43,6 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
     try {
         let data = await fetchLegacyData(primaryUrl);
 
-        // مسلسل وما رجع ASS: نبحث بـ ID المسلسل كامل ونفلتر بالحلقة
         if (hasSE && !data.some(isAssEntry)) {
             const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
             const fallbackData = await fetchLegacyData(fallbackUrl);
@@ -69,7 +65,6 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
     }
 }
 
-// 2. OpenSubtitles Mirror (strem.io)
 async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const isSeries = type === 'series' || type === 'anime' || !!season;
@@ -104,9 +99,6 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     }
 }
 
-// 3 و 4. SubDL و Subsource: صارت بملفاتها (subdl.js و subsource.js) وكل واحد فيهم يجرب أكثر من مسار.
-
-// فحص حقيقي: يحمّل الملف، يتأكد أنه عربي وفيه أسطر كافية، ويحسب بصمة لحذف المكرر
 async function verifyArabicSub(s, subsourceKey) {
     const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
     try {
@@ -130,7 +122,6 @@ async function verifyArabicSub(s, subsourceKey) {
     }
 }
 
-// الدالة الرئيسية
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     console.log(`[جلب عربي] جاري البحث عن ترجمات عربية جاهزة للتصحيح للعمل: ${imdbId}...`);
 
@@ -155,7 +146,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     });
     console.log('[جلب عربي] ملخص المصادر: ' + settled.map((r, i) => `${names[i]}=${r.status === 'fulfilled' ? r.value.length : 'خطأ'}`).join(' | '));
 
-    // تناوب بين المصادر: واحد من كل مصدر بالدور، حتى لا تأتي كل المسارات من مصدر واحد
     const lists = settled.map(r => (r.status === 'fulfilled' ? r.value : []));
     const interleaved = [];
     const maxLen = Math.max(0, ...lists.map(l => l.length));
