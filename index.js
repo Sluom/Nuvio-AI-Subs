@@ -6,6 +6,7 @@ const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getArabicSubsForCorrection } = require('./araFetch');
 const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
+const db = require('./db');
 
 const app = express();
 app.use(cors());
@@ -74,6 +75,8 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
 
                 if (r.missing === 0) {
+                    const saved = await db.saveDoc('job', cacheKey, { content: r.content });
+                    if (saved) console.log(`[MongoDB] ${label} Track ${trackNum}: حُفظت النتيجة الكاملة في التخزين الدائم.`);
                     if (round > 1) console.log(`[${label}] Track ${trackNum}: اكتملت الترجمة/التصحيح بعد ${round} جولات ✅`);
                     return;
                 }
@@ -314,7 +317,6 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
         const filteredFallback = fallbackResults.filter(r => (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.fileName, episode));
         results = [...results, ...filteredFallback];
     }
-    // OpenSubtitles.org (legacy): ASS فقط، الـ SRT مستبعد
     return results.filter(r => r.format === 'ass' || r.format === 'ssa');
 }
 
@@ -389,7 +391,6 @@ function getBaseUrl(req) {
     return `${proto}://${host}`;
 }
 
-// الإعدادات كلها تأتي من رابط الإضافة (مفاتيح Gemini + TMDB + SubDL + Subsource). لا شيء من متغيرات ريندر.
 function parseConfig(raw, onError) {
     const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '' };
     if (!raw) return cfg;
@@ -554,7 +555,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
 
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
-    targetId = targetId.replace(/[.\s]+$/, '');   // يشيل أي نقطة أو فراغ بآخر الـ ID
+    targetId = targetId.replace(/[.\s]+$/, '');
 
     const baseUrl = getBaseUrl(req);
 
@@ -662,7 +663,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 getSubSource({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subsourceKey, language: 'english' }).catch(() => [])
             ]);
 
-            // واحد من كل مصدر بالدور
             const extSubs = [];
             for (let i = 0; i < Math.max(subdlSubs.length, subsourceSubs.length); i++) {
                 if (subdlSubs[i]) extSubs.push(subdlSubs[i]);
@@ -760,20 +760,30 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     if (!targetUrl) return res.status(400).send('Missing URL');
 
     const cacheKey = `${label}_${targetUrl}`;
-    const cached = translationCache[cacheKey];
+    let cached = translationCache[cacheKey];
+
+    if (!cached) {
+        const stored = await db.loadDoc('job', cacheKey);
+
+        if (!translationCache[cacheKey]) {
+            if (stored && stored.content) {
+                translationCache[cacheKey] = { status: 'done', content: stored.content, complete: true };
+                console.log(`[MongoDB] ${label} Track ${trackNum}: الترجمة جاهزة من التخزين الدائم.`);
+            } else {
+                const cfg = parseConfig(req.params.config);
+                startTranslationJob({
+                    cacheKey, handler, targetUrl,
+                    userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
+                    extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey },
+                    trackNum, label, targetId, kitsuId
+                });
+            }
+        }
+        cached = translationCache[cacheKey];
+    }
 
     if (cached && cached.status === 'done') {
         return sendSub(res, mime, `Trans-Track${trackNum}-${label}.${ext}`, cached.content);
-    }
-
-    if (!cached) {
-        const cfg = parseConfig(req.params.config);
-        startTranslationJob({
-            cacheKey, handler, targetUrl,
-            userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
-            extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey },
-            trackNum, label, targetId, kitsuId
-        });
     }
 
     sendSub(res, mime, `Trans-Wait-${label}.${ext}`, waitBody);
@@ -796,6 +806,7 @@ app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
+    db.init();
 });
 
 module.exports = app;
