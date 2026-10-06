@@ -9,8 +9,8 @@ const db = require('./db');
 
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
-const CORRECTOR_CHUNK = 350;
-const CORRECTOR_MAX_WORKERS = 8;
+const CORRECTOR_CHUNK = 220;
+const CORRECTOR_MAX_WORKERS = 15;
 
 // true = احذف أسطر الرسم (m ... l ...) من ملف ASS النهائي لأن المشغّل يعرضها كأرقام
 // false = أبقِها حرفيًا كما في الملف الأصلي
@@ -574,9 +574,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       if (!retryTimer) {
         retryTimer = setTimeout(() => {
           retryTimer = null;
-          console.log(`[مسار الاسترداد ⏳] انتهاء مؤقت التجميع (3s). جاري سحب الأسطر.`);
+          console.log(`[مسار الاسترداد ⏳] انتهاء مؤقت التجميع (2s). جاري سحب الأسطر.`);
           flushRetryPool(true);
-        }, 3000);
+        }, 2000);
       }
       return;
     }
@@ -603,7 +603,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
           retryTimer = null;
           console.log(`[مسار الاسترداد ⏳] انتهاء المؤقت للدفعة المتبقية بالحوض.`);
           flushRetryPool(true);
-        }, 3000);
+        }, 2000);
       }
     }
   };
