@@ -44,6 +44,15 @@ const MAX_RETRY_PASSES = 4;
 
 const ENABLE_GENDER_ANALYSIS = true;
 
+// تقسيم سطر الترجمة الطويل إلى سطرين متوازنين (0 = تعطيل)
+const TRANSLATION_WRAP_AT = 42;
+const WRAP_MIN_PART = 8;
+
+// true = احذف أسطر الرسم (m ... l ...) من ملف ASS النهائي لأن المشغّل يعرضها كأرقام
+// false = أبقِها حرفيًا كما في الملف الأصلي
+const DROP_DRAWINGS = true;
+const DRAWING_RE = /\{[^}]*\\p0*[1-9][^}]*\}/;   // سطر رسم vector في ASS: {\p1} ... {\p0}
+
 const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || '').trim();
 const ANNOTATION_BUDGET_MS = 75000;
 const ANNOTATION_SLICE_SIZE = 200;
@@ -69,6 +78,9 @@ const REGISTRY_MAX_CHARACTERS = 60;
 const CONTEXT_LINES = 4;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// عرض الزمن بالثواني بدل الملي ثانية في اللوغ
+const secs = ms => `${(ms / 1000).toFixed(1)} ثانية`;
 
 const keyCooldowns = new Map();
 const deadKeys = new Set();
@@ -226,6 +238,54 @@ function normalizeLineBreakArtifacts(txt) {
     .replace(/\\n/gi, '\n')
     .replace(/\\N/g, '\n')
     .replace(/\\r/g, '');
+}
+
+// يقسم سطرًا عربيًا واحدًا طويلًا إلى سطرين متوازنين.
+// لا يقسم: الأسطر المتعددة، أسطر الحوار بالشارطة، الأسطر الموضعية (\pos \an ...)،
+// ولا يقطع داخل اسم بين تنصيص أو أقواس قصيرة، ولا داخل الوسوم.
+function wrapLongSubtitleLine(text) {
+  const t = String(text == null ? '' : text);
+  if (!(TRANSLATION_WRAP_AT > 0) || t.includes('\n')) return t;
+  if (/^\s*(?:\{[^}]*\}|<[^>]*>)*\s*[-–—]/.test(t)) return t;
+  if (/\{[^}]*\\(?:pos|move|an\d|org|i?clip|p\d)/i.test(t)) return t;
+
+  // مواضع محمية: اسم قصير بين تنصيص أو أقواس (حتى 3 فراغات) لا يُقطع
+  const prot = new Uint8Array(t.length);
+  t.replace(/"[^"“”]{1,40}"|“[^“”]{1,40}”|\([^()]{1,40}\)/g, (m, off) => {
+    if ((m.match(/ /g) || []).length <= 3) for (let k = off; k < off + m.length; k++) prot[k] = 1;
+    return m;
+  });
+
+  let inTag = '', vis = 0;
+  const cands = [];
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (inTag) { if (ch === inTag) inTag = ''; continue; }
+    if (ch === '{') { inTag = '}'; continue; }
+    if (ch === '<') { inTag = '>'; continue; }
+    if (ch === ' ' && !prot[i]) cands.push({ idx: i, left: vis });
+    vis++;
+  }
+  if (vis <= TRANSLATION_WRAP_AT) return t;
+
+  let best = null, bestDiff = Infinity;
+  for (const c of cands) {
+    const right = vis - c.left - 1;
+    if (c.left < WRAP_MIN_PART || right < WRAP_MIN_PART) continue;
+    const diff = Math.abs(c.left - right);
+    if (diff < bestDiff) { bestDiff = diff; best = c; }
+  }
+  if (!best) return t;
+
+  let a = t.slice(0, best.idx).trimEnd();
+  let b = t.slice(best.idx + 1).trimStart();
+  // وسم HTML مفتوح قبل الكسر (مثل <i>) نغلقه في السطر الأول ونعيد فتحه في الثاني
+  for (const tg of ['i', 'b', 'u']) {
+    const op = (a.match(new RegExp('<' + tg + '>', 'gi')) || []).length;
+    const cl = (a.match(new RegExp('</' + tg + '>', 'gi')) || []).length;
+    if (op > cl) { a += '</' + tg + '>'; b = '<' + tg + '>' + b; }
+  }
+  return a + '\n' + b;
 }
 
 function parseRobustJsonArray(raw, expectedLength) {
@@ -566,7 +626,10 @@ async function loadLineCache(key) {
 }
 
 function needsTranslation(text) {
-  const t = String(text || '').replace(/<[^>]*>|\{[^}]*\}|\\N|\\n/g, '');
+  const raw = String(text || '');
+  // سطر رسم vector في ASS ({\p1} ... {\p0}): ليس نصًا ولا يُترجم
+  if (DRAWING_RE.test(raw)) return false;
+  const t = raw.replace(/<[^>]*>|\{[^}]*\}|\\N|\\n/g, '');
   return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
 }
 
@@ -844,11 +907,11 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
     return new Map();
   }
   if (res.status !== 'ok') {
-    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
+    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${secs(Date.now() - t0)}.`);
     return new Map();
   }
   const map = parseAnnotationCodes(res.text);
-  console.log(`[تحليل الضمائر] ${label}: رجع ${map.size} كود من ${windowItems.length} سطر في ${Date.now() - t0}ms (${model}).`);
+  console.log(`[تحليل الضمائر] ${label}: رجع ${map.size} كود من ${windowItems.length} سطر في ${secs(Date.now() - t0)} (${model}).`);
 
   if (map.size === 0) {
     const head = String(res.text || '').replace(/\s+/g, ' ').slice(0, 100);
@@ -987,7 +1050,7 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   const t0 = Date.now();
   const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline });
   if (res.status !== 'ok') {
-    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
+    console.log(`[تحليل الضمائر] ${label}: فشل (${res.status}) بعد ${secs(Date.now() - t0)}.`);
     return null;
   }
   const parsed = parseRosterResponse(res.text);
@@ -1006,7 +1069,7 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   }
   rosterStats.slices++;
   rosterStats.people += parsed.people.size;
-  console.log(`[تحليل الضمائر] ${label}: ${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${Date.now() - t0}ms (${model}).`);
+  console.log(`[تحليل الضمائر] ${label}: ${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${secs(Date.now() - t0)} (${model}).`);
   if (process.env.GENDER_DEBUG === '1') {
     console.log(`[مشهد] ${label}: ` + [...parsed.people.values()].slice(0, 40).map(p => `${p.id}=${p.name || '?'}(${p.gender})`).join(', '));
   }
@@ -1127,11 +1190,11 @@ ${body}`;
   const deadline = Date.now() + REGISTRY_BUDGET_MS;
   const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeout: REGISTRY_BUDGET_MS, attempts: 2 });
   if (res.status !== 'ok') {
-    console.log(`[سجل الشخصيات] فشل (${res.status}) بعد ${Date.now() - t0}ms.`);
+    console.log(`[سجل الشخصيات] فشل (${res.status}) بعد ${secs(Date.now() - t0)}.`);
     return [];
   }
   const registry = parseRegistry(res.text);
-  console.log(`[سجل الشخصيات] ${registry.length} شخصية من الملف كامل في ${Date.now() - t0}ms (${model}).`);
+  console.log(`[سجل الشخصيات] ${registry.length} شخصية من الملف كامل في ${secs(Date.now() - t0)} (${model}).`);
   if (registry.length > 0) {
     registryCaches.set(cacheKey, registry);
     if (registryCaches.size > MAX_REGISTRY_CACHES) registryCaches.delete(registryCaches.keys().next().value);
@@ -1417,7 +1480,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     if (/[MFG]/.test(c)) useful++;
   }
   const distStr = [...dist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}:${v}`).join(' ');
-  console.log(`[تحليل الضمائر] النتيجة: ${useful}/${pending.length} سطر فيه معلومة جنس | ${Date.now() - tStart}ms | التوزيع: ${distStr || 'لا شيء'}`);
+  console.log(`[تحليل الضمائر] النتيجة: ${useful}/${pending.length} سطر فيه معلومة جنس | ${secs(Date.now() - tStart)} | التوزيع: ${distStr || 'لا شيء'}`);
 
   return cache;
 }
@@ -1542,7 +1605,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
           const g = annotations.get(it.id);
           if (g && /[MFG]/.test(g)) { it.g = g; attached++; }
         }
-        annotationSummary = `أُرفق بـ ${attached} من ${toDo.length} سطر (${Date.now() - tA}ms)`;
+        annotationSummary = `أُرفق بـ ${attached} من ${toDo.length} سطر (${secs(Date.now() - tA)})`;
         console.log(`[تحليل الضمائر] أرفقت معلومة الجنس بـ ${attached} من ${toDo.length} سطر.`);
       } catch (e) {
         annotationSummary = `فشل (${e.message})`;
@@ -1595,15 +1658,6 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       .filter(ch => ch.length > 0);
   }
 
-  const SAMPLE_N = parseInt(process.env.GENDER_SAMPLE || '40', 10);
-  if (SAMPLE_N > 0 && toDo.length > 0) {
-    const flat = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
-    const pool = toDo.filter(it => results[it.id] != null);
-    const pick = pool.slice().sort(() => Math.random() - 0.5).slice(0, SAMPLE_N).sort((a, b) => a.id - b.id);
-    console.log(`[فحص] عينة ${pick.length} سطر عشوائي. الرمز بين [] = متكلم/مخاطَب (-- = بدون هنت):`);
-    for (const it of pick) console.log(`[فحص] #${it.id} [${it.g || '--'}] ${flat(cues[it.id].text)} => ${flat(results[it.id])}`);
-  }
-
   const FIND = String(process.env.GENDER_FIND || '').trim();
   const DEBUG = process.env.GENDER_DEBUG === '1';
   if ((FIND || DEBUG) && toDo.length > 0) {
@@ -1638,10 +1692,14 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     console.log(`[تنبيه] ${missing} سطر بقوا بنصهم الأصلي بعد كل المحاولات (محفوظ الباقي بالكاش).`);
   }
 
-  console.log(`[ملخص] أسطر=${cues.length} | للترجمة=${toDo.length} | ناقص=${missing} | تحليل الضمائر: ${annotationSummary} | زمن الترجمة=${Date.now() - tTrans}ms | الكلي=${Date.now() - tStart}ms`);
+  console.log(`[ملخص] أسطر=${cues.length} | للترجمة=${toDo.length} | ناقص=${missing} | تحليل الضمائر: ${annotationSummary} | زمن الترجمة=${secs(Date.now() - tTrans)} | الكلي=${secs(Date.now() - tStart)}`);
 
   return {
-    texts: cues.map((c, i) => normalizeLineBreakArtifacts(results[i] || c.text)),
+    // الأسطر المترجمة فقط تُقسَّم إن كانت طويلة؛ غير المترجمة تبقى كما هي
+    texts: cues.map((c, i) => {
+      const t = normalizeLineBreakArtifacts(results[i] || c.text);
+      return (results[i] != null && needsTranslation(c.text)) ? wrapLongSubtitleLine(t) : t;
+    }),
     missing
   };
 }
@@ -1654,6 +1712,33 @@ function parseExternalIds(targetId) {
   const tv = s.match(/^(?:tvdb|thetvdb)[:_-]?(\d+)/i);
   if (tv) out.tvdbId = tv[1];
   return out;
+}
+
+const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
+
+// يقرأ ملف ASS مع حفظ مكان كل سطر Dialogue، حتى نستبدل النص فقط ونبقي الملف الأصلي كما هو
+function parseAssKeepingStructure(text) {
+  const lines = String(text).split(/\r?\n/);
+  const cues = [], slots = [];
+  lines.forEach((line, i) => {
+    const m = line.match(ASS_DLG_RE);
+    if (!m) return;
+    const f = m[1].split(',');
+    cues.push({ start: f[1].trim(), end: f[2].trim(), text: m[2] });
+    slots.push(i);
+  });
+  return { lines, cues, slots };
+}
+
+function rebuildAss(parsed, texts) {
+  const out = parsed.lines.slice();
+  const drop = new Set();
+  parsed.slots.forEach((lineIdx, k) => {
+    if (DROP_DRAWINGS && DRAWING_RE.test(texts[k])) { drop.add(lineIdx); return; }
+    const m = out[lineIdx].match(ASS_DLG_RE);
+    out[lineIdx] = m[1] + String(texts[k]).replace(/\r?\n/g, '\\N');
+  });
+  return out.filter((_, i) => !drop.has(i)).join('\n');
 }
 
 async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
@@ -1715,6 +1800,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
+    if (DRAWING_RE.test(c.text)) return; // لا معنى لأسطر الرسم في SRT
     let text = finalTranslations[idx];
     if (!text) return;
     if (text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
@@ -1775,16 +1861,29 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`, missing: 0, total: 0, failed: true };
   }
 
-  const cues = extractCuesUniversal(originalText);
+  // نقرأ الملف مع حفظ بنيته (الستايلات والطبقات والهوامش) لنستبدل النص فقط
+  const parsed = parseAssKeepingStructure(originalText);
+  const isRealAss = parsed.cues.length > 0;
+  const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) {
     console.log('[Nuvio] فشل استخراج الأسطر من الملف الأصلي (ASS).');
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   }
 
-  console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
+  console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)}) | ملف ASS أصلي=${isRealAss}`);
 
   const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, castPromptBlock);
 
+  if (isRealAss) {
+    // الأسطر غير المترجمة (رسم / بدون حروف) أو التي بقيت بنصها الأصلي نعيدها حرفيًا كما في الأصل
+    const texts = cues.map((c, i) => {
+      const t = finalTranslations[i];
+      return (!needsTranslation(c.text) || t === normalizeLineBreakArtifacts(c.text)) ? c.text : t;
+    });
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
+  }
+
+  // الأصل كان SRT: نبني ASS من الصفر كما كان
   const assLines = [];
   cues.forEach((c, idx) => {
     let text = finalTranslations[idx];
