@@ -12,11 +12,27 @@ const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 350;
 const CORRECTOR_MAX_WORKERS = 8;
 
+// true = احذف أسطر الرسم (m ... l ...) من ملف ASS النهائي لأن المشغّل يعرضها كأرقام
+// false = أبقِها حرفيًا كما في الملف الأصلي
+const DROP_DRAWINGS = true;
+
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const DASH_RE = /^[-–—]/;
 
+const TAG_RE = /\{[^}]*\}|<[^>]*>/g;      // للـ replace فقط (global)
+const TAG_ONE = /\{[^}]*\}|<[^>]*>/;      // للـ test (بدون g)
+const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
+const DRAWING_RE = /\{[^}]*\\p0*[1-9][^}]*\}/;   // سطر رسم vector في ASS: {\p1} ... {\p0}
+
 function visibleLen(s) { return String(s).replace(/<[^>]*>|\{[^}]*\}/g, '').length; }
+
+// يصحح فقط الأسطر التي فيها حروف عربية فعلًا، ولا يلمس أسطر الرسم
+function needsCorrection(text) {
+  const raw = String(text == null ? '' : text);
+  if (DRAWING_RE.test(raw)) return false;
+  return HAS_ARABIC.test(raw.replace(TAG_RE, ''));
+}
 
 function moveLeadingPunct(line) {
   let t = line.trim();
@@ -102,6 +118,25 @@ function sameWords(orig, out) {
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const LINE_SPLIT = /\\+[nN]|\r?\n/;
 
+// يعيد وسوم السطر الأصلي (في أول كل سطر وآخره) على نص الموديل.
+// إذا كانت هناك وسوم في وسط السطر يرجع null ويبقى السطر الأصلي.
+function restoreTags(orig, out) {
+  const vis = l => l.replace(TAG_RE, '').trim();
+  const o = String(orig == null ? '' : orig).split(LINE_SPLIT).map(l => l.trim()).filter(l => l && vis(l));
+  const n = String(out == null ? '' : out).split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  if (o.length !== n.length) return null;
+  const res = [];
+  for (let i = 0; i < o.length; i++) {
+    const lead = o[i].match(LEAD_TAGS)[0];
+    const rest = o[i].slice(lead.length);
+    const tail = rest.match(TAIL_TAGS)[0];
+    const body = rest.slice(0, rest.length - tail.length);
+    if (TAG_ONE.test(body)) return null;
+    res.push(lead.trim() + n[i].replace(TAG_RE, '').trim() + tail.trim());
+  }
+  return res.join('\n');
+}
+
 function stripPunctPart(s) {
   return s
     .replace(/["“”«»()\[\]]/g, '')
@@ -116,6 +151,9 @@ function prepareForModel(rawText) {
     if (!l) continue;
     const tagPrefix = l.match(LEAD_TAGS)[0];
     l = l.slice(tagPrefix.length).trim();
+    // الوسوم لا تُرسل للموديل أبدًا؛ تُعاد لاحقًا بـ restoreTags
+    l = l.replace(TAG_RE, '').trim();
+    if (!l) continue;
 
     let mark = '', colon = false;
     let dash0 = '';
@@ -144,7 +182,7 @@ function prepareForModel(rawText) {
     if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
     l = l.trim();
     if (!l) continue;
-    out.push(tagPrefix.trim() + (dash ? '- ' : '') + l + (colon ? ':' : mark));
+    out.push((dash ? '- ' : '') + l + (colon ? ':' : mark));
   }
   return out.join('\\N');
 }
@@ -264,7 +302,8 @@ function polishArabicText(txt) {
   const out = [];
   for (const l of lines) out.push(...splitSpeakers(moveLeadingPunct(l)));
   let res = repairParens(out.map(l => moveLeadingPunct(l)).join('\n')).split('\n').filter(Boolean);
-  if (CORRECTOR_WRAP_AT > 0 && res.length === 1 && !DASH_RE.test(res[0]) && visibleLen(res[0]) > CORRECTOR_WRAP_AT) {
+  // لا نكسر سطرًا فيه وسوم ASS (حتى لا نغيّر تنسيق صاحب الترجمة)
+  if (CORRECTOR_WRAP_AT > 0 && res.length === 1 && !DASH_RE.test(res[0]) && !TAG_ONE.test(res[0]) && visibleLen(res[0]) > CORRECTOR_WRAP_AT) {
     res = balancedBreak(res[0]);
   }
   return fixSplitQuotes(res.join('\n'));
@@ -437,7 +476,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const RETRY_PIECE = 100;
   const MAX_TRIES = 5;
   const MAX_RL = 12;
-  const lineCacheKey = 'ARB2_' + cacheKey;
+  const lineCacheKey = 'ARB3_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
   const results = new Array(cues.length).fill(null);
@@ -446,7 +485,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   let fromCache = 0;
 
   cues.forEach((c, i) => {
-    if (!needsTranslation(c.text)) { results[i] = c.text; return; }
+    // أسطر الرسم والأسطر بدون عربي تبقى حرفيًا كما هي ولا تُرسل للموديل
+    if (!needsCorrection(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
     const prepared = prepareForModel(c.text);
     sentText.set(i, prepared);
@@ -514,7 +554,13 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     rawOut.set(id, text);
     const orig = cues[id].text;
     let src = text;
-    if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) { rejected++; src = orig; }
+    if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
+      rejected++; src = orig;
+    } else {
+      // الموديل لم يرَ الوسوم؛ نعيدها من السطر الأصلي، وإن تعذّر يبقى السطر الأصلي
+      const withTags = restoreTags(orig, text);
+      if (withTags == null) { rejected++; src = orig; } else src = withTags;
+    }
     const clean = cleanCorrectorOutput(src) || cleanCorrectorOutput(orig);
     results[id] = clean;
     cache.set(id, clean);
@@ -597,7 +643,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const missing = unprocessed.length;
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | استرداد=${requeued} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
 
-  const finalTexts = cues.map((c, i) => cleanCorrectorOutput(normalizeLineBreakArtifacts(results[i] || c.text)));
+  // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف
+  const finalTexts = cues.map((c, i) =>
+    needsCorrection(c.text) ? cleanCorrectorOutput(results[i] || c.text) : c.text
+  );
 
   return {
     texts: finalTexts,
@@ -622,7 +671,9 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
-    let text = finalCorrections[idx];
+    if (DRAWING_RE.test(c.text)) return; // لا معنى لأسطر الرسم في SRT
+    // الأسطر غير المصححة خام (فيها \N حرفية)، نحوّلها لسطر جديد
+    let text = String(finalCorrections[idx] || '').replace(/\\+[nN]/g, '\n');
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
     let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
     if (sTime.length === 10) sTime = '0' + sTime;
@@ -635,6 +686,33 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
+const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
+
+// يقرأ ملف ASS مع حفظ مكان كل سطر Dialogue، حتى نستبدل النص فقط ونبقي الملف الأصلي كما هو
+function parseAssKeepingStructure(text) {
+  const lines = String(text).split(/\r?\n/);
+  const cues = [], slots = [];
+  lines.forEach((line, i) => {
+    const m = line.match(ASS_DLG_RE);
+    if (!m) return;
+    const f = m[1].split(',');
+    cues.push({ start: f[1].trim(), end: f[2].trim(), text: m[2] });
+    slots.push(i);
+  });
+  return { lines, cues, slots };
+}
+
+function rebuildAss(parsed, texts) {
+  const out = parsed.lines.slice();
+  const drop = new Set();
+  parsed.slots.forEach((lineIdx, k) => {
+    if (DROP_DRAWINGS && DRAWING_RE.test(texts[k])) { drop.add(lineIdx); return; }
+    const m = out[lineIdx].match(ASS_DLG_RE);
+    out[lineIdx] = m[1] + String(texts[k]).replace(/\r?\n/g, '\\N');
+  });
+  return out.filter((_, i) => !drop.has(i)).join('\n');
+}
+
 async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
@@ -643,17 +721,25 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
   }
 
-  const cues = extractCuesUniversal(originalText);
+  const parsed = parseAssKeepingStructure(originalText);
+  const isRealAss = parsed.cues.length > 0;
+  const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
 
-  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
+  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
+  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, subUrl);
 
+  // الملف الأصلي (Script Info + Styles + Fonts + كل الأسطر) محفوظ، ونستبدل نص الأسطر فقط
+  if (isRealAss) {
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
+  }
+
+  // الأصل كان SRT: نبني ASS من الصفر كما كان
   const assLines = [];
   cues.forEach((c, idx) => {
-    let text = finalCorrections[idx];
+    const text = texts[idx];
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\n/g, '\\N')}`);
+    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\r?\n/g, '\\N')}`);
   });
   return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
 }
