@@ -347,6 +347,50 @@ function fixArabicTypos(txt) {
   return String(txt == null ? '' : txt).replace(/[\p{L}\p{M}]+/gu, tok => (/[\u0600-\u06FF]/.test(tok) ? fixTypoToken(tok) : tok));
 }
 
+// ============================================================
+// الثلاث نقاط (...) في الترجمات القديمة
+// المترجمون القدامى كانوا يكتبون العلامات بمكان "العرض" لا مكان "المنطق" (المشغّل القديم كان يعكسها).
+// فنكشف الملف القديم من أسطر عربية تبدأ بعلامة ترقيم (. ! ؟ ، :) وهذا لا يحدث في الملفات الحديثة.
+// إذا كان الملف قديمًا نبدّل مكان الثلاث نقاط (أول السطر <-> آخره) قبل أي شيء.
+// الملف الحديث لا يُلمس إطلاقًا.
+// ============================================================
+const OLD_FILE_MIN_LINES = 20;     // أقل عدد أسطر عربية حتى نحكم على الملف
+const OLD_FILE_MIN_RATIO = 0.03;   // 3% من الأسطر تبدأ بعلامة ترقيم = ملف قديم
+
+function isVisualOrderFile(cues) {
+  let total = 0, lead = 0;
+  for (const c of cues) {
+    if (!needsCorrection(c.text)) continue;
+    for (const raw of String(c.text).split(LINE_SPLIT)) {
+      const l = raw.replace(TAG_RE, '').trim().replace(/^[-–—]\s*/, '');
+      if (!HAS_ARABIC.test(l)) continue;
+      total++;
+      if (/^[.!؟?،,؛:]/.test(l) && !/^(\.{3,}|…)/.test(l)) lead++;
+    }
+  }
+  return total >= OLD_FILE_MIN_LINES && lead / total >= OLD_FILE_MIN_RATIO;
+}
+
+const ELL_RE = /^([-–—]\s*)?(\.{3,}|…)?\s*([\s\S]*?)\s*(\.{3,}|…)?$/;
+
+function flipEllipsisLine(line) {
+  const lead = line.match(LEAD_TAGS)[0];
+  const rest = line.slice(lead.length);
+  const tail = rest.match(TAIL_TAGS)[0];
+  const body = rest.slice(0, rest.length - tail.length);
+  const m = body.match(ELL_RE);
+  if (!m || (!m[2] && !m[4])) return line;
+  return lead + (m[1] || '') + (m[4] || '') + m[3] + (m[2] || '') + tail;
+}
+
+function flipEllipsisText(text) {
+  if (!needsCorrection(text)) return text;
+  return String(text)
+    .split(/(\\+[nN]|\r?\n)/)
+    .map((p, i) => (i % 2 ? p : flipEllipsisLine(p)))
+    .join('');
+}
+
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -371,9 +415,15 @@ Rules:
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.
 8. NEVER output square brackets [ ].
 9. ONLY output the JSON array. No explanations.
+
+EXAMPLES:
+Input: [{"id": 1, "text": "رايت سارة في طوكيو ناكل السوشي"}, {"id": 2, "text": "هل اخبرت جون عن شركة ابل"}]
+Output: [{"id": 1, "text": "رأيت \"سارة\" في (طوكيو) نأكل (السوشي)."}, {"id": 2, "text": "هل أخبرت \"جون\" عن شركة (أبل)؟"}]
+
 ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
+
 
   for (let attempt = 0; attempt < 4; attempt++) {
     const activeKey = await acquireKey(keysArray);
@@ -472,11 +522,19 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
 
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
+
+  // ملف قديم (علامات بمكان العرض): نقلب مكان الثلاث نقاط من النص الأصلي قبل أي شيء،
+  // فحتى الأسطر التي ترجع بنصها الأصلي (رفض/نقص) تكون نقاطها في المكان الصحيح.
+  if (isVisualOrderFile(cues)) {
+    console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
+    cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
+  }
+
   const CHUNK = CORRECTOR_CHUNK;
   const RETRY_PIECE = 100;
   const MAX_TRIES = 5;
   const MAX_RL = 12;
-  const lineCacheKey = 'ARB3_' + cacheKey;
+  const lineCacheKey = 'ARB4_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
   const results = new Array(cues.length).fill(null);
