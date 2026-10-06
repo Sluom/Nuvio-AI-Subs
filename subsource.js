@@ -4,7 +4,6 @@ const SUBSOURCE_BASE = 'https://api.subsource.net/api/v1';
 const SUBSOURCE_STREM = 'https://subsource.strem.top';
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// اسم اللغة عند Subsource (بحروف صغيرة) -> ISO3 + بداية الكود اللي يرجع بردود Stremio
 const LANGS = {
   arabic: { iso3: 'ara', prefix: 'ar' },
   english: { iso3: 'eng', prefix: 'en' }
@@ -15,7 +14,6 @@ const MAX_RESULTS = 30;
 const cleanPath = p => String(p).split('?')[0];
 const errText = e => `${e?.response?.status || e?.code || ''} ${e?.response?.data?.message || e?.message || ''}`.trim();
 
-// الروابط اللي تبدأ بـ subsource://ID تتحول لرابط التحميل الرسمي (المفتاح يُرسل بالهيدر من fetchAndExtractSub)
 function normalizeSubsourceUrl(u) {
   const s = String(u || '').trim();
   if (!s) return '';
@@ -68,11 +66,9 @@ function makeSub({ url, name, language, hi, route }) {
   };
 }
 
-// ---------- المسار 1: API الرسمي (api.subsource.net/api/v1، المفتاح بالهيدر X-API-Key) ----------
 async function fetchApi({ key, imdbId, season, episode, isSeries, language }) {
   const headers = { 'X-API-Key': key, 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' };
 
-  // أ) إيجاد movieId من IMDb
   let search;
   try {
     search = await axios.get(`${SUBSOURCE_BASE}/movies/search`, {
@@ -98,7 +94,6 @@ async function fetchApi({ key, imdbId, season, episode, isSeries, language }) {
   const movieId = movie.movieId ?? movie.id;
   if (movieId == null) throw new Error(`لقيت العمل لكن بدون movieId (الحقول: ${Object.keys(movie).join(',')})`);
 
-  // ب) ترجمات اللغة المطلوبة لهذا العمل
   const subsRes = await axios.get(`${SUBSOURCE_BASE}/subtitles`, {
     params: { movieId, language }, headers, timeout: 10000
   });
@@ -119,7 +114,6 @@ async function fetchApi({ key, imdbId, season, episode, isSeries, language }) {
   return out;
 }
 
-// ---------- المسار 2: subsource.strem.top (إضافة Stremio وسيطة، المفتاح داخل الرابط بترميز base64) ----------
 function stremConfig(key, language) {
   return Buffer.from(`${key}/${language}/hiInclude/type:0/`).toString('base64');
 }
@@ -148,7 +142,6 @@ async function fetchStrem({ key, imdbId, season, episode, isSeries, language }) 
   return out;
 }
 
-// language: 'arabic' (للتصحيح) أو 'english' (مصدر الترجمة). المفتاح يأتي فقط من إعدادات الإضافة.
 async function getSubSource({ imdbId, season, episode, apiKey, language = 'arabic' }) {
   const key = String(apiKey || '').trim();
   if (!key) {
