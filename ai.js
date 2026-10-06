@@ -5,8 +5,8 @@ const zlib = require('zlib');
 const { applyVocativeRules } = require('./genderRules');
 const { getTmdbCast } = require('./tmdb'); 
 const { getAnilistCast } = require('./anilist'); 
+const db = require('./db');
 
-// ================== استدعاء مكاتب التحليل المحلي (النقطة 1 و 2) ==================
 let nlp, genderDetect;
 try {
   nlp = require('compromise');
@@ -42,36 +42,30 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_MISSING_RETRIES = 3;
 const MAX_RETRY_PASSES = 4;
 
-// ================== إعدادات تحليل الجنس (Patch 1) ==================
 const ENABLE_GENDER_ANALYSIS = true;
 
-// موديل التحليل: فاضي = نفس موديل الترجمة (الأضمن). تقدر تحط موديل ثاني بمتغير ANNOTATION_MODEL.
-// إذا الموديل غير صالح يرجع تلقائياً لموديل الترجمة.
 const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || '').trim();
-const ANNOTATION_BUDGET_MS = 75000;          // الميزانية الزمنية الكلية للتحليل (طلب أول + إعادة U)
-const ANNOTATION_SLICE_SIZE = 200;           // أسطر "الجوهر" بكل طلب
-const ANNOTATION_OVERLAP = 8;                // أسطر سياق قراءة فقط قبل وبعد كل شريحة
+const ANNOTATION_BUDGET_MS = 75000;
+const ANNOTATION_SLICE_SIZE = 200;
+const ANNOTATION_OVERLAP = 8;
 const ANNOTATION_MAX_CONCURRENCY = 8;
 const ANNOTATION_REQUEST_TIMEOUT_MS = 60000;
 const ANNOTATION_ATTEMPTS = 3;
 const ANNOTATION_TEMPERATURE = 0.1;
-const SCENE_BREAK_SECONDS = 4;               // فجوة أكبر من هذا = غالباً مشهد جديد
-const RESCUE_CONTEXT = 10;                   // ±10 أسطر لإعادة الأسطر اللي رجعت U
-const RESCUE_MAX_ASK = 80;                   // أقصى عدد أسطر مطلوبة بطلب إعادة واحد
-const RESCUE_MAX_SPAN = 250;                 // أقصى امتداد (بالأسطر) لنافذة إعادة واحدة
+const SCENE_BREAK_SECONDS = 4;
+const RESCUE_CONTEXT = 10;
+const RESCUE_MAX_ASK = 80;
+const RESCUE_MAX_SPAN = 250;
 
-// ================== Patch 3: المشهد والأشخاص ==================
-const ROSTER_ENABLED = process.env.ROSTER_PASS !== '0';   // ROSTER_PASS=0 يرجّع جولة الحروف القديمة
-const VERIFY_RUN_MIN = 6;                    // أقل عدد أسطر FF متتالية لنعتبر المشهد مشبوه
-const VERIFY_MAX_REQUESTS = 6;               // أقصى عدد طلبات رأي ثاني بالملف
+const ROSTER_ENABLED = process.env.ROSTER_PASS !== '0';
+const VERIFY_RUN_MIN = 6;
+const VERIFY_MAX_REQUESTS = 6;
 const VERIFY_CONTEXT = 10;
 
-// ================== Patch 2: سجل الشخصيات + الأدلة بدرجات ثقة ==================
-const REGISTRY_BUDGET_MS = 30000;            // وقت طلب سجل الشخصيات (طلب واحد على الملف كامل)
-const REGISTRY_MAX_CHARS = 250000;           // أقصى حجم نص يُرسل للسجل
+const REGISTRY_BUDGET_MS = 30000;
+const REGISTRY_MAX_CHARS = 250000;
 const REGISTRY_MAX_CHARACTERS = 60;
 
-// عدد أسطر السياق (للقراءة فقط) قبل وبعد كل دفعة ترجمة
 const CONTEXT_LINES = 4;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -107,7 +101,6 @@ function isGeminiAuthFailure(e) {
   return msg.includes('api key') && (msg.includes('invalid') || msg.includes('not valid') || msg.includes('permission'));
 }
 
-// خطأ إعداد (موديل غير موجود / معامل thinking غير مدعوم): ما نبرّد المفتاح، ونرجع للموديل الاحتياطي
 function isGeminiConfigError(e) {
   const s = e?.response?.status;
   if (s === 404) return true;
@@ -318,7 +311,6 @@ async function runConcurrentPool(tasks, limit = 5) {
   return results;
 }
 
-// ================== سياق الدفعة (قراءة فقط): أسطر قبل وبعد الدفعة من الملف الأصلي ==================
 function buildChunkContext(cues, chunk) {
   if (!chunk || !chunk.length) return { before: [], after: [] };
   const first = chunk[0].id;
@@ -409,7 +401,6 @@ ${JSON.stringify(items)}`;
       const map = parseIdTranslations(responseText);
 
       if (map) {
-        // حارس الأرقام: رد فيه أرقام ما طلبتها = أرقام مزاحة أو مخترعة، نرفضه (واحنا نقسم الدفعة ونعيد)
         const allowedIds = new Set(items.map(i => i.id));
         let extraIds = 0;
         for (const id of map.keys()) if (!allowedIds.has(id)) extraIds++;
@@ -490,7 +481,6 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
   return done;
 }
 
-// ================== تحميل ملف الترجمة (UA متصفح + Referer لـ SubDL + مفتاح Subsource يأتي من إعدادات الإضافة + كاش) ==================
 const subTextCache = new Map();
 const SUB_CACHE_TTL = 30 * 60 * 1000;
 const SUB_CACHE_MAX = 60;
@@ -551,6 +541,7 @@ function prepCueText(t) {
 
 const lineCaches = new Map();
 const MAX_LINE_CACHES = 40;
+const hydratedMaps = new WeakSet();
 
 function getLineCache(key) {
   if (!lineCaches.has(key)) {
@@ -558,6 +549,20 @@ function getLineCache(key) {
     if (lineCaches.size > MAX_LINE_CACHES) lineCaches.delete(lineCaches.keys().next().value);
   }
   return lineCaches.get(key);
+}
+
+async function loadLineCache(key) {
+  const cache = getLineCache(key);
+  if (!hydratedMaps.has(cache)) {
+    hydratedMaps.add(cache);
+    const stored = await db.loadMap('line', key);
+    let restored = 0;
+    for (const [id, text] of stored) {
+      if (!cache.has(id)) { cache.set(id, text); restored++; }
+    }
+    if (restored > 0) console.log(`[MongoDB] استرجعت ${restored} سطر من كاش الأسطر الدائم.`);
+  }
+  return cache;
 }
 
 function needsTranslation(text) {
@@ -576,7 +581,20 @@ function getAnnotationCache(key) {
   return annotationCaches.get(key);
 }
 
-// الفلتر القديم (ضمائر إنجليزية): ما عاد يتحكم بتحليل الـ AI. يبقى فقط للتحليل النحوي المحلي لأنه إنجليزي.
+async function loadAnnotationCache(key) {
+  const cache = getAnnotationCache(key);
+  if (!hydratedMaps.has(cache)) {
+    hydratedMaps.add(cache);
+    const stored = await db.loadMap('annot', key);
+    let restored = 0;
+    for (const [id, code] of stored) {
+      if (!cache.has(id)) { cache.set(id, code); restored++; }
+    }
+    if (restored > 0) console.log(`[MongoDB] استرجعت ${restored} كود تحليل ضمائر من التخزين الدائم.`);
+  }
+  return cache;
+}
+
 const ENGLISH_PRONOUNS = /\b(i|i'm|i've|i'll|i'd|me|my|myself|you|you're|you've|you'll|your|yours|yourself|we|us|our|he|she|him|her|his)\b/i;
 
 const SAFETY_SETTINGS_OFF = [
@@ -627,7 +645,7 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErr(e)}`);
-      if (status === 429 && stopOn429) return { status: 'rate_limited', text: '' };   // طلب اختياري: ما نحرق مفتاح ثاني
+      if (status === 429 && stopOn429) return { status: 'rate_limited', text: '' };
       if (attempt < attempts - 1) await delay(1000 + Math.random() * 1000);
     }
   }
@@ -642,15 +660,10 @@ function cleanForAnalysis(t) {
     .trim();
 }
 
-// ==================================================================================
-// ================== Patch 1: تحليل الضمائر على كل الأسطر وبأي لغة ==================
-// ==================================================================================
-
 function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// نداء صريح فقط: "Harry, ..." أو "..., Harry." (مو أي اسم موجود بالجملة)
 function isVocativeName(text, name) {
   const n = escapeRe(name).replace(/\s+/g, '\\s+');
   const start = new RegExp(`^\\W*(?:(?:hey|oh|ok|okay|look|listen|please|yes|no|well|come on)\\s*,?\\s+)?${n}\\s*[,!?:]`, 'i');
@@ -658,7 +671,6 @@ function isVocativeName(text, name) {
   return start.test(String(text || '')) || end.test(String(text || ''));
 }
 
-// "H:MM:SS.cc" -> ثواني
 function assTimeToSec(t) {
   const m = String(t || '').match(/(\d+):(\d{2}):(\d{2})[.,](\d{1,3})/);
   if (!m) return null;
@@ -671,7 +683,6 @@ function fmtClock(sec) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// يقسم السطر لأدوار متكلمين: كل سطر يبدأ بشرطة = متكلم جديد
 function splitTurns(rawText) {
   const lines = String(rawText || '')
     .replace(/\{[^}]*\}|<[^>]*>/g, '')
@@ -691,7 +702,6 @@ function splitTurns(rawText) {
   return turns;
 }
 
-// كل الأسطر اللي تحتاج ترجمة، بالترتيب، مع الوقت وعلامة فاصل المشهد وعدد أدوار المتكلمين
 function buildAnnotationItems(cues) {
   const items = [];
   const turnsById = new Map();
@@ -715,7 +725,6 @@ function buildAnnotationItems(cues) {
   return { items, turnsById };
 }
 
-// "12:FM" أو "12:FM/MF" (كود لكل دور متكلم). احتياطي: JSON بشكل ثاني مثل [{"id":1,"code":"FM"}]
 function parseAnnotationCodes(raw) {
   const map = new Map();
   if (!raw) return map;
@@ -739,7 +748,6 @@ function parseAnnotationCodes(raw) {
   return map;
 }
 
-// يتأكد إن عدد الأكواد = عدد الأدوار، وإلا يرجع null (يعتبر ناقص)
 function normalizeCode(raw, turns) {
   if (!raw) return null;
   const segs = String(raw).toUpperCase().split('/').map(s => s.trim());
@@ -748,7 +756,6 @@ function normalizeCode(raw, turns) {
   return segs.join('/');
 }
 
-// يعبي حروف U في base من extra (ما يغيّر أي حرف محسوم)
 function mergeCodes(base, extra) {
   if (!extra) return base;
   if (!base) return extra;
@@ -808,7 +815,6 @@ Lines:
 ${JSON.stringify(windowItems)}`;
 }
 
-// استدعاء موديل التحليل مع الرجوع التلقائي لموديل الترجمة إذا الإعداد غير صالح
 async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeout = ANNOTATION_REQUEST_TIMEOUT_MS, attempts = ANNOTATION_ATTEMPTS, stopOn429 = false }) {
   const baseModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   let model = (!annotationModelBroken && ANNOTATION_MODEL) ? normalizeGeminiModelId(ANNOTATION_MODEL) : baseModel;
@@ -825,9 +831,7 @@ async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, timeo
   }
   return { res, model };
 }
-// طلب تحليل واحد بنظام الحروف (شريحة أو نافذة إعادة/رأي ثاني). يرجع Map(id -> كود خام)
-// state: إذا انمرر، الطلب "اختياري": أول 429 يوقف كل الطلبات الاختيارية (حتى ما نحرق مفاتيح الترجمة).
-// إذا رجع الطلب بدون أي كود: يسجل السبب ويقسم الطلب لنصفين ويعيده مرة وحدة (يعزل الأسطر اللي تسبب الرفض).
+
 async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock, depth = 0, state = null }) {
   if (state && state.aborted) return new Map();
   const prompt = buildAnnotationPrompt(windowItems, mode, castPromptBlock);
@@ -874,9 +878,6 @@ async function annotateWindow({ windowItems, mode, keysArray, modelName, deadlin
   return map;
 }
 
-// ==================================================================================
-// ================== Patch 3: المشهد والأشخاص (بدل الحروف المنفصلة) ==================
-// ==================================================================================
 function buildRosterPrompt(windowItems, castPromptBlock) {
   return `You will receive consecutive subtitle lines from ONE film or episode, in story order, as a JSON array of objects {"id": <number>, "t": "<m:ss start time>", "text": "<subtitle text>"}.
 Optional fields: "b":1 = a pause of several seconds before this line (often a new scene or a change of speakers); "turns": N = the text holds N speaker turns separated by "⏎"; "ctx":1 = read-only context from the neighbouring parts of the story.
@@ -1034,7 +1035,6 @@ function findFFRuns(items, codeOf, minLen) {
   return runs;
 }
 
-// ================== Patch 2: سجل الشخصيات + أدلة بدرجات ثقة ==================
 const registryCaches = new Map();
 const MAX_REGISTRY_CACHES = 40;
 
@@ -1093,6 +1093,14 @@ function parseRegistry(raw) {
 async function getCharacterRegistry(cues, keysArray, modelName, cacheKey, castPromptBlock) {
   if (registryCaches.has(cacheKey)) return registryCaches.get(cacheKey);
 
+  const stored = await db.loadDoc('registry', cacheKey);
+  if (Array.isArray(stored) && stored.length > 0) {
+    registryCaches.set(cacheKey, stored);
+    if (registryCaches.size > MAX_REGISTRY_CACHES) registryCaches.delete(registryCaches.keys().next().value);
+    console.log(`[سجل الشخصيات] ${stored.length} شخصية من التخزين الدائم.`);
+    return stored;
+  }
+
   const lines = [];
   for (const c of cues) {
     if (!needsTranslation(c.text)) continue;
@@ -1127,6 +1135,7 @@ ${body}`;
   if (registry.length > 0) {
     registryCaches.set(cacheKey, registry);
     if (registryCaches.size > MAX_REGISTRY_CACHES) registryCaches.delete(registryCaches.keys().next().value);
+    db.saveDoc('registry', cacheKey, registry);
   }
   return registry;
 }
@@ -1237,7 +1246,7 @@ function applyEvidence(code, ev, stats) {
 }
 
 async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', evidence = new Map(), regIndex = null) {
-  const cache = getAnnotationCache(cacheKey);
+  const cache = await loadAnnotationCache(cacheKey);
   const tStart = Date.now();
 
   const { items, turnsById } = buildAnnotationItems(cues);
@@ -1389,10 +1398,15 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
 
   console.log(`[أدلة] غيّرت ${evStats.overridden} حرف من قرار الـ AI (دليل مؤكد من الكاست)، وملأت ${evStats.filled} حرف ناقص.`);
 
+  const fresh = [];
   for (const it of pending) {
     const code = coded.get(it.id);
-    if (code) cache.set(it.id, code);
+    if (code) {
+      cache.set(it.id, code);
+      fresh.push([it.id, code]);
+    }
   }
+  if (fresh.length > 0) db.saveMap('annot', cacheKey, fresh);
 
   const dist = new Map();
   let useful = 0;
@@ -1411,7 +1425,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
 async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, castPromptBlock = '') {
   const tStart = Date.now();
   const CHUNK = getDynamicChunkSize(modelName);
-  const cache = getLineCache(cacheKey);
+  const cache = await loadLineCache(cacheKey);
 
   const results = new Array(cues.length).fill(null);
   const toDo = [];
@@ -1565,10 +1579,13 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     const tasks = pendingChunks.map(chunk => async () => {
       const ctx = buildChunkContext(cues, chunk);
       const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx);
+      const fresh = [];
       for (const [id, text] of map) {
         results[id] = text;
         cache.set(id, text);
+        fresh.push([id, text]);
       }
+      if (fresh.length > 0) db.saveMap('line', cacheKey, fresh);
     });
 
     await runConcurrentPool(tasks, pass === 0 ? concurrency : Math.min(2, concurrency));
@@ -1794,12 +1811,11 @@ module.exports = {
   parseRobustJsonArray,
   parseIdTranslations,
   translateItemsWithRecovery,
-  // مشتركات يستعملها corrector.js (مسار المصحح العربي)
   shared: {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
     MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent, parseIdTranslations, buildChunkContext,
-    needsTranslation, getLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
+    needsTranslation, getLineCache, loadLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
     extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
   }
 };
