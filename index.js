@@ -1,3 +1,4 @@
+// index.js
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -377,7 +378,7 @@ const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
     version: '1.9.3',
     name: 'Nuvio AI Subs (Pro Max)',
-    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 6 SRT & 4 true ASS tracks.',
+    description: 'Auto-translate subtitles to Arabic using Gemini. Strict SDH removal, up to 4 SRT & 2 true ASS tracks.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
     idPrefixes: ['tt', 'kitsu'],
@@ -601,7 +602,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
-        let arabicSubs = { srt: [], ass: [] };
+        let arabicSubs = { srt: [], ass: [], ready: [] };
         try {
             arabicSubs = await getArabicSubsForCorrection({
                 imdbId: assImdbId,
@@ -611,11 +612,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 subdlKey: addonCfg.subdlKey,
                 subsourceKey: addonCfg.subsourceKey
             });
-            console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.srt.length} ترجمة SRT عربية و ${arabicSubs.ass.length} ترجمة ASS عربية للعمل ${finalTargetId}`);
+            console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.srt?.length || 0} ترجمة SRT عربية و ${arabicSubs.ass?.length || 0} ترجمة ASS عربية للعمل ${finalTargetId}`);
         } catch (err) {
             console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
         }
-
 
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
@@ -686,7 +686,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         let extraParams = `&id=${finalTargetId}`;
         if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
 
-        if (arabicSubs.srt.length > 0) {
+        if (arabicSubs.srt && arabicSubs.srt.length > 0) {
             const maxAraSrt = Math.min(4, arabicSubs.srt.length);
             for (let i = 0; i < maxAraSrt; i++) {
                 transSubs.push({
@@ -698,7 +698,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
-        if (arabicSubs.ass.length > 0) {
+        if (arabicSubs.ass && arabicSubs.ass.length > 0) {
             const maxAraAss = Math.min(4, arabicSubs.ass.length);
             for (let i = 0; i < maxAraAss; i++) {
                 transSubs.push({
@@ -736,6 +736,18 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         } else {
             console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
         }
+
+        const streamRaw = configParam ? `/${configParam}/stream-raw.srt` : '/stream-raw.srt';
+        const SRC_NAMES = { subdl: 'SubDL', subsource: 'Subsource', os_mirror: 'OpenSubtitles', os_legacy: 'OpenSubtitles' };
+        (arabicSubs.ready || []).forEach((s, i) => {
+            const shortName = String(s.fileName || '').replace(/\s+/g, ' ').slice(0, 45);
+            transSubs.push({
+                id: `nuvio-ready-${i + 1}`,
+                url: `${baseUrl}${streamRaw}?url=${encodeURIComponent(s.url)}${extraParams}`,
+                lang: 'ara',
+                title: `Arabic ${i + 1} · ${SRC_NAMES[s._source] || s._source} · ${shortName}`
+            });
+        });
 
         return res.json({ subtitles: transSubs });
     } catch (err) {
@@ -804,6 +816,44 @@ app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
 
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+
+const rawCache = new Map();
+const RAW_TTL = 30 * 60 * 1000;
+const RAW_UNAVAILABLE = `1\n00:00:01,000 --> 00:00:10,000\nهذه الترجمة غير متاحة لهذه الحلقة، جرّب ترجمة أخرى.\n\n`;
+
+const rawAraRoute = async (req, res) => {
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    const targetUrl = req.query.url;
+    const targetId = req.query.id || '';
+    if (!targetUrl) return res.status(400).send('Missing URL');
+
+    const send = en => sendSub(res,
+        en.isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8',
+        `Arabic-Original.${en.isAss ? 'ass' : 'srt'}`, en.text);
+
+    const cacheKey = `RAW_${targetId}_${targetUrl}`;
+    const hit = rawCache.get(cacheKey);
+    if (hit && Date.now() - hit.time < RAW_TTL) return send(hit);
+
+    try {
+        const cfg = parseConfig(req.params.config);
+        const [, season, episode] = targetId.split(':');
+        const epInfo = (season && episode) ? { season, episode } : null;
+        const text = await Promise.race([
+            require('./ai').shared.fetchAndExtractSub(targetUrl, cfg.subsourceKey, epInfo),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 25000))
+        ]);
+        if (!text) throw new Error('الملف فارغ');
+        const entry = { time: Date.now(), text, isAss: /^\s*Dialogue:/im.test(text) };
+        rawCache.set(cacheKey, entry);
+        return send(entry);
+    } catch (err) {
+        console.error(`[Raw Arabic] فشل: ${err.message} <- ${targetUrl}`);
+        return sendSub(res, 'application/x-subrip; charset=utf-8', 'Arabic-Unavailable.srt', RAW_UNAVAILABLE);
+    }
+};
+
+app.all(['/stream-raw.srt', '/:config/stream-raw.srt', '/stream-raw.ass', '/:config/stream-raw.ass'], rawAraRoute);
 
 app.listen(PORT, () => {
     console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
