@@ -221,7 +221,8 @@ async function getSubDL({ imdbId, season, episode, apiKey, languages }) {
   const tag = `${imdbId}${isSeries ? ` S${season}E${episode}` : ''} [${wanted.length === 1 ? wanted[0] : 'عدة لغات'}]`;
 
   const routes = [
-    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })]
+    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })],
+    ['strem.top', () => fetchStremTop({ key, imdbId, season, episode, isSeries, langCode: proxyLang, wantedSet })]
   ];
   const settled = await Promise.allSettled(routes.map(([, fn]) => fn()));
 
