@@ -99,11 +99,11 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     }
 }
 
-async function verifyArabicSub(s, subsourceKey) {
+async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
     try {
         const text = await Promise.race([
-            fetchAndExtractSub(s.url, subsourceKey),
+            fetchAndExtractSub(s.url, subsourceKey, epInfo),
             new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS))
         ]);
         const cues = extractCuesUniversal(text);
@@ -161,7 +161,8 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     });
 
     const toVerify = uniqueSubs.slice(0, VERIFY_LIMIT);
-    const verified = (await Promise.all(toVerify.map(s => verifyArabicSub(s, subsourceKey)))).filter(Boolean);
+    const epInfo = (season != null && episode != null) ? { season, episode } : null;
+    const verified = (await Promise.all(toVerify.map(s => verifyArabicSub(s, subsourceKey, epInfo)))).filter(Boolean);
 
     const seenSig = new Set();
     const good = verified.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
