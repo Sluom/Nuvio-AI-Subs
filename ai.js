@@ -562,6 +562,11 @@ function zipNameHasEpisode(name, episode) {
   return new RegExp(`(?<![0-9])0*${Number(episode)}(?![0-9])`).test(clean);
 }
 
+const epInfoOf = id => {
+  const p = String(id || '').split(':');
+  return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
+};
+
 async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   const decodedUrl = safeDecode(subUrl);
   const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
@@ -1766,6 +1771,76 @@ function rebuildAss(parsed, texts) {
   return out.filter((_, i) => !drop.has(i)).join('\n');
 }
 
+function zipNameHasEpisode(name, episode) {
+  const base = String(name).split(/[\\/]/).pop();
+  const sxe = zipEpisodeOf(base);
+  if (sxe != null) return sxe === Number(episode);
+  const clean = base.replace(/(?:480|576|720|1080|2160)[pi]|[xh]\.?26[45]|\b(?:19|20)\d{2}\b/gi, ' ');
+  return new RegExp(`(?<![0-9])0*${Number(episode)}(?![0-9])`).test(clean);
+}
+
+const epInfoOf = id => {
+  const p = String(id || '').split(':');
+  return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
+};
+
+async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
+  const decodedUrl = safeDecode(subUrl);
+  const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
+  const hit = subTextCache.get(memKey);
+  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
+
+  const ssKey = String(subsourceKey || '').trim();
+  const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
+  const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
+  const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
+  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
+
+  let response = null;
+  let lastErr = null;
+  for (let i = 0; i < agents.length; i++) {
+    const ua = agents[i];
+    const headers = isOsOrg
+      ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
+      : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+    if (isSubdl) headers['Referer'] = 'https://subdl.com/';
+    if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
+    try {
+      response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      const st = e.response?.status || e.code || 'ERR';
+      console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
+      if (!(e.response?.status === 403 && i < agents.length - 1)) break;
+    }
+  }
+  if (!response) throw lastErr;
+
+  let buffer = Buffer.from(response.data);
+  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+    const zip = new AdmZip(buffer);
+    const cands = zip.getEntries().filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
+    let entry = cands[0];
+    if (epInfo && epInfo.episode != null) {
+      if (cands.length > 1) {
+        entry = cands.find(e => zipNameHasEpisode(e.entryName, epInfo.episode));
+        if (!entry) throw new Error(`الـ ZIP فيه ${cands.length} ملف ولا يوجد ملف للحلقة ${epInfo.episode}`);
+      } else if (entry && zipEpisodeOf(entry.entryName) != null && !zipNameHasEpisode(entry.entryName, epInfo.episode)) {
+        throw new Error(`ملف الـ ZIP (${entry.entryName}) ليس للحلقة ${epInfo.episode}`);
+      }
+    }
+    console.log(`[ZIP] ${cands.length} ملف | المختار: ${entry ? entry.entryName : 'لا شيء'}`);
+    if (entry) buffer = entry.getData();
+  }
+  const text = fixArabicEncoding(buffer).toString('utf-8');
+  subTextCache.set(memKey, { time: Date.now(), text });
+  if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
+  return text;
+}
+
 async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let castPromptBlock = '';
   const { imdbId, tvdbId } = parseExternalIds(targetId);
@@ -1806,7 +1881,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, extraKeys); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId)); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n", missing: 0, total: 0, failed: true };
@@ -1820,7 +1895,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
 
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, subUrl, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}|${subUrl}`, castPromptBlock);
 
   let srtOutput = '';
   let counter = 1;
@@ -1880,7 +1955,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, extraKeys); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId)); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي (ASS): ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`, missing: 0, total: 0, failed: true };
@@ -1897,7 +1972,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
 
   console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)}) | ملف ASS أصلي=${isRealAss}`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, subUrl, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, `${targetId}|${subUrl}`, castPromptBlock);
 
   if (isRealAss) {
     // الأسطر غير المترجمة (رسم / بدون حروف) أو التي بقيت بنصها الأصلي نعيدها حرفيًا كما في الأصل
