@@ -139,7 +139,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const settled = await Promise.allSettled([
         fetchOsLegacyArabic(imdbId, season, episode),
         fetchOsMirrorArabic(imdbId, season, episode, type),
-        getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'] }),
+        getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }),
         getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' })
     ]);
 
