@@ -616,9 +616,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
         }
 
-        const ssFirst = (a, b) => (/subsource/i.test(b.url) ? 1 : 0) - (/subsource/i.test(a.url) ? 1 : 0);
-        arabicSubs.srt.sort(ssFirst);
-        arabicSubs.ass.sort(ssFirst);
 
         const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
         console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
