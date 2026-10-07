@@ -12,6 +12,7 @@ const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
 const VERIFY_LIMIT = 12;
 const VERIFY_TIMEOUT_MS = 25000;
+const SOFT_DEADLINE_MS = 6000;
 const RESULT_TTL = 30 * 60 * 1000;
 const resultCache = new Map();
 
@@ -124,6 +125,23 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     }
 }
 
+async function verifyWithDeadline(list, subsourceKey, epInfo) {
+    const results = [];
+    await new Promise(resolve => {
+        if (!list.length) return resolve();
+        let left = list.length, late = false, done = false, timer;
+        const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
+        timer = setTimeout(() => { late = true; if (results.length) finish(); }, SOFT_DEADLINE_MS);
+        list.forEach(s => {
+            verifyArabicSub(s, subsourceKey, epInfo).then(r => {
+                if (r) results.push(r);
+                if (late && results.length) finish();
+            }).finally(() => { if (--left === 0) finish(); });
+        });
+    });
+    return [...results];
+}
+
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     console.log(`[جلب عربي] جاري البحث عن ترجمات عربية جاهزة للتصحيح للعمل: ${imdbId}...`);
 
@@ -162,15 +180,20 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         return true;
     });
 
-    const others = uniqueSubs.filter(s => s._source !== 'subsource').slice(0, 9);
-    const fromSubsource = uniqueSubs.filter(s => s._source === 'subsource').slice(0, 10);
-    const toVerify = [...others, ...fromSubsource];
+    const bySource = src => uniqueSubs.filter(s => s._source === src);
+    const toVerify = [
+        ...bySource('os_legacy').slice(0, 2),
+        ...bySource('os_mirror').slice(0, 2),
+        ...bySource('subdl').slice(0, 8),
+        ...bySource('subsource').slice(0, 8)
+    ];
 
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
-    const verified = (await Promise.all(toVerify.map(s => verifyArabicSub(s, subsourceKey, epInfo)))).filter(Boolean);
+    const verified = await verifyWithDeadline(toVerify, subsourceKey, epInfo);
 
     const seenSig = new Set();
     const good = verified.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
+    console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => `${s._source}/${s.format}`).join(' | '));
 
     const srtSubs = good.filter(s => s.format === 'srt');
     const assSubs = good.filter(s => s.format === 'ass');
