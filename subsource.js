@@ -44,7 +44,8 @@ function subsourceEpisodeOk(name, season, episode) {
   const se = n.match(/s(\d{1,2})[ ._-]*e(\d{1,3})/i);
   if (se) return Number(se[1]) === Number(season) && Number(se[2]) === ep;
 
-  const range = n.match(/(?:^|[^a-z0-9])(?:e|ep|episodes?)[ ._-]*0*(\d{1,3})\s*(?:-|~|to)\s*(?:e|ep)?[ ._-]*0*(\d{1,3})(?![0-9])/i);
+  const range = n.match(/(?:^|[^a-z0-9])(?:e|ep|episodes?)[ ._-]*0*(\d{1,3})\s*(?:-|~|to)\s*(?:e|ep)?[ ._-]*0*(\d{1,3})(?![0-9])/i)
+    || n.match(/(?<![a-z0-9])0*(\d{1,3})\s*(?:-|~)\s*0*(\d{1,3})(?![0-9a-z])/i);
   if (range) return ep >= Number(range[1]) && ep <= Number(range[2]);
 
   const e = n.match(/(?:^|[^a-z0-9])(?:e|ep|episode)[ ._-]*0*(\d{1,3})(?![0-9])/i);
@@ -53,7 +54,7 @@ function subsourceEpisodeOk(name, season, episode) {
   const seasons = [...n.matchAll(/\bs(\d{1,2})\b/gi)].map(m => Number(m[1]));
   if (seasons.length) return seasons.includes(Number(season));
 
-  return /complete|season|batch|pack/i.test(n);
+  return true;
 }
 
 function isHi(item, nameStr) {
@@ -76,6 +77,35 @@ function makeSub({ url, name, language, hi, route }) {
   };
 }
 
+async function getAllSubtitles(movieId, headers, language) {
+  const all = [];
+  const seenIds = new Set();
+  for (let page = 1; page <= 5; page++) {
+    let res;
+    try {
+      res = await axios.get(`${SUBSOURCE_BASE}/subtitles`, {
+        params: { movieId, language, page, limit: 100 }, headers, timeout: 10000
+      });
+    } catch (e) {
+      if (page > 1) break;
+      res = await axios.get(`${SUBSOURCE_BASE}/subtitles`, {
+        params: { movieId }, headers, timeout: 10000
+      });
+    }
+    const list = pickList(res.data);
+    const fresh = list.filter(x => {
+      const id = x.subtitleId ?? x.id;
+      if (id == null || seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    });
+    console.log(`[Subsource API] صفحة ${page}: ${list.length} نتيجة، الجديد ${fresh.length}`);
+    all.push(...fresh);
+    if (fresh.length === 0 || list.length < 20) break;
+  }
+  return all;
+}
+
 async function fetchApi({ key, imdbId, season, episode, isSeries, language }) {
   const headers = { 'X-API-Key': key, 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' };
 
@@ -93,11 +123,8 @@ async function fetchApi({ key, imdbId, season, episode, isSeries, language }) {
   const movieId = movie.movieId ?? movie.id;
   if (movieId == null) throw new Error(`لقيت العمل لكن بدون movieId (الحقول: ${Object.keys(movie).join(',')})`);
 
-  const subsRes = await axios.get(`${SUBSOURCE_BASE}/subtitles`, {
-    params: { movieId }, headers, timeout: 10000
-  });
+  const rawList = await getAllSubtitles(movieId, headers, language);
 
-  const rawList = pickList(subsRes.data);
   const pfx = (LANGS[language] || {}).prefix || String(language).slice(0, 2);
   const langList = rawList.filter(x => String(x.language || '').toLowerCase().startsWith(pfx));
   console.log(`[Subsource API] movieId=${movieId} | خام=${rawList.length} | باللغة=${langList.length} | أسماء: ` + langList.slice(0, 3).map(x => [].concat(x.releaseInfo || x.release_info || x.name || '').join(' ')).join(' | '));
