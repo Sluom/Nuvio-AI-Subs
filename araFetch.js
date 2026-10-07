@@ -1,3 +1,4 @@
+// araFetch.js
 const axios = require('axios');
 const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
@@ -10,7 +11,7 @@ const cleanPath = p => String(p).split('?')[0];
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
 const VERIFY_LIMIT = 12;
-const VERIFY_TIMEOUT_MS = 12000;
+const VERIFY_TIMEOUT_MS = 25000;
 const RESULT_TTL = 30 * 60 * 1000;
 const resultCache = new Map();
 
@@ -116,7 +117,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
             .update(cues.map(c => c.text).join('').replace(/[^\p{L}\p{N}]+/gu, ''))
             .digest('hex');
         const realFormat = /^\s*Dialogue:/im.test(text) ? 'ass' : 'srt';
-return { ...s, format: realFormat, _sig: sig };
+        return { ...s, format: realFormat, _sig: sig };
     } catch (e) {
         console.log(`[فحص عربي] ✗ ${s._source}: ${e.message} <- ${s.url}`);
         return null;
@@ -161,7 +162,10 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         return true;
     });
 
-    const toVerify = uniqueSubs.slice(0, VERIFY_LIMIT);
+    const others = uniqueSubs.filter(s => s._source !== 'subsource').slice(0, 9);
+    const fromSubsource = uniqueSubs.filter(s => s._source === 'subsource').slice(0, 10);
+    const toVerify = [...others, ...fromSubsource];
+
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
     const verified = (await Promise.all(toVerify.map(s => verifyArabicSub(s, subsourceKey, epInfo)))).filter(Boolean);
 
