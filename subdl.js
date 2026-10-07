@@ -1,3 +1,4 @@
+// subdl.js
 const axios = require('axios');
 
 const SUBDL_API = 'https://api.subdl.com/api/v1/subtitles';
@@ -6,17 +7,14 @@ const SUBDL_STREM = 'https://subdl.strem.top';
 const SUBDL_MIRROR = 'https://subdl-stremio.vercel.app';
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-// الطلب الأول بهوية متصفح، وإذا رجع 403 نعيد مرة وحدة بالهوية الثانية
 const USER_AGENTS = [BROWSER_UA, 'NuvioSubtitles v1.0.0'];
 
-// كود SubDL -> كود ISO3 اللي يستعمله باقي المشروع
 const SUBDL_LANGS = {
   EN: 'eng', JA: 'jpn', TR: 'tur', FA: 'per', RU: 'rus',
   KO: 'kor', FR: 'fre', ES: 'spa', HI: 'hin', PT: 'por',
   BR_PT: 'pob', ZH: 'chi', DE: 'ger', IT: 'ita', ID: 'ind',
   AR: 'ara'
 };
-// اللغات الأجنبية (مصدر الترجمة): كل شي ما عدا العربي
 const FOREIGN_LANGS = Object.keys(SUBDL_LANGS).filter(c => c !== 'AR');
 
 const NAME_TO_CODE = {
@@ -36,7 +34,6 @@ const ALIAS_TO_CODE = {
   ar: 'AR', ara: 'AR', ar_sa: 'AR'
 };
 
-// يقبل كود SubDL (EN) أو ISO2/ISO3 (en / eng) أو الاسم (english) ويرجع كود SubDL أو null
 function detectLang(raw) {
   const s = String(raw || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
   if (!s) return null;
@@ -102,8 +99,7 @@ async function getJson(url, timeout) {
   throw lastErr;
 }
 
-// ---------- المسار 1: API الرسمي (api.subdl.com) ----------
-async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted }) {
+async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted, includePacks }) {
   const baseParams = {
     imdb_id: imdbId,
     languages: wanted.join(','),
@@ -139,8 +135,11 @@ async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })
 
   const out = [];
   for (const s of [...normal, ...hiList]) {
-    if (!s || !s.url || s.full_season) continue;
-    if (isSeries && s.episode != null && Number(s.episode) !== Number(episode)) continue;
+    if (!s || !s.url) continue;
+    if (s.full_season) {
+      if (!includePacks) continue;
+      if (isSeries && s.season != null && Number(s.season) !== Number(season)) continue;
+    } else if (isSeries && s.episode != null && Number(s.episode) !== Number(episode)) continue;
     
     const langCode = detectLang(s.language) || detectLang(s.lang);
     if (!langCode || !wantedSet.has(langCode)) continue;
@@ -157,7 +156,6 @@ async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })
   return out;
 }
 
-// ---------- ردود Stremio (للمسارين 2 و 3) ----------
 function mapStremioList(list, route, wantedSet, fallbackLang) {
   const out = [];
   for (const item of Array.isArray(list) ? list : []) {
@@ -178,7 +176,6 @@ function mapStremioList(list, route, wantedSet, fallbackLang) {
   return out;
 }
 
-// ---------- المسار 2: subdl.strem.top (إضافة Stremio وسيطة، المفتاح داخل الرابط بترميز base64) ----------
 function stremConfig(key, langCode) {
   return Buffer.from(`${key}/${langCode}/hiInclude/`).toString('base64').replace(/=/g, '');
 }
@@ -190,7 +187,6 @@ async function fetchStremTop({ key, imdbId, season, episode, isSeries, langCode,
   return mapStremioList(data && data.subtitles, 'strem.top', wantedSet, langCode);
 }
 
-// ---------- المسار 3: مرآة vercel (بدون مفتاح) ----------
 async function fetchMirror({ imdbId, season, episode, isSeries, wanted, wantedSet }) {
   const mediaType = isSeries ? 'series' : 'movie';
   const targetId = isSeries ? `${imdbId}:${season}:${episode}` : imdbId;
@@ -198,9 +194,7 @@ async function fetchMirror({ imdbId, season, episode, isSeries, wanted, wantedSe
   return mapStremioList(data && data.subtitles, 'mirror', wantedSet, wanted.length === 1 ? wanted[0] : null);
 }
 
-// languages: مصفوفة أكواد SubDL. الافتراضي = اللغات الأجنبية (للترجمة). للعربي مرر ['AR'].
-// المفتاح يأتي فقط من إعدادات الإضافة (apiKey).
-async function getSubDL({ imdbId, season, episode, apiKey, languages }) {
+async function getSubDL({ imdbId, season, episode, apiKey, languages, includePacks }) {
   const key = String(apiKey || '').trim();
   if (!key) {
     console.log('[SubDL] لا يوجد مفتاح SubDL في إعدادات الإضافة، تخطيت SubDL.');
@@ -216,12 +210,11 @@ async function getSubDL({ imdbId, season, episode, apiKey, languages }) {
     .map(c => String(c).toUpperCase()).filter(c => SUBDL_LANGS[c]);
   if (!wanted.length) return [];
   const wantedSet = new Set(wanted);
-  // المسارات الوسيطة تقبل لغة وحدة: الإنجليزي أولاً، وإلا أول لغة مطلوبة
   const proxyLang = wanted.includes('EN') ? 'EN' : wanted[0];
   const tag = `${imdbId}${isSeries ? ` S${season}E${episode}` : ''} [${wanted.length === 1 ? wanted[0] : 'عدة لغات'}]`;
 
   const routes = [
-    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })],
+    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted, includePacks })],
     ['strem.top', () => fetchStremTop({ key, imdbId, season, episode, isSeries, langCode: proxyLang, wantedSet })]
   ];
   const settled = await Promise.allSettled(routes.map(([, fn]) => fn()));
