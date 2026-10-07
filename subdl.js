@@ -59,7 +59,7 @@ function looksHearingImpaired(item, langCode) {
 function guessFormat(item, url) {
   const t = [url, item.release_name, item.name, item.SubFileName, item.title]
     .filter(Boolean).join(' ').toLowerCase();
-  return (/\.(ass|ssa)(?:$|[?\s])/.test(t) || /\[(ass|ssa)\]/.test(t)) ? 'ass' : 'srt';
+  return (/\.(ass|ssa)(?:$|[?\s])/.test(t) || /\[(ass\vert{}ssa)\]/.test(t)) ? 'ass' : 'srt';
 }
 
 const cleanPath = p => String(p).split('?')[0];
@@ -113,6 +113,8 @@ async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })
   if (isSeries) {
     baseParams.season_number = String(season);
     baseParams.episode_number = String(episode);
+    baseParams.season = String(season);
+    baseParams.episode = String(episode);
   }
 
   const query = async extra => {
@@ -133,9 +135,13 @@ async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })
   const hiPaths = new Set(hiList.filter(s => s && s.url && s.hi === true).map(s => cleanPath(s.url)));
   const wantedSet = new Set(wanted);
 
+  console.log(`[SubDL API] عادي=${normal.length} HI=${hiList.length} | ` + normal.slice(0, 4).map(s => `S${s.season}E${s.episode} full=${s.full_season} ${s.release_name || s.name}`).join(' | '));
+
   const out = [];
   for (const s of [...normal, ...hiList]) {
     if (!s || !s.url || s.full_season) continue;
+    if (isSeries && s.episode != null && Number(s.episode) !== Number(episode)) continue;
+    
     const langCode = detectLang(s.language) || detectLang(s.lang);
     if (!langCode || !wantedSet.has(langCode)) continue;
     const path = cleanPath(s.url);
@@ -215,9 +221,7 @@ async function getSubDL({ imdbId, season, episode, apiKey, languages }) {
   const tag = `${imdbId}${isSeries ? ` S${season}E${episode}` : ''} [${wanted.length === 1 ? wanted[0] : 'عدة لغات'}]`;
 
   const routes = [
-    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })],
-    ['strem.top', () => fetchStremTop({ key, imdbId, season, episode, isSeries, langCode: proxyLang, wantedSet })],
-    ['mirror', () => fetchMirror({ imdbId, season, episode, isSeries, wanted, wantedSet })]
+    ['official', () => fetchOfficial({ key, imdbId, season, episode, isSeries, wanted })]
   ];
   const settled = await Promise.allSettled(routes.map(([, fn]) => fn()));
 
