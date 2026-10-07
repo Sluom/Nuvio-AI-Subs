@@ -542,7 +542,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.json(m);
 });
 
-const WANTED_TRACKS = 6;
+const WANTED_TRACKS = 4;
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
@@ -699,7 +699,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
 
         if (arabicSubs.ass.length > 0) {
-            const maxAraAss = Math.min(2, arabicSubs.ass.length);
+            const maxAraAss = Math.min(4, arabicSubs.ass.length);
             for (let i = 0; i < maxAraAss; i++) {
                 transSubs.push({
                     id: `nuvio-ara-ass-${i + 1}`,
@@ -723,7 +723,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
 
         if (assOnly.length > 0) {
-            const maxAss = Math.min(4, assOnly.length);
+            const maxAss = Math.min(2, assOnly.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
                     id: `nuvio-ai-ass-${i + 1}`,
