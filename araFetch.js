@@ -191,6 +191,10 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
     const verified = await verifyWithDeadline(toVerify, subsourceKey, epInfo);
 
+    const ASS_ORDER = { subdl: 0, subsource: 1, os_legacy: 2, os_mirror: 3 };
+    const assRank = s => (s.format === 'ass' ? (ASS_ORDER[s._source] ?? 9) : 0);
+    verified.sort((a, b) => assRank(a) - assRank(b));
+
     const seenSig = new Set();
     const good = verified.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
     console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => `${s._source}/${s.format}`).join(' | '));
