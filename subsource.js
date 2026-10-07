@@ -1,3 +1,4 @@
+// subsource.js
 const axios = require('axios');
 
 const SUBSOURCE_BASE = 'https://api.subsource.net/api/v1';
@@ -9,7 +10,7 @@ const LANGS = {
   english: { iso3: 'eng', prefix: 'en' }
 };
 
-const MAX_RESULTS = 30;
+const MAX_RESULTS = 60;
 
 const cleanPath = p => String(p).split('?')[0];
 const errText = e => `${e?.response?.status || e?.code || ''} ${e?.response?.data?.message || e?.message || ''}`.trim();
@@ -210,7 +211,9 @@ async function getSubSource({ imdbId, season, episode, apiKey, language = 'arabi
     })
     .slice(0, MAX_RESULTS);
 
-  unique.sort((a, b) => +a.hearingImpaired - +b.hearingImpaired);
+  const looksSrt = s => /netflix|webrip|web-dl|amzn|shahid/i.test(s.fileName || '');
+  unique.sort((a, b) => (+a.hearingImpaired - +b.hearingImpaired) || (+looksSrt(a) - +looksSrt(b)));
+  
   console.log(`[Subsource] المجموع بعد حذف المكرر: ${unique.length} ترجمة لـ ${tag}.`);
   return unique;
 }
