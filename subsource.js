@@ -39,11 +39,21 @@ function pickList(d) {
 
 function subsourceEpisodeOk(name, season, episode) {
   const n = String(name || '');
+  const ep = Number(episode);
+
   const se = n.match(/s(\d{1,2})[ ._-]*e(\d{1,3})/i);
-  if (se) return Number(se[1]) === Number(season) && Number(se[2]) === Number(episode);
+  if (se) return Number(se[1]) === Number(season) && Number(se[2]) === ep;
+
+  const range = n.match(/(?:^|[^a-z0-9])(?:e|ep|episodes?)[ ._-]*0*(\d{1,3})\s*(?:-|~|to)\s*(?:e|ep)?[ ._-]*0*(\d{1,3})(?![0-9])/i);
+  if (range) return ep >= Number(range[1]) && ep <= Number(range[2]);
+
   const e = n.match(/(?:^|[^a-z0-9])(?:e|ep|episode)[ ._-]*0*(\d{1,3})(?![0-9])/i);
-  if (e) return Number(e[1]) === Number(episode);
-  return false;
+  if (e) return ep === Number(e[1]);
+
+  const seasons = [...n.matchAll(/\bs(\d{1,2})\b/gi)].map(m => Number(m[1]));
+  if (seasons.length) return seasons.includes(Number(season));
+
+  return /complete|season|batch|pack/i.test(n);
 }
 
 function isHi(item, nameStr) {
