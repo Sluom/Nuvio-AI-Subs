@@ -548,9 +548,24 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 function safeDecode(u) { try { return decodeURIComponent(u); } catch (e) { return u; } }
 
-async function fetchAndExtractSub(subUrl, subsourceKey = '') {
+function zipEpisodeOf(name) {
+  const base = String(name).split(/[\\/]/).pop();
+  const m = base.match(/s(\d{1,2})[ ._-]*e(\d{1,4})/i);
+  return m ? Number(m[2]) : null;
+}
+
+function zipNameHasEpisode(name, episode) {
+  const base = String(name).split(/[\\/]/).pop();
+  const sxe = zipEpisodeOf(base);
+  if (sxe != null) return sxe === Number(episode);
+  const clean = base.replace(/(?:480|576|720|1080|2160)[pi]|[xh]\.?26[45]|\b(?:19|20)\d{2}\b/gi, ' ');
+  return new RegExp(`(?<![0-9])0*${Number(episode)}(?![0-9])`).test(clean);
+}
+
+async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   const decodedUrl = safeDecode(subUrl);
-  const hit = subTextCache.get(decodedUrl);
+  const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
+  const hit = subTextCache.get(memKey);
   if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
 
   const ssKey = String(subsourceKey || '').trim();
@@ -585,11 +600,21 @@ async function fetchAndExtractSub(subUrl, subsourceKey = '') {
   if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
     const zip = new AdmZip(buffer);
-    const entry = zip.getEntries().find(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
+    const cands = zip.getEntries().filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
+    let entry = cands[0];
+    if (epInfo && epInfo.episode != null) {
+      if (cands.length > 1) {
+        entry = cands.find(e => zipNameHasEpisode(e.entryName, epInfo.episode));
+        if (!entry) throw new Error(`الـ ZIP فيه ${cands.length} ملف ولا يوجد ملف للحلقة ${epInfo.episode}`);
+      } else if (entry && zipEpisodeOf(entry.entryName) != null && !zipNameHasEpisode(entry.entryName, epInfo.episode)) {
+        throw new Error(`ملف الـ ZIP (${entry.entryName}) ليس للحلقة ${epInfo.episode}`);
+      }
+    }
+    console.log(`[ZIP] ${cands.length} ملف | المختار: ${entry ? entry.entryName : 'لا شيء'}`);
     if (entry) buffer = entry.getData();
   }
   const text = fixArabicEncoding(buffer).toString('utf-8');
-  subTextCache.set(decodedUrl, { time: Date.now(), text });
+  subTextCache.set(memKey, { time: Date.now(), text });
   if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
   return text;
 }
@@ -1329,7 +1354,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
       const next = applyEvidence(base, ev, evStats);
       if (next !== base) coded.set(it.id, next);
     }
-  };
+  }
   const windowFor = (fromPos, toPos, askSet) => items.slice(fromPos, toPos).map(it => {
     const o = { ...it };
     const p = coded.get(it.id) || cache.get(it.id);
@@ -1781,7 +1806,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, extraKeys); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n", missing: 0, total: 0, failed: true };
@@ -1855,7 +1880,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   }
 
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, extraKeys); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي (ASS): ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.`, missing: 0, total: 0, failed: true };
