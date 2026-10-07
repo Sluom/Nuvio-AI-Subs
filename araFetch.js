@@ -115,7 +115,8 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
         const sig = crypto.createHash('md5')
             .update(cues.map(c => c.text).join('').replace(/[^\p{L}\p{N}]+/gu, ''))
             .digest('hex');
-        return { ...s, _sig: sig };
+        const realFormat = /^\s*Dialogue:/im.test(text) ? 'ass' : 'srt';
+return { ...s, format: realFormat, _sig: sig };
     } catch (e) {
         console.log(`[فحص عربي] ✗ ${s._source}: ${e.message} <- ${s.url}`);
         return null;
