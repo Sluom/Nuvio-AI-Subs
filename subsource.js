@@ -102,7 +102,7 @@ async function getAllSubtitles(movieId, headers, language) {
     });
     console.log(`[Subsource API] صفحة ${page}: ${list.length} نتيجة، الجديد ${fresh.length}`);
     all.push(...fresh);
-    if (fresh.length === 0 || list.length < 20) break;
+    if (fresh.length === 0 || list.length < 100) break;
   }
   return all;
 }
