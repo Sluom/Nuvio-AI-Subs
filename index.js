@@ -738,18 +738,28 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
 
         const streamRaw = configParam ? `/${configParam}/stream-raw.srt` : '/stream-raw.srt';
-        const SRC_NAMES = { subdl: 'SubDL', subsource: 'Subsource', os_mirror: 'OpenSubtitles', os_legacy: 'OpenSubtitles' };
-        (arabicSubs.ready || []).forEach((s, i) => {
-            const shortName = String(s.fileName || '').replace(/\s+/g, ' ').slice(0, 45);
-            transSubs.push({
-                id: `nuvio-ready-${i + 1}`,
+        const SRC_IDS = { subdl: 'subdl', subsource: 'subsource', os_mirror: 'opensubtitles', os_legacy: 'opensubtitles' };
+        const UNKNOWN_LABEL = 'unk';
+        const TOTAL_LIMIT = 150;
+
+        const counters = {};
+        const readySubs = (arabicSubs.ready || []).map(s => {
+            const fmt = s._fmt || UNKNOWN_LABEL;
+            const src = SRC_IDS[s._source] || s._source;
+            const key = `${fmt}-${src}`;
+            counters[key] = (counters[key] || 0) + 1;
+            const name = `nuvio-${fmt}-${src}-ara-${counters[key]}`;
+            return {
+                id: name,
                 url: `${baseUrl}${streamRaw}?url=${encodeURIComponent(s.url)}${extraParams}`,
                 lang: 'ara',
-                title: `Arabic ${i + 1} · ${SRC_NAMES[s._source] || s._source} · ${shortName}`
-            });
+                title: name
+            };
         });
 
-        return res.json({ subtitles: transSubs });
+        const room = Math.max(0, TOTAL_LIMIT - transSubs.length);
+        return res.json({ subtitles: [...readySubs.slice(0, room), ...transSubs] });
+
     } catch (err) {
         console.error(`[Subtitles Error] ${targetId} - ${err.message}`);
         return res.json({ subtitles: [] });
