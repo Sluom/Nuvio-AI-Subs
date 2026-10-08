@@ -326,7 +326,7 @@ function cleanCorrectorOutput(txt) {
   return polishArabicText(fixArabicTypos(t));
 }
 
-const TYPO_FIX_RAW = {"لى": "لي", "فى": "في", "الذى": "الذي", "التى": "التي", "لكى": "لكي", "معى": "معي", "بى": "بي", "نفسى": "نفسي", "رأيى": "رأيي", "رأسى": "رأسي", "انتى": "أنتِ", "حتي": "حتى", "باقى": "باقي", "ثوانى": "ثواني", "ماضى": "ماضي", "أصدقائى": "أصدقائي", "أبنائى": "أبنائي", "اخى": "أخي", "رئيسى": "رئيسي", "سيدى": "سيدي", "عزيزى": "عزيزي", "زوجتى": "زوجتي", "عائلتى": "عائلتي", "صديقى": "صديقي", "محامى": "محامي", "عالى": "عالي", "غالى": "غالي", "كرسى": "كرسي", "مبانى": "مباني", "اغانى": "أغاني", "ليالى": "ليالي", "حرامى": "حرامي", "عادى": "عادي", "قاضى": "قاضي", "فاضى": "فاضي", "اعطنى": "أعطني", "دعنى": "دعني", "ارنى": "أرني", "اخبرنى": "أخبرني", "صدقنى": "صدقني", "اسمعنى": "اسمعني", "سامحنى": "سامحني", "توقفى": "توقفي", "اذهبى": "اذهبي", "انظرى": "انظري", "ابتعدى": "ابتعدي", "اهربى": "اهربي", "مستشفي": "مستشفى", "فوضي": "فوضى", "اعمي": "أعمى", "سيدتى": "سيدتي", "امى": "أمي", "ابنتى": "ابنتي", "مقهي": "مقهى", "حوالى": "حوالي", "شخصى": "شخصي", "طبيعى": "طبيعي", "حقيقى": "حقيقي", "نهائى": "نهائي", "مبدئى": "مبدئي", "كافى": "كافي", "شكوي": "شكوى", "فتوي": "فتوى", "حلوي": "حلوى", "متي": "متى", "عسي": "عسى", "جدوي": "جدوى", "فحوي": "فحوى", "قصوي": "قصوى", "رؤي": "رؤى", "منتدي": "منتدى", "مسعي": "مسعى", "مغزي": "مغزى", "افعي": "أفعى", "مأوي": "مأوى", "مثوي": "مثوى", "مصطفي": "مصطفى", "مجتبي": "مجتبى", "مستلقي": "مستلقى", "مرتضي": "مرتضى", "اللة": "الله", "واللة": "والله", "لة": "له", "عنة": "عنه", "منة": "منه", "علية": "عليه", "إلية": "إليه", "فية": "فيه", "معة": "معه", "نفسة": "نفسه", "هذة": "هذه", "مفاجأه": "م مفاجأة", "دقيقه": "دقيقة", "حقيقه": "حقيقة", "طريقه": "طريقة", "فجأه": "فجأة", "عائله": "عائلة", "غرفه": "غرفة", "مشكله": "مشكلة", "فكره": "فكرة", "سياره": "سيارة", "قوه": "قوة", "لحظه": "لحظة", "مهمه": "مهمة", "فرصه": "فرصة", "رساله": "رسالة", "نهايه": "نهاية", "بدايه": "بداية", "جريمه": "جريمة", "امرأه": "امرأة", "طاقه": "طاقة", "علاقه": "علاقة", "معركه": "معركة", "رحله": "رحلة", "شجره": "شجرة", "لعبه": "لعبة", "فتره": "فترة", "ورقه": "ورقة", "شرطه": "شرطة", "خطوه": "خطوة", "حفله": "حفلة", "مكالمه": "مكالمة", "مدرسه": "مدرسة", "رؤيه": "رؤية", "رصاصه": "رصاصة", "قنبله": "قنبلة", "اسلحه": "أسلحة", "فرقه": "فرقة", "حقيبه": "حقيبة", "بصمه": "بصمة", "قهوه": "قهوة", "طاوله": "طاولة", "مسأله": "مسألة", "اسئله": "أسئلة", "رائعه": "رائعة", "سرعه": "سرعة", "نافذه": "نافذة", "شاشه": "شاشة", "فائده": "فائدة", "عاصفه": "عاصفة", "سفينه": "سفينة", "طائره": "طائرة", "سياده": "سيادة", "جلاله": "جلالة", "عمده": "عمدة", "محطه": "محطة", "شركه": "شركة", "ابوة": "أبوه", "اسمة": "اسمه", "مياة": "مياه", "وجة": "وجه", "اتجاة": "اتجاه", "انتباة": "انتباه", "شبة": "شبه", "سهوله": "سهولة", "صعوبه": "صعوبة", "مجموعه": "مجموعة", "مساحه": "مساحة", "عاهره": "عاهرة", "عصابه": "عصابة", "خزنه": "خزنة", "بوابه": "بوابة", "قمامه": "قمامة", "ادله": "أدلة", "مباشره": "مباشرة", "كامله": "كاملة", "جديده": "جديدة", "كبيره": "كبيرة", "صغيره": "صغيرة", "محكمه": "محكمة", "حكومه": "حكومة", "عقوبه": "عقوبة", "معجزه": "معجزة", "خريطه": "خريطة", "ثلاجه": "ثلاجة", "قائمه": "قائمة", "قضيه": "قضية", "ضحيه": "ضحية", "رهينه": "رهينة", "عشيقه": "عشيقة", "خطيئه": "خطيئه", "مستحيله": "مستحيلة", "غريبه": "غريبة", "مجنونه": "مجنونة", "مؤخره": "مؤخرة", "مقدمه": "مقدمة", "نتيجه": "نتيجة", "اجهزه": "أجهزة", "اسطوره": "أسطورة", "ثقه": "ثقة", "صدفه": "صدفة", "معامله": "معاملة", "مواجهه": "مواجهة", "سيطره": "سيطرة", "بيئه": "بيئة", "هيئه": "هيئة", "مائده": "مائدة", "بطاقه": "بطاقة", "طبيعه": "طبيعة", "فضيحه": "فضيحة", "مصلحه": "مصلحة", "اسطوانه": "أسطوانة", "استماره": "استمارة", "شريحه": "شريحة", "مكافأه": "مكافأة", "جرأه": "جرأة", "بأكملة": "بأكمله", "تجاة": "تجاه", "افواة": "أفواه", "اشباة": "أشباه", "دوله": "دولة", "مدينه": "مدينة", "اشاره": "إشارة", "قياده": "قيادة", "شهاده": "شهادة", "عقيده": "عقيدة", "جائزه": "جائزة", "سياسه": "سياسة", "شئ": "شيء", "شئيا": "شيئا", "سئ": "سيء", "مسئول": "مسؤول", "دايما": "دائما", "بطئ": "بطيء", "قرائة": "قراءة", "برائة": "براءة", "الأن": "الآن", "شئون": "شؤون", "كئوس": "كؤوس", "يقراء": "يقرأ", "مليئ": "مليء", "سيئه": "سيئة", "ذالك": "ذلك", "هاذا": "هذا", "لاكن": "لكن", "مالذي": "ما الذي", "مابك": "ما بك", "كفائة": "كفاءة", "مايحدث": "ما يحدث", "مابه": "ما به", "مابها": "ما بها", "ياأمي": "يا أمي", "ياأبي": "يا أبي", "ياأخي": "يا أخي", "ارجوك": "أرجوك", "يارجل": "يا رجل", "ياإلهي": "يا إلهي", "يارفاق": "يا رفاق", "ياشباب": "يا شباب", "لاشئ": "لا شيء", "ياسيدي": "يا سيدي", "ياصديقي": "يا صديقي", "هاكذا": "هكذا", "لااحد": "لا أحد", "يافتاة": "يا فتاة", "بالتاكيد": "بالتأكيد", "لابأس": "لا بأس", "لايمكن": "لا يمكن", "لااعرف": "لا أعرف", "لااعلم": "لا أعلم", "ماالامر": "ما الأمر", "ماالخطب": "ما الخطب", "ايها": "أيها", "ايتها": "أيتها", "كلشئ": "كل شيء", "ايشئ": "أي شيء", "ياولدي": "يا ولدي", "يابني": "يا بني", "طاريء": "طارئ", "هاديء": "هادئ", "مفاجيء": "م مفاجئ", "دافيء": "دافئ", "مباديء": "مبادئ", "لاداعي": "لا داعي", "لامشكلة": "لا مشكلة", "مالعمل": "ما العمل", "ماالمشكلة": "ما المشكلة", "خاطيء": "خاطئ", "مخطيء": "مخطئ", "قاريء": "قارئ", "رجائا": "رجاء", "مسائا": "مساء", "هاؤلاء": "هؤلاء", "اولائك": "أولئك", "بالظبط": "بالضبط", "انشاءالله": "إن شاء الله", "بماان": "بما أن", "كيفحالك": "كيف حالك", "بخيرشكرا": "بخير شكرا"};
+const TYPO_FIX_RAW = {"لى": "لي", "فى": "في", "الذى": "الذي", "التى": "التي", "لكى": "لكي", "معى": "معي", "بى": "بي", "نفسى": "نفسي", "رأيى": "رأيي", "رأسى": "رأسي", "انتى": "أنتِ", "حتي": "حتى", "باقى": "باقي", "ثوانى": "ثواني", "ماضى": "ماضي", "أصدقائى": "أصدقائي", "أبنائى": "أبنائي", "اخى": "أخي", "رئيسى": "رئيسي", "سيدى": "سيدي", "عزيزى": "عزيزي", "زوجتى": "زوجتي", "عائلتى": "عائلتي", "صديقى": "صديقي", "محامى": "محامي", "عالى": "عالي", "غالى": "غالي", "كرسى": "كرسي", "مبانى": "مباني", "اغانى": "أغاني", "ليالى": "ليالي", "حرامى": "حرامي", "عادى": "عادي", "قاضى": "قاضي", "فاضى": "فاضي", "اعطنى": "أعطني", "دعنى": "دعني", "ارنى": "أرني", "اخبرنى": "أخبرني", "صدقنى": "صدقني", "اسمعنى": "اسمعني", "سامحنى": "سامحني", "توقفى": "توقفي", "اذهبى": "اذهبي", "انظرى": "انظري", "ابتعدى": "ابتعدي", "اهربى": "اهربي", "مستشفي": "مستشفى", "فوضي": "فوضى", "اعمي": "أعمى", "سيدتى": "سيدتي", "امى": "أمي", "ابنتى": "ابنتي", "مقهي": "مقهى", "حوالى": "حوالي", "شخصى": "شخصي", "طبيعى": "طبيعي", "حقيقى": "حقيقي", "نهائى": "نهائي", "مبدئى": "مبدئي", "كافى": "كافي", "شكوي": "شكوى", "فتوي": "فتوى", "حلوي": "حلوى", "متي": "متى", "عسي": "عسى", "جدوي": "جدوى", "فحوي": "فحوى", "قصوي": "قصوى", "رؤي": "رؤى", "منتدي": "منتدى", "مسعي": "مسعى", "مغزي": "مغزى", "افعي": "أفعى", "مأوي": "مأوى", "مثوي": "مثوى", "مصطفي": "مصطفى", "مجتبي": "مجتبى", "مستلقي": "مستلقى", "مرتضي": "مرتضى", "اللة": "الله", "واللة": "والله", "لة": "له", "عنة": "عنه", "منة": "منه", "علية": "عليه", "إلية": "إليه", "فية": "فيه", "معة": "معه", "نفسة": "نفسه", "هذة": "هذه", "مفاجأه": "مفاجأة", "دقيقه": "دقيقة", "حقيقه": "حقيقة", "طريقه": "طريقة", "فجأه": "فجأة", "عائله": "عائلة", "غرفه": "غرفة", "مشكله": "مشكلة", "فكره": "فكرة", "سياره": "سيارة", "قوه": "قوة", "لحظه": "لحظة", "مهمه": "مهمة", "فرصه": "فرصة", "رساله": "رسالة", "نهايه": "نهاية", "بدايه": "بداية", "جريمه": "جريمة", "امرأه": "امرأة", "طاقه": "طاقة", "علاقه": "علاقة", "معركه": "معركة", "رحله": "رحلة", "شجره": "شجرة", "لعبه": "لعبة", "فتره": "فترة", "ورقه": "ورقة", "شرطه": "شرطة", "خطوه": "خطوة", "حفله": "حفلة", "مكالمه": "مكالمة", "مدرسه": "مدرسة", "رؤيه": "رؤية", "رصاصه": "رصاصة", "قنبله": "قنبلة", "اسلحه": "أسلحة", "فرقه": "فرقة", "حقيبه": "حقيبة", "بصمه": "بصمة", "قهوه": "قهوة", "طاوله": "طاولة", "مسأله": "مسألة", "اسئله": "أسئلة", "رائعه": "رائعة", "سرعه": "سرعة", "نافذه": "نافذة", "شاشه": "شاشة", "فائده": "فائدة", "عاصفه": "عاصفة", "سفينه": "سفينة", "طائره": "طائرة", "سياده": "سيادة", "جلاله": "جلالة", "عمده": "عمدة", "محطه": "محطة", "شركه": "شركة", "ابوة": "أبوه", "اسمة": "اسمه", "مياة": "مياه", "وجة": "وجه", "اتجاة": "اتجاه", "انتباة": "انتباه", "شبة": "شبه", "سهوله": "سهولة", "صعوبه": "صعوبة", "مجموعه": "مجموعة", "مساحه": "مساحة", "عاهره": "عاهرة", "عصابه": "عصابة", "خزنه": "خزنة", "بوابه": "بوابة", "قمامه": "قمامة", "ادله": "أدلة", "مباشره": "مباشرة", "كامله": "كاملة", "جديده": "جديدة", "كبيره": "كبيرة", "صغيره": "صغيرة", "محكمه": "محكمة", "حكومه": "حكومة", "عقوبه": "عقوبة", "معجزه": "معجزة", "خريطه": "خريطة", "ثلاجه": "ثلاجة", "قائمه": "قائمة", "قضيه": "قضية", "ضحيه": "ضحية", "رهينه": "رهينة", "عشيقه": "عشيقة", "خطيئه": "خطيئه", "مستحيله": "مستحيلة", "غريبه": "غريبة", "مجنونه": "مجنونة", "مؤخره": "مؤخرة", "مقدمه": "مقدمة", "نتيجه": "نتيجة", "اجهزه": "أجهزة", "اسطوره": "أسطورة", "ثقه": "ثقة", "صدفه": "صدفة", "معامله": "معاملة", "مواجهه": "مواجهة", "سيطره": "سيطرة", "بيئه": "بيئة", "هيئه": "هيئة", "مائده": "مائدة", "بطاقه": "بطاقة", "طبيعه": "طبيعة", "فضيحه": "فضيحة", "مصلحه": "مصلحة", "اسطوانه": "أسطوانة", "استماره": "استمارة", "شريحه": "شريحة", "مكافأه": "مكافأة", "جرأه": "جرأة", "بأكملة": "بأكمله", "تجاة": "تجاه", "افواة": "أفواه", "اشباة": "أشباه", "دوله": "دولة", "مدينه": "مدينة", "اشاره": "إشارة", "قياده": "قيادة", "شهاده": "شهادة", "عقيده": "عقيدة", "جائزه": "جائزة", "سياسه": "سياسة", "شئ": "شيء", "شئيا": "شيئا", "سئ": "سيء", "مسئول": "مسؤول", "دايما": "دائما", "بطئ": "بطيء", "قرائة": "قراءة", "برائة": "براءة", "الأن": "الآن", "شئون": "شؤون", "كئوس": "كؤوس", "يقراء": "يقرأ", "مليئ": "مليء", "سيئه": "سيئة", "ذالك": "ذلك", "هاذا": "هذا", "لاكن": "لكن", "مالذي": "ما الذي", "مابك": "ما بك", "كفائة": "كفاءة", "مايحدث": "ما يحدث", "مابه": "ما به", "مابها": "ما بها", "ياأمي": "يا أمي", "ياأبي": "يا أبي", "ياأخي": "يا أخي", "ارجوك": "أرجوك", "يارجل": "يا رجل", "ياإلهي": "يا إلهي", "يارفاق": "يا رفاق", "ياشباب": "يا شباب", "لاشئ": "لا شيء", "ياسيدي": "يا سيدي", "ياصديقي": "يا صديقي", "هاكذا": "هكذا", "لااحد": "لا أحد", "يافتاة": "يا فتاة", "بالتاكيد": "بالتأكيد", "لابأس": "لا بأس", "لايمكن": "لا يمكن", "لااعرف": "لا أعرف", "لااعلم": "لا أعلم", "ماالامر": "ما الأمر", "ماالخطب": "ما الخطب", "ايها": "أيها", "ايتها": "أيتها", "كلشئ": "كل شيء", "ايشئ": "أي شيء", "ياولدي": "يا ولدي", "يابني": "يا بني", "طاريء": "طارئ", "هاديء": "هادئ", "مفاجيء": "م مفاجئ", "دافيء": "دافئ", "مباديء": "مبادئ", "لاداعي": "لا داعي", "لامشكلة": "لا مشكلة", "مالعمل": "ما العمل", "ماالمشكلة": "ما المشكلة", "خاطيء": "خاطئ", "مخطيء": "مخطئ", "قاريء": "قارئ", "رجائا": "رجاء", "مسائا": "مساء", "هاؤلاء": "هؤلاء", "اولائك": "أولئك", "بالظبط": "بالضبط", "انشاءالله": "إن شاء الله", "بماان": "بما أن", "كيفحالك": "كيف حالك", "بخيرشكرا": "بخير شكرا"};
 const TYPO_ALL = new Map(Object.entries(TYPO_FIX_RAW));
 const TYPO_SAFE = new Map([...TYPO_ALL].filter(([k]) => k.length >= 5 || k.startsWith('ال')));
 const TYPO_PREFIX = new Set(['و', 'ف', 'ب', 'ل', 'ك']);
@@ -400,37 +400,15 @@ function flipEllipsisText(text) {
     .join('');
 }
 
-// ---------- جدولة المصحح: طابور أسطر + بداية بطيئة + تنصيف عند الفشل ----------
-const SCHED_START_WORKERS = 5;      // عدد الطلبات المتزامنة عند البداية
-const SCHED_RAMP_STEP = 4;          // كم عاملًا نضيف كل ثانية هادئة
-const SCHED_RAMP_EVERY_MS = 1000;
-const SCHED_QUIET_MS = 3000;        // ثواني هدوء بعد آخر خطأ قبل الزيادة
-const SCHED_MIN_WORKERS = 3;        // أدنى توازي بعد الخنق
-const SCHED_BATCH_MIN = 60;
-const SCHED_BATCH_MAX = 120;
-const SCHED_REJECT_BATCH = 30;      // حجم دفعة إعادة الأسطر المرفوضة
-const SCHED_MAX_TRIES = 3;          // محاولات السطر المفرد قبل أن يبقى أصليًا
-const SCHED_MAX_REJECTS = 2;        // مرات الرفض قبل أن يبقى السطر أصليًا
-const SCHED_MAX_STALL = 15;         // أقصى أخطاء ضغط متتالية بلا أي نجاح
-const SCHED_REQUEST_TIMEOUT_MS = 60000;
+async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
+  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
 
-let correctorThinkingBroken = false;
-
-function isGemini3Id(m) {
-  const id = String(m || '').toLowerCase();
-  return id.startsWith('gemini-3') || id === 'gemini-flash-latest' || id === 'gemini-flash-lite-latest' || id === 'gemini-pro-latest';
-}
-
-function buildCorrectorPrompt(items, ctx, strict) {
   const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
-  const strictBlock = strict
-    ? '\nCRITICAL: An earlier attempt changed some words or the line structure and was rejected. Copy every word EXACTLY as given, keep the same number of lines and the same \\N markers, and change nothing except punctuation marks, quotation marks and parentheses.\n'
-    : '';
-
-  return `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
+  const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
 Most punctuation of every entry was REMOVED on purpose. What was kept: the speaker dashes "-", the line-break markers \\N, any "...", and any "?", "!", "؟" or ":" that stands at the very end of a line.
 Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
 
@@ -449,27 +427,16 @@ Rules:
 
 EXAMPLES:
 Input: [{"id": 1, "text": "رايت سارة في طوكيو ناكل السوشي"}, {"id": 2, "text": "هل اخبرت جون عن شركة ابل"}]
-Output: [{"id": 1, "text": "رأيت \\"سارة\\" في (طوكيو) نأكل (السوشي)."}, {"id": 2, "text": "هل أخبرت \\"جون\\" عن شركة (أبل)؟"}]
-${strictBlock}
+Output: [{"id": 1, "text": "رأيت \"سارة\" في (طوكيو) نأكل (السوشي)."}, {"id": 2, "text": "هل أخبرت \"جون\" عن شركة (أبل)؟"}]
+
 ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
-}
 
-// محاولة واحدة فقط. القرار (إعادة / تنصيف / تراجع) للجدولة وليس هنا.
-// الحالات: ok | rate (429) | overload (5xx) | timeout | bad_format | bad_ids | bad_request | cooling | no_keys
-async function correctChunkOnce(items, keysArray, modelName, ctx = null, strict = false) {
-  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  const prompt = buildCorrectorPrompt(items, ctx, strict);
-  const allowedIds = new Set(items.map(i => i.id));
 
-  for (let guard = 0; guard < 4; guard++) {
-    const generationConfig = { temperature: 0.1, responseMimeType: 'application/json' };
-    if (isGemini3Id(cleanModel) && !correctorThinkingBroken) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
-
-    if (aliveKeyCount(keysArray) === 0) return { status: 'no_keys', map: new Map() };
-    const activeKey = await acquireKey(keysArray, 8000);
-    if (!activeKey) return { status: 'cooling', map: new Map() };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const activeKey = await acquireKey(keysArray);
+    if (!activeKey) return { status: 'no_keys', map: new Map() };
 
     const cleanKey = String(activeKey).trim();
     const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
@@ -481,29 +448,28 @@ async function correctChunkOnce(items, keysArray, modelName, ctx = null, strict 
         safetySettings: SAFETY_SETTINGS_OFF
       }, {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey, 'x-goog-api-client': GEMINI_CLIENT_HEADER },
-        timeout: SCHED_REQUEST_TIMEOUT_MS,
+        timeout: 60000,
         httpAgent, httpsAgent,
         maxContentLength: MAX_AI_RESPONSE_BYTES
       });
 
-      const cand = r.data?.candidates?.[0];
-      const responseText = (cand?.content?.parts || []).map(p => p?.text || '').join('');
+      const parts = r.data?.candidates?.[0]?.content?.parts || [];
+      const responseText = parts.map(p => p?.text || '').join('');
       const map = parseIdTranslations(responseText);
 
-      if (!map) {
-        const head = String(responseText || '').replace(/\s+/g, ' ').slice(0, 80);
-        console.log(`[مصحح] رد غير صالح لدفعة ${items.length} (finish=${cand?.finishReason || '-'} block=${r.data?.promptFeedback?.blockReason || '-'}) "${head}"`);
-        return { status: 'bad_format', map: new Map() };
+      if (map) {
+        const allowedIds = new Set(items.map(i => i.id));
+        let extraIds = 0;
+        for (const id of map.keys()) if (!allowedIds.has(id)) extraIds++;
+        if (extraIds > Math.max(3, Math.floor(items.length * 0.02))) {
+          console.log(`[حارس الأرقام - مصحح] الرد فيه ${extraIds} رقم ما طلبته. أرفضه.`);
+          return { status: 'bad_ids', map: new Map() };
+        }
+        if (items.length >= 40) console.log(`[مصحح عربي - Success] طلب ${items.length} سطر، رجع ${map.size} عبر ...${cleanKey.slice(-4)}`);
+        return { status: 'ok', map };
       }
 
-      let extraIds = 0;
-      for (const id of map.keys()) if (!allowedIds.has(id)) extraIds++;
-      if (extraIds > Math.max(3, Math.floor(items.length * 0.02))) {
-        console.log(`[حارس الأرقام - مصحح] الرد فيه ${extraIds} رقم ما طلبته (من ${items.length}). أرفضه.`);
-        return { status: 'bad_ids', map: new Map() };
-      }
-      return { status: 'ok', map, truncated: cand?.finishReason === 'MAX_TOKENS' };
-
+      return { status: 'bad_format', map: new Map() };
     } catch (e) {
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
@@ -511,26 +477,56 @@ async function correctChunkOnce(items, keysArray, modelName, ctx = null, strict 
         console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status})`);
         continue;
       }
-      const msg = String(e.response?.data?.error?.message || '').toLowerCase();
-      if (status === 400 && /thinking|thought/.test(msg) && !correctorThinkingBroken) {
-        correctorThinkingBroken = true;
-        console.log('[مصحح] الموديل لا يدعم thinkingConfig، أكمل بدونه.');
-        continue;
-      }
-      if (status !== 400) {
-        const cd = cooldownForStatus(status);
-        keyCooldowns.set(activeKey, Date.now() + cd);
-        console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status})`);
-      } else {
-        console.log(`[مصحح] 400 لدفعة ${items.length}: ${msg.slice(0, 100)}`);
-      }
-      if (status === 429) return { status: 'rate', map: new Map() };
-      if (status >= 500) return { status: 'overload', map: new Map() };
-      if (status === 0) return { status: 'timeout', map: new Map() };
-      return { status: 'bad_request', map: new Map() };
+      const cd = cooldownForStatus(status);
+      keyCooldowns.set(activeKey, Date.now() + cd);
+      console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
-  return { status: 'bad_request', map: new Map() };
+  return { status: 'api_exhausted', map: new Map() };
+}
+
+async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null) {
+  const done = new Map();
+  if (!items || items.length === 0) return done;
+
+  let pending = items;
+
+  for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
+    const result = await correctChunkStrict(pending, keysArray, modelName, ctx);
+
+    if (result.status === 'api_exhausted' || result.status === 'no_keys') {
+      console.log(`[تجاوز طارئ - مصحح] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على التزامن.`);
+      break;
+    }
+
+    if ((result.status === 'bad_ids' || result.status === 'bad_format') && pending.length > 60) {
+      const mid = Math.ceil(pending.length / 2);
+      console.log(`[حارس الأرقام - مصحح] أقسم الدفعة (${pending.length}) لنصفين وأعيد.`);
+      const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx);
+      const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx);
+      for (const [id, text] of left) done.set(id, text);
+      for (const [id, text] of right) done.set(id, text);
+      pending = pending.filter(it => !done.has(it.id));
+      break;
+    }
+
+    if (result.status === 'ok') {
+      const wanted = new Set(pending.map(it => it.id));
+      for (const [id, text] of result.map) {
+        if (wanted.has(id) && text) done.set(id, text);
+      }
+    }
+
+    const before = pending.length;
+    pending = pending.filter(it => !done.has(it.id));
+
+    if (pending.length > 0 && round < MAX_MISSING_RETRIES) {
+      console.log(`[إعادة الناقص - مصحح 🔁] ناقص ${pending.length} من ${before}. أعيد طلبهم فقط...`);
+    }
+  }
+
+  return done;
 }
 
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
@@ -543,6 +539,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
   }
 
+  const CHUNK = CORRECTOR_CHUNK;
   const lineCacheKey = 'ARB4_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
@@ -565,129 +562,66 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
 
-  // ---------- قبول / حفظ ----------
-  const rej = { words: 0, shape: 0, tags: 0 };
-  let rejectedFinal = 0, requests = 0, requeued = 0, gaveUp = 0;
+  let rejected = 0;
   const dirty = [];
+  const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
 
-  // يرجع النص النظيف أو null إذا رفضه الحارس
-  const accept = (id, text) => {
+  const applyLine = (id, text) => {
     const orig = cues[id].text;
-    if (!sameWords(orig, text)) { rej.words++; return null; }
-    if (shapeOf(text) !== shapeOf(sentText.get(id) || orig)) { rej.shape++; return null; }
-    const withTags = restoreTags(orig, text);
-    if (withTags == null) { rej.tags++; return null; }
-    return cleanCorrectorOutput(withTags) || null;
+    let src = text;
+    if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
+      rejected++; src = orig;
+    } else {
+      // الموديل لم يرَ الوسوم؛ نعيدها من السطر الأصلي، وإن تعذّر يبقى السطر الأصلي
+      const withTags = restoreTags(orig, text);
+      if (withTags == null) { rejected++; src = orig; } else src = withTags;
+    }
+    const clean = cleanCorrectorOutput(src) || cleanCorrectorOutput(orig);
+    results[id] = clean;
+    cache.set(id, clean);
+    dirty.push([id, clean]);
   };
-  const commit = (id, clean) => { results[id] = clean; cache.set(id, clean); dirty.push([id, clean]); };
-  const keepOriginal = id => { rejectedFinal++; commit(id, cleanCorrectorOutput(cues[id].text)); };
+
   const persistDirty = () => {
     if (dirty.length === 0) return;
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
 
-  // ---------- الجدولة ----------
-  const CAP = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
-  const batchSize = Math.min(SCHED_BATCH_MAX, Math.max(SCHED_BATCH_MIN, Math.ceil(toDo.length / CAP)));
-  const queue = toDo.map(it => ({ it, tries: 0, rej: 0, cap: Infinity }));
-  const sched = { limit: Math.min(SCHED_START_WORKERS, CAP), pauseUntil: 0, lastErr: 0, stall: 0, dead: false };
+  // تقسيم المهام لدفعات
+  let pendingChunks = [];
+  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
 
-  const pressure = () => {
-    sched.lastErr = Date.now();
-    sched.limit = Math.min(CAP, Math.max(SCHED_MIN_WORKERS, Math.floor(sched.limit * 0.7)));
-    sched.pauseUntil = Math.max(sched.pauseUntil, Date.now() + 3000 + Math.random() * 2000);
-  };
+  async function worker() {
+    while (pendingChunks.length > 0) {
+      if (keysArray.every(k => deadKeys.has(k))) return;
+      
+      const chunk = pendingChunks.shift();
+      if (!chunk) break;
 
-  async function worker(n) {
-    while (queue.length > 0 && !sched.dead) {
-      const now = Date.now();
-      if (now < sched.pauseUntil) { await delay(sched.pauseUntil - now); continue; }
-      if (n >= sched.limit) { await delay(250); continue; }
-
-      // حجم الدفعة: الأصغر بين الحجم العام وسقف أي سطر فيها (الأسطر المنصَّفة تبقى صغيرة)
-      let size = Math.min(batchSize, queue.length);
-      for (let i = 0; i < size; i++) size = Math.min(size, Math.max(1, queue[i].cap));
-      const batch = queue.splice(0, size).sort((a, b) => a.it.id - b.it.id);
-      const items = batch.map(b => b.it);
-
-      // سياق القراءة فقط يُرسل فقط إذا كانت الأسطر متقاربة
-      let ctx = null;
-      if (items[items.length - 1].id - items[0].id + 1 <= items.length * 2) {
-        const c0 = buildChunkContext(cues, items);
-        ctx = { before: c0.before.map(prepareForModel).filter(Boolean), after: c0.after.map(prepareForModel).filter(Boolean) };
-      }
-
-      requests++;
-      let r;
       try {
-        r = await correctChunkOnce(items, keysArray, modelName, ctx, batch.some(b => b.rej > 0));
+        const ctx0 = buildChunkContext(cues, chunk);
+        const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
+        
+        // الاعتماد المباشر على دالة الاسترداد لمعالجة الدفعة والنواقص سويةً
+        const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
+        
+        for (const it of chunk) {
+          const text = map.get(it.id);
+          if (text) applyLine(it.id, text);
+        }
+        persistDirty();
       } catch (e) {
-        console.log(`[مصحح] خطأ غير متوقع: ${e && e.message}`);
-        r = { status: 'bad_request', map: new Map() };
+        console.log(`[مصحح] خطأ بمهمة: ${e && e.message}`);
       }
-
-      if (r.status === 'no_keys') { sched.dead = true; queue.unshift(...batch); break; }
-      if (r.status === 'cooling') { queue.unshift(...batch); await delay(1000); continue; }
-
-      const isPressure = r.status === 'rate' || r.status === 'overload';
-      if (r.status === 'ok') sched.stall = 0;
-      if (isPressure) {
-        pressure();
-        if (++sched.stall > SCHED_MAX_STALL) {
-          console.log(`[مصحح] ${SCHED_MAX_STALL} خطأ ضغط متتالي بلا نجاح. أتوقف وأترك الباقي بنصه الأصلي.`);
-          sched.dead = true;
-          queue.unshift(...batch);
-          break;
-        }
-      } else if (r.status === 'timeout') {
-        sched.lastErr = Date.now();
-      }
-
-      const batchFailed = r.status !== 'ok' || r.truncated;
-      const back = [];
-      for (const b of batch) {
-        const id = b.it.id;
-        const text = r.status === 'ok' ? r.map.get(id) : null;
-
-        if (text) {
-          const clean = accept(id, text);
-          if (clean) { commit(id, clean); continue; }
-          if (++b.rej >= SCHED_MAX_REJECTS) { keepOriginal(id); continue; }
-          b.cap = Math.min(b.cap, SCHED_REJECT_BATCH);   // إعادة بدفعة صغيرة وتحذير صارم
-          back.push(b);
-          continue;
-        }
-
-        // لم يرجع نص لهذا السطر
-        if (isPressure) { back.push(b); continue; }                 // الضغط ليس ذنب السطر
-        if (batchFailed && batch.length > 1) {                       // دفعة فاشلة: نصّفها لنعزل السطر المسموم
-          b.cap = Math.max(1, Math.floor(batch.length / 2));
-          back.push(b);
-          continue;
-        }
-        if (++b.tries >= SCHED_MAX_TRIES) { gaveUp++; continue; }   // يبقى أصليًا
-        back.push(b);
-      }
-
-      if (back.length) { requeued += back.length; queue.unshift(...back); }
-      persistDirty();
     }
   }
 
-  const ramp = setInterval(() => {
-    const t = Date.now();
-    if (t - sched.lastErr > SCHED_QUIET_MS && t >= sched.pauseUntil) sched.limit = Math.min(CAP, sched.limit + SCHED_RAMP_STEP);
-  }, SCHED_RAMP_EVERY_MS);
+  // تشغيل العاملين بالتوازي
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
-  try {
-    await Promise.all(Array.from({ length: CAP }, (_, n) => worker(n)));
-  } finally {
-    clearInterval(ramp);
-    persistDirty();
-  }
-
-  const missing = toDo.filter(it => results[it.id] == null).length;
-  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | طلبات=${requests} | إعادة=${requeued} | رفض أولي=${rej.words + rej.shape + rej.tags} (كلمات ${rej.words}، شكل ${rej.shape}، وسوم ${rej.tags}) | رفض نهائي=${rejectedFinal} | تخلٍّ=${gaveUp} | نواقص=${missing} | عمال=${CAP} | دفعة=${batchSize} | الزمن الكلي=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
+  const unprocessed = toDo.filter(it => results[it.id] == null);
+  const missing = unprocessed.length;
+  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
 
   // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف
   const finalTexts = cues.map((c, i) =>
