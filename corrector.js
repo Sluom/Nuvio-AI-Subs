@@ -522,7 +522,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
     pending = pending.filter(it => !done.has(it.id));
 
     if (pending.length > 0 && round < MAX_MISSING_RETRIES) {
-      console.log(`[إعادة الناقص - مصحح 🔁] ناقص ${pending.length} من ${before}. أعيد طلبهم...`);
+      console.log(`[إعادة الناقص - مصحح 🔁] ناقص ${pending.length} من ${before}. أعيد طلبهم فقط...`);
     }
   }
 
@@ -540,9 +540,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
 
   const CHUNK = CORRECTOR_CHUNK;
-  const RETRY_PIECE = 100;
-  const MAX_TRIES = 5;
-  const MAX_RL = 12;
   const lineCacheKey = 'ARB4_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
@@ -565,60 +562,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
 
-  const queue = [];
-  for (let i = 0; i < toDo.length; i += CHUNK) queue.push({ items: toDo.slice(i, i + CHUNK), tries: 0, rl: 0 });
-
-  let inFlight = 0, requeued = 0, rejected = 0, pauseUntil = 0;
-  const rawOut = new Map();
+  let rejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
 
-  let retryPool = [];
-  let retryTimer = null;
-
-  const flushRetryPool = (force = false) => {
-    if (retryPool.length === 0) return;
-    
-    if (!force && retryPool.length < RETRY_PIECE) {
-      if (!retryTimer) {
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          console.log(`[مسار الاسترداد ⏳] انتهاء مؤقت التجميع (2s). جاري سحب الأسطر.`);
-          flushRetryPool(true);
-        }, 2000);
-      }
-      return;
-    }
-
-    const chunkItems = retryPool.splice(0, RETRY_PIECE);
-    const maxTries = Math.max(...chunkItems.map(x => x._tries));
-    const maxRl = Math.max(...chunkItems.map(x => x._rl));
-    
-    const cleanItems = chunkItems.map(x => {
-      const { _tries, _rl, ...rest } = x;
-      return rest;
-    });
-
-    queue.unshift({ items: cleanItems, tries: maxTries, rl: maxRl });
-    console.log(`[مسار الاسترداد 🚀] تجميع ${cleanItems.length} سطر ودفعها للمعالجة الفورية.`);
-    
-    if (retryPool.length === 0) {
-      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-    } else if (retryPool.length >= RETRY_PIECE) {
-      flushRetryPool();
-    } else {
-      if (!retryTimer) {
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          console.log(`[مسار الاسترداد ⏳] انتهاء المؤقت للدفعة المتبقية بالحوض.`);
-          flushRetryPool(true);
-        }, 2000);
-      }
-    }
-  };
-
   const applyLine = (id, text) => {
-    rawOut.set(id, text);
     const orig = cues[id].text;
     let src = text;
     if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
@@ -639,76 +587,41 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
 
-  const requeueLeft = (job, leftover, why, isRL) => {
-    if (!leftover.length) return;
-    const tries = isRL ? job.tries : job.tries + 1;
-    const rl = isRL ? job.rl + 1 : job.rl;
-    
-    if (tries >= MAX_TRIES || rl > MAX_RL) {
-      console.log(`[مصحح - تجاوز] ${leftover.length} سطر بعد ${tries} محاولات (${rl} بسبب الخنق)، يبقون بنصهم الأصلي مع التنظيف المحلي.`);
-      return;
-    }
-    
-    leftover.forEach(item => {
-      retryPool.push({ ...item, _tries: tries, _rl: rl });
-    });
-    requeued += leftover.length;
-    
-    console.log(`[مسار الاسترداد 📥] ${why}. تمت الإضافة للحوض (الإجمالي: ${retryPool.length}).`);
-    flushRetryPool();
-  };
+  // تقسيم المهام لدفعات
+  let pendingChunks = [];
+  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
 
   async function worker() {
-    while (true) {
+    while (pendingChunks.length > 0) {
       if (keysArray.every(k => deadKeys.has(k))) return;
-      if (Date.now() < pauseUntil) { await delay(500); continue; }
       
-      const job = queue.shift();
-      if (!job) {
-        if (inFlight === 0 && retryPool.length === 0) return;
-        
-        if (inFlight === 0 && queue.length === 0 && retryPool.length > 0) {
-          console.log(`[تسريع الإنهاء ⚡] الطابور فارغ. تفريغ الحوض فوراً لإتمام العمل.`);
-          if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-          flushRetryPool(true);
-        }
-        await delay(100);
-        continue;
-      }
-      
-      inFlight++;
+      const chunk = pendingChunks.shift();
+      if (!chunk) break;
+
       try {
-        const ctx0 = buildChunkContext(cues, job.items);
+        const ctx0 = buildChunkContext(cues, chunk);
         const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
-        const r = await correctChunkStrict(job.items, keysArray, modelName, ctx);
-        const left = () => job.items.filter(it => results[it.id] == null);
         
-        if (r.status === 'ok') {
-          const wanted = new Set(job.items.map(it => it.id));
-          for (const [id, text] of r.map) if (wanted.has(id) && text) applyLine(id, text);
-          persistDirty();
-          const leftover = left();
-          requeueLeft(job, leftover, `ناقص ${leftover.length} من ${job.items.length}`, false);
-        } else if (r.status === 'api_exhausted' || r.status === 'no_keys') {
-          pauseUntil = Math.max(pauseUntil, Date.now() + 15000);
-          requeueLeft(job, left(), `السيرفر مختنق (${r.status})`, true);
-        } else {
-          requeueLeft(job, left(), `رد غير صالح (${r.status})`, false);
+        // الاعتماد المباشر على دالة الاسترداد لمعالجة الدفعة والنواقص سويةً
+        const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
+        
+        for (const it of chunk) {
+          const text = map.get(it.id);
+          if (text) applyLine(it.id, text);
         }
+        persistDirty();
       } catch (e) {
         console.log(`[مصحح] خطأ بمهمة: ${e && e.message}`);
-        requeueLeft(job, job.items.filter(it => results[it.id] == null), 'خطأ', false);
-      } finally {
-        inFlight--;
       }
     }
   }
 
+  // تشغيل العاملين بالتوازي
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   const unprocessed = toDo.filter(it => results[it.id] == null);
   const missing = unprocessed.length;
-  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | استرداد=${requeued} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
+  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
 
   // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف
   const finalTexts = cues.map((c, i) =>
