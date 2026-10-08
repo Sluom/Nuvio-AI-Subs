@@ -143,7 +143,7 @@ async function verifyWithDeadline(list, subsourceKey, epInfo) {
 }
 
 const READY_MAX = 100;
-const READY_ORDER = { subdl: 0, subsource: 1, os_mirror: 2, os_legacy: 3 };
+const READY_ORDER = { os_mirror: 0, os_legacy: 1, subdl: 2, subsource: 3 };
 
 function archiveKey(url) {
     const u = cleanPath(url);
@@ -154,7 +154,8 @@ function archiveKey(url) {
     return u;
 }
 
-function buildReadyList(subs) {
+function buildReadyList(subs, verified) {
+    const fmt = new Map(verified.map(v => [archiveKey(v.url), v.format]));
     const seen = new Set();
     return [...subs]
         .sort((a, b) => (READY_ORDER[a._source] ?? 9) - (READY_ORDER[b._source] ?? 9))
@@ -164,7 +165,8 @@ function buildReadyList(subs) {
             seen.add(k);
             return true;
         })
-        .slice(0, READY_MAX);
+        .slice(0, READY_MAX)
+        .map(s => ({ ...s, _fmt: fmt.get(archiveKey(s.url)) || null }));
 }
 
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
@@ -229,7 +231,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
 
     console.log(`[جلب عربي] بعد الفحص: ${verified.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${srtSubs.length} SRT و ${assSubs.length} ASS.`);
 
-    const value = { srt: srtSubs, ass: assSubs, ready: buildReadyList(uniqueSubs) };
+    const value = { srt: srtSubs, ass: assSubs, ready: buildReadyList(uniqueSubs, verified) };
     if (good.length > 0) resultCache.set(cacheKey, { time: Date.now(), value });
     return value;
 }
