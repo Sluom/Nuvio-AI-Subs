@@ -1,3 +1,4 @@
+// corrector.js
 const {
   axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
   normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
@@ -759,6 +760,22 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
 
 const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
 
+const ASS_RTL_MARKS = true;
+const RLM = '\u200F';
+
+function addRlm(text) {
+  if (!ASS_RTL_MARKS) return text;
+  return String(text).split(/(\\N|\\n|\r?\n)/).map((p, i) => {
+    if (i % 2 || !p.trim()) return p;
+    const lead = p.match(LEAD_TAGS)[0];
+    const rest = p.slice(lead.length);
+    const tail = rest.match(TAIL_TAGS)[0];
+    const body = rest.slice(0, rest.length - tail.length);
+    if (!HAS_ARABIC.test(body)) return p;
+    return lead + RLM + body + RLM + tail;
+  }).join('');
+}
+
 // يقرأ ملف ASS مع حفظ مكان كل سطر Dialogue، حتى نستبدل النص فقط ونبقي الملف الأصلي كما هو
 function parseAssKeepingStructure(text) {
   const lines = String(text).split(/\r?\n/);
@@ -779,7 +796,7 @@ function rebuildAss(parsed, texts) {
   parsed.slots.forEach((lineIdx, k) => {
     if (DROP_DRAWINGS && DRAWING_RE.test(texts[k])) { drop.add(lineIdx); return; }
     const m = out[lineIdx].match(ASS_DLG_RE);
-    out[lineIdx] = m[1] + String(texts[k]).replace(/\r?\n/g, '\\N');
+    out[lineIdx] = m[1] + addRlm(String(texts[k]).replace(/\r?\n/g, '\\N'));
   });
   return out.filter((_, i) => !drop.has(i)).join('\n');
 }
@@ -810,7 +827,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   cues.forEach((c, idx) => {
     const text = texts[idx];
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${text.trim().replace(/\r?\n/g, '\\N')}`);
+    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
   });
   return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
 }
