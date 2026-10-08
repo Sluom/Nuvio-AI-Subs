@@ -142,33 +142,6 @@ async function verifyWithDeadline(list, subsourceKey, epInfo) {
     return [...results];
 }
 
-const READY_MAX = 100;
-const READY_ORDER = { os_mirror: 0, os_legacy: 1, subdl: 2, subsource: 3 };
-
-function archiveKey(url) {
-    const u = cleanPath(url);
-    const a = u.match(/dl\.subdl\.com\/subtitle\/\d+-(\d+)\.zip/i);
-    if (a) return `arc:${a[1]}`;
-    const b = u.match(/api\.subsource\.net\/api\/v1\/subtitles\/(\d+)\/download/i);
-    if (b) return `arc:${b[1]}`;
-    return u;
-}
-
-function buildReadyList(subs, verified) {
-    const fmt = new Map(verified.map(v => [archiveKey(v.url), v.format]));
-    const seen = new Set();
-    return [...subs]
-        .sort((a, b) => (READY_ORDER[a._source] ?? 9) - (READY_ORDER[b._source] ?? 9))
-        .filter(s => {
-            const k = archiveKey(s.url);
-            if (seen.has(k)) return false;
-            seen.add(k);
-            return true;
-        })
-        .slice(0, READY_MAX)
-        .map(s => ({ ...s, _fmt: fmt.get(archiveKey(s.url)) || null }));
-}
-
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     console.log(`[جلب عربي] جاري البحث عن ترجمات عربية جاهزة للتصحيح للعمل: ${imdbId}...`);
 
@@ -231,7 +204,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
 
     console.log(`[جلب عربي] بعد الفحص: ${verified.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${srtSubs.length} SRT و ${assSubs.length} ASS.`);
 
-    const value = { srt: srtSubs, ass: assSubs, ready: buildReadyList(uniqueSubs, verified) };
+    const value = { srt: srtSubs, ass: assSubs };
     if (good.length > 0) resultCache.set(cacheKey, { time: Date.now(), value });
     return value;
 }
