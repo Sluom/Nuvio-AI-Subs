@@ -11,7 +11,7 @@ const db = require('./db');
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 150;
-const CORRECTOR_MAX_WORKERS = 18;
+const CORRECTOR_MAX_WORKERS = 30;
 
 // true = احذف أسطر الرسم (m ... l ...) من ملف ASS النهائي لأن المشغّل يعرضها كأرقام
 // false = أبقِها حرفيًا كما في الملف الأصلي
