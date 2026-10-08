@@ -10,11 +10,38 @@ const cleanPath = p => String(p).split('?')[0];
 
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
-const VERIFY_LIMIT = 12;
-const VERIFY_TIMEOUT_MS = 25000;
-const SOFT_DEADLINE_MS = 6000;
+// ============================================================
+// الأزمنة (كل التسريع هنا)
+// ============================================================
+// أقصى زمن كلي للطلب (جلب المصادر + التحقق). بعده نرجع اللي تحقق منه فقط.
+// كان عمليًا بلا سقف (جلب مفتوح + 25 ثانية تحقق).
+const TOTAL_BUDGET_MS = 12000;
+
+// سقف جلب القوائم لكل مصدر (إذا تأخر مصدر نتجاهله ونكمل بالباقي)
+const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 4000, subdl: 5000, subsource: 5000 };
+
+// أقصى زمن لتحقق ترجمة واحدة (كان 25000). بعد سقف الطلب يكمل بالخلفية فقط لتعبئة الكاش.
+const VERIFY_TIMEOUT_MS = 12000;
+
+// بعد هذا الزمن من بدء التحقق: أرجع فورًا بمجرد ما تنجح أول ترجمة (كان 6000)
+const SOFT_DEADLINE_MS = 3500;
+
+// كم ترجمة نتحقق منها لكل مصدر (كان 2 / 2 / 8 / 8). تقليلها يخفف الضغط على Render المجاني.
+const VERIFY_PER_SOURCE = { os_legacy: 2, os_mirror: 2, subdl: 6, subsource: 6 };
+
 const RESULT_TTL = 30 * 60 * 1000;
 const resultCache = new Map();
+
+function withTimeout(promise, ms, name) {
+    let timer;
+    const timeout = new Promise(resolve => {
+        timer = setTimeout(() => {
+            console.log(`[جلب عربي - ${name}] تجاوز ${(ms / 1000).toFixed(1)} ثانية، تجاهلته وكملت بالباقي.`);
+            resolve([]);
+        }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 async function fetchOsLegacyArabic(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
@@ -76,7 +103,7 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     try {
         const response = await axios.get(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`, {
             headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' },
-            timeout: 8000
+            timeout: 4000
         });
 
         const data = response.data || {};
@@ -102,11 +129,12 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
 }
 
 async function verifyArabicSub(s, subsourceKey, epInfo = null) {
-    const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
+    let timer;
     try {
+        const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
         const text = await Promise.race([
             fetchAndExtractSub(s.url, subsourceKey, epInfo),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS))
+            new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS); })
         ]);
         const cues = extractCuesUniversal(text);
         const arabic = (text.match(/[\u0600-\u06FF]/g) || []).length;
@@ -122,27 +150,63 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     } catch (e) {
         console.log(`[فحص عربي] ✗ ${s._source}: ${e.message} <- ${s.url}`);
         return null;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
-async function verifyWithDeadline(list, subsourceKey, epInfo) {
+// يبدأ فحص كل الترجمات بالتوازي.
+// early: يكتمل (1) بمجرد نجاح أول ترجمة بعد SOFT_DEADLINE_MS، أو (2) عند انتهاء الكل، أو (3) عند hardMs مهما كان.
+// all: يكتمل لما تنتهي كل الفحوصات (حتى بعد ما نكون رجعنا الرد) لنحدّث الكاش بالنتيجة الكاملة.
+function startVerification(list, subsourceKey, epInfo, hardMs) {
     const results = [];
-    await new Promise(resolve => {
-        if (!list.length) return resolve();
-        let left = list.length, late = false, done = false, timer;
-        const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
-        timer = setTimeout(() => { late = true; if (results.length) finish(); }, SOFT_DEADLINE_MS);
-        list.forEach(s => {
-            verifyArabicSub(s, subsourceKey, epInfo).then(r => {
-                if (r) results.push(r);
-                if (late && results.length) finish();
-            }).finally(() => { if (--left === 0) finish(); });
-        });
-    });
-    return [...results];
+    let softPassed = false, done = false, soft, hard, resolveEarly;
+    const early = new Promise(r => { resolveEarly = r; });
+
+    const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(soft);
+        clearTimeout(hard);
+        resolveEarly();
+    };
+    const check = () => { if (softPassed && results.length) finish(); };
+
+    if (!list.length) {
+        finish();
+        return { results, early, all: Promise.resolve() };
+    }
+
+    soft = setTimeout(() => { softPassed = true; check(); }, SOFT_DEADLINE_MS);
+    hard = setTimeout(finish, hardMs);
+
+    const all = Promise.all(list.map(s =>
+        verifyArabicSub(s, subsourceKey, epInfo)
+            .catch(() => null)
+            .then(r => { if (r) { results.push(r); check(); } })
+    )).then(finish);
+
+    return { results, early, all };
+}
+
+const ASS_ORDER = { subdl: 0, subsource: 1, os_legacy: 2, os_mirror: 3 };
+const assRank = s => (s.format === 'ass' ? (ASS_ORDER[s._source] ?? 9) : 0);
+
+function buildValue(verified) {
+    const sorted = verified.slice().sort((a, b) => assRank(a) - assRank(b));
+    const seenSig = new Set();
+    const good = sorted.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
+    return {
+        good,
+        value: {
+            srt: good.filter(s => s.format === 'srt'),
+            ass: good.filter(s => s.format === 'ass')
+        }
+    };
 }
 
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
+    const t0 = Date.now();
     console.log(`[جلب عربي] جاري البحث عن ترجمات عربية جاهزة للتصحيح للعمل: ${imdbId}...`);
 
     const keyHash = crypto.createHash('md5').update(`${subdlKey || ''}|${subsourceKey || ''}`).digest('hex').slice(0, 8);
@@ -153,20 +217,25 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         return hit.value;
     }
 
-    const names = ['OS Legacy (ASS)', 'OS Mirror', 'SubDL', 'Subsource'];
-    const settled = await Promise.allSettled([
-        fetchOsLegacyArabic(imdbId, season, episode),
-        fetchOsMirrorArabic(imdbId, season, episode, type),
-        getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }),
-        getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' })
-    ]);
+    const sourceDefs = [
+        { key: 'os_legacy', name: 'OS Legacy (ASS)', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
+        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) },
+        { key: 'subdl', name: 'SubDL', run: () => getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }) },
+        { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) }
+    ];
+    const names = sourceDefs.map(d => d.name);
+
+    // كل مصدر له سقف زمني؛ أي مصدر يتأخر نتجاهله بدل ما ننتظره
+    const settled = await Promise.allSettled(
+        sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), SOURCE_TIMEOUTS[d.key], d.name))
+    );
 
     settled.forEach((r, i) => {
         if (r.status === 'rejected') console.log(`[جلب عربي - ${names[i]}] خطأ غير متوقع: ${r.reason && r.reason.message}`);
     });
-    console.log('[جلب عربي] ملخص المصادر: ' + settled.map((r, i) => `${names[i]}=${r.status === 'fulfilled' ? r.value.length : 'خطأ'}`).join(' | '));
+    console.log('[جلب عربي] ملخص المصادر: ' + settled.map((r, i) => `${names[i]}=${r.status === 'fulfilled' ? r.value.length : 'خطأ'}`).join(' | ') + ` (بعد ${((Date.now() - t0) / 1000).toFixed(1)} ثانية)`);
 
-    const lists = settled.map(r => (r.status === 'fulfilled' ? r.value : []));
+    const lists = settled.map(r => (r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : []));
     const interleaved = [];
     const maxLen = Math.max(0, ...lists.map(l => l.length));
     for (let i = 0; i < maxLen; i++) for (const l of lists) if (l[i]) interleaved.push(l[i]);
@@ -182,29 +251,36 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
 
     const bySource = src => uniqueSubs.filter(s => s._source === src);
     const toVerify = [
-        ...bySource('os_legacy').slice(0, 2),
-        ...bySource('os_mirror').slice(0, 2),
-        ...bySource('subdl').slice(0, 8),
-        ...bySource('subsource').slice(0, 8)
+        ...bySource('os_legacy').slice(0, VERIFY_PER_SOURCE.os_legacy),
+        ...bySource('os_mirror').slice(0, VERIFY_PER_SOURCE.os_mirror),
+        ...bySource('subdl').slice(0, VERIFY_PER_SOURCE.subdl),
+        ...bySource('subsource').slice(0, VERIFY_PER_SOURCE.subsource)
     ];
 
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
-    const verified = await verifyWithDeadline(toVerify, subsourceKey, epInfo);
 
-    const ASS_ORDER = { subdl: 0, subsource: 1, os_legacy: 2, os_mirror: 3 };
-    const assRank = s => (s.format === 'ass' ? (ASS_ORDER[s._source] ?? 9) : 0);
-    verified.sort((a, b) => assRank(a) - assRank(b));
+    // الوقت المتبقي من الميزانية الكلية للتحقق (حد أدنى 1.5 ثانية)
+    const hardMs = Math.max(1500, TOTAL_BUDGET_MS - (Date.now() - t0));
+    const job = startVerification(toVerify, subsourceKey, epInfo, hardMs);
+    await job.early;
 
-    const seenSig = new Set();
-    const good = verified.filter(s => !seenSig.has(s._sig) && seenSig.add(s._sig));
+    const snapshot = job.results.slice();
+    const { good, value } = buildValue(snapshot);
     console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => `${s._source}/${s.format}`).join(' | '));
+    console.log(`[جلب عربي] بعد الفحص: ${snapshot.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${value.srt.length} SRT و ${value.ass.length} ASS | الزمن الكلي ${((Date.now() - t0) / 1000).toFixed(1)} ثانية.`);
 
-    const srtSubs = good.filter(s => s.format === 'srt');
-    const assSubs = good.filter(s => s.format === 'ass');
-
-    console.log(`[جلب عربي] بعد الفحص: ${verified.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${srtSubs.length} SRT و ${assSubs.length} ASS.`);
-
-    const value = { srt: srtSubs, ass: assSubs };
     if (good.length > 0) resultCache.set(cacheKey, { time: Date.now(), value });
+
+    // الفحوصات المتأخرة تكمل بالخلفية، وإذا لقت ترجمات زيادة نحدّث الكاش للطلب الجاي
+    job.all.then(() => {
+        if (job.results.length > snapshot.length) {
+            const full = buildValue(job.results);
+            if (full.good.length > 0) {
+                resultCache.set(cacheKey, { time: Date.now(), value: full.value });
+                console.log(`[جلب عربي] تحديث الكاش بالخلفية: ${full.value.srt.length} SRT و ${full.value.ass.length} ASS (كانت ${value.srt.length + value.ass.length}).`);
+            }
+        }
+    }).catch(() => {});
+
     return value;
 }
