@@ -500,9 +500,10 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
       break;
     }
 
-    if ((result.status === 'bad_ids' || result.status === 'bad_format') && pending.length > 60) {
+    // التعديل هنا: نقسم الدفعة إذا صار خطأ أو إذا الموديل غلس ورجع 0، ونقسمها حتى لو جانت سطرين (> 1)
+    if ((result.status === 'bad_ids' || result.status === 'bad_format' || (result.status === 'ok' && result.map.size === 0)) && pending.length > 1) {
       const mid = Math.ceil(pending.length / 2);
-      console.log(`[حارس الأرقام - مصحح] أقسم الدفعة (${pending.length}) لنصفين وأعيد.`);
+      console.log(`[عزل مسموم - مصحح] الموديل مختنق بـ (${pending.length}) سطر. أقسمها لنصفين وأعيد.`);
       const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx);
       const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx);
       for (const [id, text] of left) done.set(id, text);
@@ -540,7 +541,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
 
   const CHUNK = CORRECTOR_CHUNK;
-  const lineCacheKey = 'ARB4_' + cacheKey;
+  const cacheVersion = process.env.CACHE_VER || 'ARB4';
+  const lineCacheKey = cacheVersion + '_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
   const results = new Array(cues.length).fill(null);
