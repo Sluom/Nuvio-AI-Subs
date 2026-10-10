@@ -362,9 +362,9 @@ function fixTypoToken(tok) {
   return tok;
 }
 
-function fixArabicTypos(txt) {
-  return String(txt == null ? '' : txt).replace(/[\p{L}\p{M}]+/gu, tok => (/[\u0600-\u06FF]/.test(tok) ? fixTypoToken(tok) : tok));
-}
+// الإملاء (ى->ي، ه->ة بعد ال) صار بملف مستقل: arabic-spelling.js
+const spell = require('./arabic-spelling')(fixTypoToken);
+function fixArabicTypos(txt) { return spell.fix(txt); }
 
 // ============================================================
 // الثلاث نقاط (...) في الترجمات القديمة
@@ -428,7 +428,7 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
 Most punctuation of every entry was REMOVED on purpose. What was kept: the speaker dashes "-", the line-break markers \\N, any "...", and any "?", "!", "؟" or ":" that stands at the very end of a line.
 Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
 
-STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no gender changes. You may only ADD punctuation marks, quotation marks, parentheses, and apply the specific typo fix in Rule 10. There is nothing to translate and nothing to guess about who is speaking.
+STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no gender changes. You may only ADD punctuation marks, quotation marks, parentheses. There is nothing to translate and nothing to guess about who is speaking.
 
 Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<the same words with punctuation>"}] with exactly one object per input id, in the same order. Never output "q".
@@ -440,19 +440,10 @@ Rules:
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.If "q" is an array, it has one value per line, in order: apply each value to its own line only; null means that line is not quoted.
 8. NEVER output square brackets [ ].
 9. ONLY output the JSON array. No explanations.
-10. TYPO CORRECTION (ى vs ي): Old subtitles often misspell the final Ya' (ي) as Alif Maqsurah (ى). You MUST fix "ى" to "ي" in these specific grammatical categories:
-    - Names of people (e.g., سامى -> سامي, على -> علي as a name). EXCEPTIONS (Must keep ى): سلوى, نجوى, فدوى, رضوى, سجى, لمى, سهى, زلفى, مهى, رؤى, مصطفى, موسى, عيسى, مرتضى, مجتبى, مرتجى, يحيى.
-    - Adjectives, Nationalities, and Directions (e.g., امريكى -> امريكي, شمالى -> شمالي, طبيعى -> طبيعي, تعليمى -> تعليمي, ملكى -> ملكي).
-    - Possessive and Object Pronouns meaning "my/me" (e.g., نفسى -> نفسي, معطفى -> معطفي, لاننى -> لأنني, رافقنى -> رافقني, ساعتنى -> ساعتني).
-    - Feminine Imperative verbs (e.g., اذهبى -> اذهبي, اسمعى -> اسمعي).
-    - Present tense verbs ending in Ya' (e.g., يعتنى -> يعتني, يبكى -> يبكي, يفى -> يفي).
-    - Nouns ending with an original Ya' (e.g., كرسى -> كرسي, نادى -> نادي, ثوانى -> ثواني, ماضى -> ماضي, باقى -> باقي, عادى -> عادي).
-    - Specific common words: فى -> في, اى -> أي, كى -> كي, الذى -> الذي, التى -> التي.
-    Do NOT change prepositions, past tense verbs, or valid nouns that legitimately end in ى (e.g., إلى, على as preposition, حتى, بلى, متى, رمى, رأى, مستشفى, مقهى, فوضى).
 
 EXAMPLES:
-Input: [{"id": 1, "text": "اى شخص رافقنى الى نادى فى الشمالى ليعتنى بنفسى ثوانى"}, {"id": 2, "text": "هل اخبرت مصطفى عن شركة ابل"}]
-Output: [{"id": 1, "text": "أي شخص رافقني إلى نادي في الشمالي ليعتني بنفسي ثواني."}, {"id": 2, "text": "هل أخبرت \\"مصطفى\\" عن شركة (أبل)؟"}]
+Input: [{"id": 1, "text": "هل اخبرت مصطفى عن شركة ابل"}]
+Output: [{"id": 1, "text": "هل أخبرت \\"مصطفى\\" عن شركة (أبل)؟"}]
 
 ${ctxBlock}
 Content to punctuate:
@@ -567,8 +558,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
 
   const CHUNK = CORRECTOR_CHUNK;
-  // رفعنا النسخة إلى ARB5 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
-  const cacheVersion = process.env.CACHE_VER || 'ARB5';
+  // رفعنا النسخة إلى ARB6 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
+  const cacheVersion = process.env.CACHE_VER || 'ARB6';
   const lineCacheKey = cacheVersion + '_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
@@ -597,6 +588,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   const applyLine = (id, text) => {
     const orig = cues[id].text;
+    text = spell.restoreFinalYa(orig, text);   // لا نسمح للموديل بتغيير ى/ي، القاعدة بالكود هي اللي تقرر
     let src = text;
     if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
       rejected++; src = orig;
@@ -651,6 +643,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const unprocessed = toDo.filter(it => results[it.id] == null);
   const missing = unprocessed.length;
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
+  spell.flushLog();
 
   // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف
   const finalTexts = cues.map((c, i) =>
