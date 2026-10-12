@@ -1,4 +1,4 @@
-Const { MongoClient } = require('mongodb');
+const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
