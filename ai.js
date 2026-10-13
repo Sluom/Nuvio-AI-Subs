@@ -2,7 +2,7 @@ const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
-const { applyVocativeRules, extractRuleEvidenceForCue } = require('./genderRules');
+const { applyVocativeRules } = require('./genderRules');
 const { getTmdbCast } = require('./tmdb'); 
 const { getAnilistCast } = require('./anilist'); 
 const db = require('./db');
@@ -210,8 +210,8 @@ function extractCuesUniversal(text) {
   if (assLines.length > 0) {
     const cues = [];
     for (const line of assLines) {
-      const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),[^,]*,([^,]*),(?:[^,]*,){4}(.*)$/i);
-      if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), actor: m[3].trim(), text: m[4] });
+      const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
+      if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
     }
     if (cues.length) return cues;
   }
@@ -224,7 +224,7 @@ function extractCuesUniversal(text) {
     const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
     if (!tm) continue;
     const text2 = lines.slice(idx + 1).join('\\N');
-    if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), actor: '', text: text2 });
+    if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
   }
   return cues;
 }
@@ -1050,50 +1050,6 @@ function fixRosterGenders(people, index, stats) {
   }
 }
 
-// تعميم الأدلة المؤكدة (من الكاست أو القواعد المحلية) على شبكة الأشخاص (P1, P2...) قبل تحويلها لحروف
-function propagateEvidenceToRoster(parsed, evidence, stats) {
-  if (!evidence || !evidence.size || !parsed || !parsed.people.size) return;
-  const votes = new Map();
-  const addVote = (pid, g, tier) => {
-    if (!pid || !parsed.people.has(pid) || (g !== 'M' && g !== 'F')) return;
-    if (!votes.has(pid)) votes.set(pid, { castM: 0, castF: 0, fileM: 0, fileF: 0 });
-    const v = votes.get(pid);
-    if (tier === 'cast') { if (g === 'M') v.castM++; else v.castF++; }
-    else { if (g === 'M') v.fileM++; else v.fileF++; }
-  };
-
-  for (const [id, spec] of parsed.lines) {
-    const ev = evidence.get(id);
-    if (!ev) continue;
-    const segs = String(spec).split('/');
-    if (segs.length !== ev.length) continue;
-    segs.forEach((seg, i) => {
-      const parts = seg.split('>');
-      if (parts.length !== 2) return;
-      const sId = parts[0].trim().toUpperCase();
-      const aId = parts[1].trim().toUpperCase();
-      const e = ev[i] || {};
-      if (e.s) addVote(sId, e.s, e.sT);
-      if (e.a) addVote(aId, e.a, e.aT);
-    });
-  }
-
-  for (const [pid, v] of votes) {
-    const p = parsed.people.get(pid);
-    if (!p) continue;
-    if (v.castM !== v.castF) {
-      const best = v.castM > v.castF ? 'M' : 'F';
-      if (p.gender !== best) {
-        if (p.gender === 'U') stats.filled++; else stats.changed++;
-        p.gender = best;
-      }
-    } else if (p.gender === 'U' && v.fileM !== v.fileF) {
-      p.gender = v.fileM > v.fileF ? 'M' : 'F';
-      stats.filled++;
-    }
-  }
-}
-
 function rosterLetter(token, people) {
   const t = String(token || '').trim().toUpperCase();
   if (t === 'G') return 'G';
@@ -1119,7 +1075,7 @@ function deriveRosterCode(spec, turns, people) {
   return out.join('/');
 }
 
-async function annotateRosterWindow({ windowItems, keysArray, modelName, deadline, label, castPromptBlock, regIndex, evidence, turnsById, rosterStats }) {
+async function annotateRosterWindow({ windowItems, keysArray, modelName, deadline, label, castPromptBlock, regIndex, turnsById, rosterStats }) {
   const prompt = buildRosterPrompt(windowItems, castPromptBlock);
   const t0 = Date.now();
   const { res, model } = await callAnnotationLLM({ prompt, keysArray, modelName, deadline });
@@ -1130,11 +1086,10 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   const parsed = parseRosterResponse(res.text);
   if (!parsed || parsed.lines.size === 0) {
     const head = String(res.text || '').replace(/\s+/g, ' ').slice(0, 100);
-    console.log(`[تحليل الضمائر] ${label}: ما رجع جدول صالح (finish=${res.finishReason || '-'} block=${res.blockReason \vert{}\vert{} '-'}) الرد: "${head}"`);
+    console.log(`[تحليل الضمائر] ${label}: ما رجع جدول صالح (finish=${res.finishReason || '-'} block=${res.blockReason || '-'}) الرد: "${head}"`);
     return null;
   }
   fixRosterGenders(parsed.people, regIndex, rosterStats);
-  propagateEvidenceToRoster(parsed, evidence, rosterStats);
   const map = new Map();
   for (const [id, spec] of parsed.lines) {
     const turns = turnsById.get(id);
@@ -1144,9 +1099,9 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   }
   rosterStats.slices++;
   rosterStats.people += parsed.people.size;
-  console.log(`[تحليل الضمائر] ${label}:${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${secs(Date.now() - t0)} (${model}).`);
+  console.log(`[تحليل الضمائر] ${label}: ${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${secs(Date.now() - t0)} (${model}).`);
   if (process.env.GENDER_DEBUG === '1') {
-    console.log(`[مشهد] ${label}: ` + [...parsed.people.values()].slice(0, 40).map(p => `${p.id}=${p.name \vert{}\vert{} '?'}(${p.gender})`).join(', '));
+    console.log(`[مشهد] ${label}: ` + [...parsed.people.values()].slice(0, 40).map(p => `${p.id}=${p.name || '?'}(${p.gender})`).join(', '));
   }
   return map;
 }
@@ -1181,7 +1136,6 @@ const HONORIFICS = new Set(['mr', 'mrs', 'ms', 'miss', 'mister', 'dr', 'doctor',
   'sr', 'sra', 'srta', 'senhor', 'senhora', 'señor', 'señora', 'monsieur', 'madame', 'mademoiselle', 'herr', 'frau',
   'signor', 'signora', 'don', 'dona', 'dom']);
 const ALIAS_STOP = new Set(['may', 'will', 'can', 'you', 'the', 'and', 'but', 'mom', 'dad', 'man', 'boy', 'girl', 'guy', 'boss', 'baby']);
-const ASS_GENERIC_ACTORS = new Set(['default', 'main', 'top', 'sign', 'signs', 'song', 'lyrics', 'text', 'title', 'ntp', 'comment', 'unknown', 'narrator', 'all', 'both', 'crowd']);
 
 const INTERJECTIONS = 'hey|hi|hello|oh|ok|okay|look|listen|please|yes|no|well|come on|thanks|thank you|sorry|olá|oi|ei|ouça|escuta|olha|vamos|obrigado|obrigada|sim|não|hola|oye|mira|oiga|gracias|sí|salut|écoute|regarde|merci|oui|non|ciao|ehi|senti|guarda|grazie|sì|hallo|hör|sieh|danke|ja|nein';
 const INTRO_PHRASES = "i'm|i am|my name is|eu sou|meu nome é|me chamo|soy|me llamo|mi nombre es|je suis|je m'appelle|sono|mi chiamo|ich bin|ich heiße|mein name ist";
@@ -1338,7 +1292,7 @@ function registryPromptBlock(index) {
   return 'CHARACTERS INFERRED FROM THE WHOLE SUBTITLE FILE (M = male, F = female; inferred by reading the whole story, may contain mistakes; the context of the line overrides them):\n' + lines.join('\n');
 }
 
-function registryEvidenceForCue(rawText, index, actorName = '') {
+function registryEvidenceForCue(rawText, index) {
   if (!index || !index.size) return null;
   const turns = splitTurns(rawText).map(t => String(t).replace(/[’‘`]/g, "'"));
   let any = false;
@@ -1362,34 +1316,7 @@ function registryEvidenceForCue(rawText, index, actorName = '') {
     }
     return e;
   });
-
-  // استغلال حقل Name/Actor في ملفات ASS إذا كان السطر لمتحدث واحد ومطابق لشخصية معروفة
-  if (turns.length === 1 && actorName) {
-    const cleanActor = normName(actorName);
-    if (cleanActor && cleanActor.length >= 2 && !ASS_GENERIC_ACTORS.has(cleanActor)) {
-      const ent = lookupRegistry(actorName, index);
-      if (ent && (!ev[0].s || (ent.tier === 'cast' && ev[0].sT !== 'cast'))) {
-        ev[0].s = ent.gender;
-        ev[0].sT = ent.tier;
-        any = true;
-      }
-    }
-  }
-
   return any ? ev : null;
-}
-
-function mergeTurnEvidence(a = {}, b = {}) {
-  const out = { ...a };
-  if (b.s && (!out.s || (b.sT === 'cast' && out.sT !== 'cast'))) {
-    out.s = b.s;
-    out.sT = b.sT;
-  }
-  if (b.a && (!out.a || (b.aT === 'cast' && out.aT !== 'cast'))) {
-    out.a = b.a;
-    out.aT = b.aT;
-  }
-  return out;
 }
 
 function applyEvidence(code, ev, stats) {
@@ -1411,91 +1338,6 @@ function applyEvidence(code, ev, stats) {
   }).join('/');
 }
 
-// المرحلة الرابعة الحتمية: استنتاج الحروف الناقصة من تكملة الجمل المقسومة وتبادل الحوار (Ping-Pong) داخل المشهد
-function propagateSceneContinuity(cues, items, coded, cache) {
-  let fixed = 0;
-  const getCode = id => coded.get(id) || cache.get(id);
-  const setCode = (id, c) => {
-    if (!cache.has(id) && coded.get(id) !== c) {
-      coded.set(id, c);
-      fixed++;
-    }
-  };
-
-  const isSplitPair = (cur, nxt) => {
-    if (nxt.b || cur.turns > 1 || nxt.turns > 1) return false;
-    const gap = (assTimeToSec(cues[nxt.id].start) || 0) - (assTimeToSec(cues[cur.id].end) || 0);
-    if (gap > 1.5) return false;
-    const tA = cleanForAnalysis(cues[cur.id].text);
-    const tB = cleanForAnalysis(cues[nxt.id].text);
-    if (!tA || !tB || /^[-–—]/.test(tB)) return false;
-    if (/(?:\.\.\.|…|,|—|--)\s*$/.test(tA)) return true;
-    if (!/[.!?…"”'\])]\s*$/.test(tA) && /^(?:\.\.\.|…|\p{Ll})/u.test(tB)) return true;
-    return false;
-  };
-
-  const unifySplitPair = (cur, nxt) => {
-    const cA = getCode(cur.id), cB = getCode(nxt.id);
-    if (!cA || !cB || cA.length !== 2 || cB.length !== 2) return;
-    if (cA[0] !== 'U' && cB[0] !== 'U' && cA[0] !== cB[0]) return;
-    if (cA[1] !== 'U' && cB[1] !== 'U' && cA[1] !== cB[1]) return;
-    const s = cA[0] !== 'U' ? cA[0] : cB[0];
-    const a = cA[1] !== 'U' ? cA[1] : cB[1];
-    const merged = s + a;
-    if (merged !== cA && cA.includes('U')) setCode(cur.id, merged);
-    if (merged !== cB && cB.includes('U')) setCode(nxt.id, merged);
-  };
-
-  // 1. الجمل المقسومة (ذهاباً وإياباً لضمان انتقال الجنس بين نصفي الجملة)
-  for (let i = 0; i < items.length - 1; i++) {
-    if (isSplitPair(items[i], items[i + 1])) unifySplitPair(items[i], items[i + 1]);
-  }
-  for (let i = items.length - 2; i >= 0; i--) {
-    if (isSplitPair(items[i], items[i + 1])) unifySplitPair(items[i], items[i + 1]);
-  }
-
-  // 2. تبادل الحوار الثنائي (Ping-Pong: M <-> F) داخل نفس المشهد
-  for (let i = 0; i < items.length - 1; i++) {
-    const a = items[i], b = items[i + 1];
-    if (b.b || a.turns > 1 || b.turns > 1) continue;
-    let cA = getCode(a.id), cB = getCode(b.id);
-    if (!cA || !cB || cA.length !== 2 || cB.length !== 2) continue;
-    if (/[GN]/.test(cA) || /[GN]/.test(cB)) continue;
-
-    // تعاقب 3 أسطر في نفس المشهد (M_ -> F_ -> M_ أو F_ -> M_ -> F_)
-    if (i < items.length - 2) {
-      const d = items[i + 2];
-      if (!d.b && !d.turns) {
-        const cD = getCode(d.id);
-        if (cD && cD.length === 2 && !/[GN]/.test(cD)) {
-          if (cA[0] === 'M' && cB[0] === 'F' && cD[0] === 'M' && cA[1] !== 'M' && cB[1] !== 'F' && cD[1] !== 'M') {
-            if (cA[1] === 'U') setCode(a.id, 'MF');
-            if (cB[1] === 'U') setCode(b.id, 'FM');
-            if (cD[1] === 'U') setCode(d.id, 'MF');
-          } else if (cA[0] === 'F' && cB[0] === 'M' && cD[0] === 'F' && cA[1] !== 'F' && cB[1] !== 'M' && cD[1] !== 'F') {
-            if (cA[1] === 'U') setCode(a.id, 'FM');
-            if (cB[1] === 'U') setCode(b.id, 'MF');
-            if (cD[1] === 'U') setCode(d.id, 'FM');
-          }
-          cA = getCode(a.id);
-          cB = getCode(b.id);
-        }
-      }
-    }
-
-    // انعكاس الرد المباشر بين سطرين متتاليين بفارق زمني قصير
-    const gap = (assTimeToSec(cues[b.id].start) || 0) - (assTimeToSec(cues[a.id].end) || 0);
-    if (gap <= 2.5) {
-      if (cA === 'MF' && (cB === 'FU' || cB === 'UM')) setCode(b.id, 'FM');
-      else if (cA === 'FM' && (cB === 'MU' || cB === 'UF')) setCode(b.id, 'MF');
-      else if ((cA === 'MU' || cA === 'UF') && cB === 'FM') setCode(a.id, 'MF');
-      else if ((cA === 'FU' || cA === 'UM') && cB === 'MF') setCode(a.id, 'FM');
-    }
-  }
-
-  return fixed;
-}
-
 async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, castPromptBlock = '', evidence = new Map(), regIndex = null) {
   const cache = await loadAnnotationCache(cacheKey);
   const tStart = Date.now();
@@ -1508,7 +1350,6 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
   const conc = Math.max(1, Math.min(aliveKeyCount(keysArray), ANNOTATION_MAX_CONCURRENCY));
   const evStats = { overridden: 0, filled: 0 };
   const rosterStats = { changed: 0, filled: 0, people: 0, slices: 0, fallbacks: 0 };
-  let continuityFixed = 0;
   const optState = { aborted: false };
   const applyAllEvidence = () => {
     for (const it of pending) {
@@ -1541,7 +1382,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
         let map = null;
         if (ROSTER_ENABLED) {
           map = await annotateRosterWindow({
-            windowItems, keysArray, modelName, deadline, castPromptBlock, regIndex, evidence, turnsById, rosterStats,
+            windowItems, keysArray, modelName, deadline, castPromptBlock, regIndex, turnsById, rosterStats,
             label: `جولة 1 (مشهد) شريحة ${ri + 1}/${ranges.length}`
           });
         }
@@ -1561,15 +1402,14 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
         }
       });
     });
-    console.log(`[تحليل الضمائر] ${items.length} سطر بالتسلسل (من ${cues.length}) \vert{}${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${aliveKeyCount(keysArray)}).`);
+    console.log(`[تحليل الضمائر] ${items.length} سطر بالتسلسل (من ${cues.length}) | ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${aliveKeyCount(keysArray)}).`);
     await runConcurrentPool(tasks, conc);
     if (ROSTER_ENABLED) {
-      console.log(`[مشهد] ${rosterStats.slices} شريحة بنظام الأشخاص | ${rosterStats.people} شخص \vert{} الكاست والأدلة غيّرت جنس ${rosterStats.changed} شخص وملأت ${rosterStats.filled} \vert{} رجعت للحروف ${rosterStats.fallbacks} شريحة.`);
+      console.log(`[مشهد] ${rosterStats.slices} شريحة بنظام الأشخاص | ${rosterStats.people} شخص | الكاست غيّر جنس ${rosterStats.changed} شخص وملأ ${rosterStats.filled} | رجعت للحروف ${rosterStats.fallbacks} شريحة.`);
     }
   }
 
   applyAllEvidence();
-  continuityFixed += propagateSceneContinuity(cues, items, coded, cache);
 
   const askList = pending.filter(it => {
     const c = coded.get(it.id);
@@ -1649,8 +1489,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     console.log('[تحليل الضمائر] وصلت حصة الموديل (429) فأوقفت باقي الطلبات الاختيارية لأحمي مفاتيح الترجمة.');
   }
 
-  continuityFixed += propagateSceneContinuity(cues, items, coded, cache);
-  console.log(`[أدلة] غيّرت ${evStats.overridden} حرف من قرار الـ AI (دليل مؤكد)، وملأت ${evStats.filled} حرف ناقص \vert{} استمرارية المشهد حسمت ${continuityFixed} سطر.`);
+  console.log(`[أدلة] غيّرت ${evStats.overridden} حرف من قرار الـ AI (دليل مؤكد من الكاست)، وملأت ${evStats.filled} حرف ناقص.`);
 
   const fresh = [];
   for (const it of pending) {
@@ -1671,7 +1510,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     if (/[MFG]/.test(c)) useful++;
   }
   const distStr = [...dist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}:${v}`).join(' ');
-  console.log(`[تحليل الضمائر] النتيجة: ${useful}/${pending.length} سطر فيه معلومة جنس | ${secs(Date.now() - tStart)} \vert{} التوزيع: ${distStr || 'لا شيء'}`);
+  console.log(`[تحليل الضمائر] النتيجة: ${useful}/${pending.length} سطر فيه معلومة جنس | ${secs(Date.now() - tStart)} | التوزيع: ${distStr || 'لا شيء'}`);
 
   return cache;
 }
@@ -1752,7 +1591,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
 
     if (dynamicNames.size > 0) {
-      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (weak guesses from first names, may be wrong; the story context overrides them):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} =${v}`).join('\n');
+      enhancedCastPrompt += '\n\nGUESSED SIDE CHARACTERS (weak guesses from first names, may be wrong; the story context overrides them):\n' + [...dynamicNames.entries()].map(([k,v]) => `${k} = ${v}`).join('\n');
       console.log(`[تخمين الأسماء] تم تخمين جنس ${dynamicNames.size} أسماء جانبية وإضافتها كترجيح ضعيف لسياق الـ AI.`);
     }
     if (localHints.size > 0) {
@@ -1762,22 +1601,12 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
 
   const evidence = new Map();
   if (ENABLE_GENDER_ANALYSIS && toDo.length > 0) {
-    let fromRegistry = 0, fromRules = 0;
     cues.forEach((c, i) => {
       if (!needsTranslation(c.text)) return;
-      const regEv = registryEvidenceForCue(c.text, regIndex, c.actor);
-      const ruleEv = extractRuleEvidenceForCue(c.text);
-      if (regEv) fromRegistry++;
-      if (ruleEv) fromRules++;
-      if (regEv || ruleEv) {
-        const len = Math.max(regEv ? regEv.length : 0, ruleEv ? ruleEv.length : 0);
-        const merged = [];
-        for (let k = 0; k < len; k++) {
-          merged.push(mergeTurnEvidence(regEv?.[k], ruleEv?.[k]));
-        }
-        evidence.set(i, merged);
-      }
+      const ev = registryEvidenceForCue(c.text, regIndex);
+      if (ev) evidence.set(i, ev);
     });
+    const fromRegistry = evidence.size;
     for (const [id, code] of localHints) {
       if (splitTurns(cues[id].text).length !== 1) continue;
       const ev = evidence.get(id) || [{}];
@@ -1786,9 +1615,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
       if (!e.a && code[1] !== 'U') { e.a = code[1]; e.aT = 'file'; }
       evidence.set(id, ev);
     }
-    if (evidence.size > 0) {
-      console.log(`[أدلة] ${fromRegistry} سطر من السجل/ASS، و${fromRules} سطر من قواعد الألقاب، المجموع المدمج=${evidence.size} سطر.`);
-    }
+    if (evidence.size > 0) console.log(`[أدلة] ${fromRegistry} سطر فيه نداء/تعريف باسم معروف من السجل، و${evidence.size - fromRegistry} سطر إضافي من NLP.`);
   }
 
   let annotationSummary = 'لم يُستخدم';
@@ -1820,10 +1647,11 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   if (toDo.length > 0) {
     let ruleFixes = 0;
     for (const it of toDo) {
+      if (it.g && it.g.includes('/')) continue;
       const adj = applyVocativeRules(cues[it.id].text, it.g);
       if (adj && adj !== it.g) { it.g = adj; ruleFixes++; }
     }
-    if (ruleFixes > 0) console.log(`[قواعد الألقاب] عدّلت أو أضفت معلومة الجنس لـ ${ruleFixes} سطر إضافي.`);
+    if (ruleFixes > 0) console.log(`[قواعد الألقاب] عدّلت أو أضفت معلومة الجنس لـ ${ruleFixes} سطر.`);
   }
 
   const tTrans = Date.now();
@@ -1866,7 +1694,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     const flat2 = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
     if (DEBUG && regIndex) {
       console.log(`[سجل] ${regIndex.entries.length} شخصية (كاست ${regIndex.castCount} + ملف ${regIndex.fileCount}):`);
-      regIndex.entries.slice(0, 80).forEach(e => console.log(`[سجل] ${e.name} =${e.gender} (${e.tier})${e.aliases.length ? ' | ' + e.aliases.slice(0, 5).join(', ') : ''}`));
+      regIndex.entries.slice(0, 80).forEach(e => console.log(`[سجل] ${e.name} = ${e.gender} (${e.tier})${e.aliases.length ? ' | ' + e.aliases.slice(0, 5).join(', ') : ''}`));
     }
     if (FIND) {
       let re = null;
@@ -1882,7 +1710,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
           for (let j = Math.max(0, i - 2); j <= Math.min(cues.length - 1, i + 2); j++) {
             const it = byId.get(j);
             if (!it) continue;
-            console.log(`[بحث] ${j === i ? '>>' : '  '}#${j} [${it.g || '--'}] ${flat2(cues[j].text)} =>${flat2(results[j])}`);
+            console.log(`[بحث] ${j === i ? '>>' : '  '}#${j} [${it.g || '--'}] ${flat2(cues[j].text)} => ${flat2(results[j])}`);
           }
         }
       }
@@ -1894,7 +1722,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     console.log(`[تنبيه] ${missing} سطر بقوا بنصهم الأصلي بعد كل المحاولات (محفوظ الباقي بالكاش).`);
   }
 
-  console.log(`[ملخص] أسطر=${cues.length} \vert{} للترجمة=${toDo.length} | ناقص=${missing} \vert{} تحليل الضمائر: ${annotationSummary} | زمن الترجمة=${secs(Date.now() - tTrans)} \vert{} الكلي=${secs(Date.now() - tStart)}`);
+  console.log(`[ملخص] أسطر=${cues.length} | للترجمة=${toDo.length} | ناقص=${missing} | تحليل الضمائر: ${annotationSummary} | زمن الترجمة=${secs(Date.now() - tTrans)} | الكلي=${secs(Date.now() - tStart)}`);
 
   return {
     // الأسطر المترجمة فقط تُقسَّم إن كانت طويلة؛ غير المترجمة تبقى كما هي
@@ -1926,7 +1754,7 @@ function parseAssKeepingStructure(text) {
     const m = line.match(ASS_DLG_RE);
     if (!m) return;
     const f = m[1].split(',');
-    cues.push({ start: f[1].trim(), end: f[2].trim(), actor: (f[4] || '').trim(), text: m[2] });
+    cues.push({ start: f[1].trim(), end: f[2].trim(), text: m[2] });
     slots.push(i);
   });
   return { lines, cues, slots };
@@ -1954,17 +1782,17 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || kitsuId}).`);
         castPromptBlock = aniRes.promptBlock;
     } else {
-        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} \vert{} السبب: ${aniRes.reason || 'غير معروف'}`);
+        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
     if (imdbId || tvdbId) {
-      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId \vert{}\vert{} '-'} \vert{} TVDB:${tvdbId || '-'})...`);
+      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
       const aniRes = await getAnilistCast({ imdbId, tvdbId });
       if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
           console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || imdbId || tvdbId}).`);
           castPromptBlock = aniRes.promptBlock;
       } else {
-          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId \vert{}\vert{} tvdbId} \vert{} السبب: ${aniRes.reason || 'غير معروف'}`);
+          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId || tvdbId} | السبب: ${aniRes.reason || 'غير معروف'}`);
       }
     }
 
@@ -1975,7 +1803,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
           console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
           castPromptBlock = tmdbRes.promptBlock;
       } else {
-          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} \vert{} السبب: ${tmdbRes.reason || 'غير معروف'}`);
+          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
       }
     }
   } else {
@@ -1995,9 +1823,9 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   }
 
-  console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} \vert{} Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
+  console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}\vert{}${subUrl}`, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}|${subUrl}`, castPromptBlock);
 
   let srtOutput = '';
   let counter = 1;
@@ -2028,17 +1856,17 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
         console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || kitsuId}).`);
         castPromptBlock = aniRes.promptBlock;
     } else {
-        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} \vert{} السبب: ${aniRes.reason || 'غير معروف'}`);
+        console.log(`[AniList] فشل/لا يوجد شخصيات للعمل ${kitsuId} | السبب: ${aniRes.reason || 'غير معروف'}`);
     }
   } else if (targetId) {
     if (imdbId || tvdbId) {
-      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId \vert{}\vert{} '-'} \vert{} TVDB:${tvdbId || '-'})...`);
+      console.log(`[AniList] جاري التحقق إن كان العمل أنمي (IMDb: ${imdbId || '-'} | TVDB: ${tvdbId || '-'})...`);
       const aniRes = await getAnilistCast({ imdbId, tvdbId });
       if (aniRes.ok && aniRes.cast && aniRes.cast.length > 0) {
           console.log(`[AniList] نجح: تم العثور على ${aniRes.cast.length} شخصية لعمل (${aniRes.title || imdbId || tvdbId}).`);
           castPromptBlock = aniRes.promptBlock;
       } else {
-          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId \vert{}\vert{} tvdbId} \vert{} السبب: ${aniRes.reason || 'غير معروف'}`);
+          console.log(`[AniList] لا يوجد شخصيات للعمل ${imdbId || tvdbId} | السبب: ${aniRes.reason || 'غير معروف'}`);
       }
     }
 
@@ -2049,7 +1877,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
           console.log(`[TMDB] نجح: تم العثور على ${tmdbRes.cast.length} شخصية لعمل (${tmdbRes.title || targetId}).`);
           castPromptBlock = tmdbRes.promptBlock;
       } else {
-          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} \vert{} السبب: ${tmdbRes.reason || 'غير معروف'}`);
+          console.log(`[TMDB] فشل/لا يوجد شخصيات للعمل ${targetId} | السبب: ${tmdbRes.reason || 'غير معروف'}`);
       }
     }
   } else {
@@ -2072,9 +1900,9 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   }
 
-  console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} \vert{} مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)}) \vert{} ملف ASS أصلي=${isRealAss}`);
+  console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)}) | ملف ASS أصلي=${isRealAss}`);
 
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, `${targetId}\vert{}${subUrl}`, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, `${targetId}|${subUrl}`, castPromptBlock);
 
   if (isRealAss) {
     // الأسطر غير المترجمة (رسم / بدون حروف) أو التي بقيت بنصها الأصلي نعيدها حرفيًا كما في الأصل
