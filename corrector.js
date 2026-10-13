@@ -7,6 +7,7 @@ const {
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
 const db = require('./db');
+const { fixMarks, propagateNames } = require('./corrector-marks');
 
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
@@ -435,8 +436,8 @@ Rules:
 2. Keep every \\N line break exactly where it is. NEVER merge lines, split lines or add lines.
 3. Keep every dash "-" exactly at the start of its line. Never add a dash to a line that has none.
 4. Sentence marks: end each sentence with . or ! or ؟ as the meaning requires, and use ، and ؛ where natural. Keep every existing "..." exactly where it is. Use the read-only context to see whether a sentence continues in the next entry or continues from the previous one: do NOT end an entry with a full stop if its sentence continues in the next entry. Any line that already ends with "؟", "!" or ":" keeps it EXACTLY; never remove it, never change it, never add another mark after it.
-5. PERSON NAMES (names of people or characters, even when a prefix such as ل ب و ك ف is attached to the word): wrap the whole word in quotation marks, like "كيلوا". Never use parentheses for people.
-6. OTHER PROPER NOUNS that are not people (places, cities, countries, companies, brands, organizations, food or dish names): wrap them in parentheses, like (طوكيو). Never use quotation marks for them. If you are not sure that a word is a name, leave it with no mark at all.
+5. PERSON NAMES (names of people or characters, even when a prefix such as ل ب و ك ف is attached to the word): wrap the whole name in quotation marks ONLY, like "سالي". NEVER use parentheses () for people.
+6. ENTITIES & PLACES (companies, brands, cities, countries, institutions, organizations, dishes): wrap them in parentheses ONLY, like (جيتي) or (طوكيو). NEVER use quotation marks "" for them. If you are not sure that a word is a name, leave it with no mark.
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.If "q" is an array, it has one value per line, in order: apply each value to its own line only; null means that line is not quoted.
 8. NEVER output square brackets [ ].
 9. ONLY output the JSON array. No explanations.
@@ -558,8 +559,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
 
   const CHUNK = CORRECTOR_CHUNK;
-  // رفعنا النسخة إلى ARB6 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
-  const cacheVersion = process.env.CACHE_VER || 'ARB6';
+  // رفعنا النسخة إلى ARB7 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
+  const cacheVersion = process.env.CACHE_VER || 'ARB7';
   const lineCacheKey = cacheVersion + '_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
@@ -597,7 +598,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       const withTags = restoreTags(orig, text);
       if (withTags == null) { rejected++; src = orig; } else src = withTags;
     }
-    const clean = cleanCorrectorOutput(src) || cleanCorrectorOutput(orig);
+    const clean = fixMarks(cleanCorrectorOutput(src) || cleanCorrectorOutput(orig), quoteHint(orig));
     results[id] = clean;
     cache.set(id, clean);
     dirty.push([id, clean]);
@@ -650,8 +651,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     needsCorrection(c.text) ? cleanCorrectorOutput(results[i] || c.text) : c.text
   );
 
+  const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   return {
-    texts: finalTexts,
+    texts: propagateNames(finalTexts, eligible),
     missing
   };
 }
@@ -771,3 +773,4 @@ module.exports = {
   handleCorrectionSrt,
   handleCorrectionAss
 };
+```eof
