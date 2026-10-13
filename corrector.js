@@ -7,7 +7,7 @@ const {
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
 const db = require('./db');
-const { fixMarks, propagateNames } = require('./corrector-marks');
+const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks'); 
 
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
