@@ -660,7 +660,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     });
   } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
   return { texts: propagateNames(finalTexts, eligible, kinds), missing };
-  };
 }
 
 const epInfoOf = id => {
