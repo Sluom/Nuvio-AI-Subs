@@ -650,11 +650,16 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? cleanCorrectorOutput(results[i] || c.text) : c.text
   );
-
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
-  return {
-    texts: propagateNames(finalTexts, eligible),
-    missing
+  let kinds = new Map();
+  try {
+    kinds = await classifyNames(collectNameCandidates(finalTexts, eligible), keysArray, modelName, {
+      axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
+      normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
+      MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
+    });
+  } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
+  return { texts: propagateNames(finalTexts, eligible, kinds), missing };
   };
 }
 
