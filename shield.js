@@ -1,14 +1,33 @@
 // shield.js
+// درع الترجمة: تنبيه قبل المشهد + حجب الشاشة أثناءه
+
 const RLM = '\u200F';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
 
+// ===== إعدادات المظهر (عدّلها من هنا فقط) =====
+const WARN_SEC = 10;                // مدة التنبيه المسبق بالثواني
+const WARN_COLOR_HEX = '#FFD400';   // لون الرسالة: أصفر. برتقالي #FFA500 ، ماروني #800000
+const WALL_COLS = 42;               // عدد المربعات في كل سطر من الجدار
+const WALL_ROWS = 16;               // عدد أسطر الجدار
+
+// تحويل HEX إلى صيغة ASS (ترتيب BGR)
+function hexToAss(hex) {
+  const h = String(hex).replace('#', '');
+  const r = h.slice(0, 2);
+  const g = h.slice(2, 4);
+  const b = h.slice(4, 6);
+  return ('&H' + b + g + r + '&').toUpperCase();
+}
+const WARN_ASS = hexToAss(WARN_COLOR_HEX);
+const WALL_ROW = '█'.repeat(WALL_COLS);
+
 // مشاهد تجريبية للفحص (تشتغل تلقائياً على أي فلم حالياً)
 // لاحقاً نربطها بقاعدة البيانات أو الكشف التلقائي حسب targetId
 const TEST_SCENES = [
-  { start: 20, end: 45 },   // تجربة 1: التنبيه بالثانية 00:10 والتعتيم من 00:20 إلى 00:45 (يحسبها 30 ثانية - 3 ضغطات)
-  { start: 300, end: 315 }  // تجربة 2: التنبيه بالدقيقة 04:50 والتعتيم من 05:00 إلى 05:15 (يحسبها 20 ثانية - ضغطتين)
+  { start: 20, end: 45 },   // تجربة 1: التنبيه من 00:10 والتعتيم من 00:20 إلى 00:45
+  { start: 300, end: 315 }  // تجربة 2: التنبيه من 04:50 والتعتيم من 05:00 إلى 05:15
 ];
 
 function getScenesForMedia(targetId) {
@@ -85,76 +104,62 @@ function addAssRlm(text) {
   }).join('');
 }
 
+// ===== نصوص الرسائل =====
+const warnMsg = (d, p) => `⚠️ تنبيه: مشهد غير عائلي بعد قليل (مدته ${d} ثانية - قدّم ${p} مرات) ⚠️`;
+const hideMsg = (d, p) => `⚠️ مشهد محجوب (${d} ثانية - قدّم ${p} مرات) ⚠️`;
+
+// ===== SRT: رسالة ملونة في أعلى الشاشة (an8) =====
+// نستخدم وسم ASS (للمشغلات التي تدعمه) مع وسم font (للمشغلات الأخرى)
+function srtTopMsg(text) {
+  return `{\\an8\\1c${WARN_ASS}\\3c&H000000&}<font color="${WARN_COLOR_HEX}">${text}</font>`;
+}
+
+// ===== SRT: جدار التعتيم في منتصف الشاشة (an5) =====
+function srtWall() {
+  const row = `<font color="#000000">${WALL_ROW}</font>`;
+  return `{\\an5\\1c&H000000&\\3c&H000000&}` + Array.from({ length: WALL_ROWS }, () => row).join('\n');
+}
+
 function applyShieldToSrtItems(items, targetId, customScenes = null) {
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
   if (!scenes.length) return items;
 
   let current = items.slice();
+  let prevEnd = 0;
 
   for (const sc of scenes) {
     const start = sc.start;
     const end = sc.end;
-    const warnStart = Math.max(0, start - 10);
     const { roundedDuration, presses } = calcSceneMetrics(start, end);
 
-    const warnBanner = `<font color="#FFFF00">⚠️ تنبيه: مشهد غير عائلي بعد قليل (مدته ${roundedDuration} ثانية - قدّم ${presses} مرات) ⚠️</font>`;
-    const wallRow = `<font color="#000000">██████████████████████████████</font>`;
-    const blackoutText = `<font color="#FFFF00">⚠️ مشهد محجوب (${roundedDuration} ثانية - قدّم ${presses} مرات) ⚠️</font>\n` + Array.from({ length: 12 }, () => wallRow).join('\n');
-
-    // 1. قص أو حذف أي ترجمة تتداخل مع وقت التعتيم الفعلي [start, end]
-    const afterBlackout = [];
+    // 1. قص أو حذف أي حوار يتداخل مع وقت التعتيم
+    const kept = [];
     for (const it of current) {
       if (it.endSec <= start || it.startSec >= end) {
-        afterBlackout.push(it);
-      } else {
-        if (it.startSec < start) {
-          afterBlackout.push({ startSec: it.startSec, endSec: start, text: it.text });
-        }
-        if (it.endSec > end) {
-          afterBlackout.push({ startSec: end, endSec: it.endSec, text: it.text });
-        }
+        kept.push(it);
+        continue;
+      }
+      if (it.startSec < start) {
+        kept.push({ startSec: it.startSec, endSec: start, text: it.text });
+      }
+      if (it.endSec > end) {
+        kept.push({ startSec: end, endSec: it.endSec, text: it.text });
       }
     }
 
-    // 2. معالجة نافذة التنبيه المسبق [warnStart, start] مع الحفاظ على الحوارات وملء الفراغات
-    const finalItems = [];
-    const warnOverlaps = [];
-
-    for (const it of afterBlackout) {
-      if (it.endSec <= warnStart || it.startSec >= start) {
-        finalItems.push(it);
-      } else {
-        if (it.startSec < warnStart) {
-          finalItems.push({ startSec: it.startSec, endSec: warnStart, text: it.text });
-        }
-        const wS = Math.max(warnStart, it.startSec);
-        const wE = Math.min(start, it.endSec);
-        if (wE > wS) {
-          warnOverlaps.push({ startSec: wS, endSec: wE, text: `${warnBanner}\n${it.text}` });
-        }
-        if (it.endSec > start) {
-          finalItems.push({ startSec: start, endSec: it.endSec, text: it.text });
-        }
-      }
+    // 2. التنبيه المسبق: سطر مستقل في أعلى الشاشة، لا يلمس الحوار ولا يغيّره
+    const warnStart = Math.max(prevEnd, start - WARN_SEC);
+    if (start - warnStart >= 1) {
+      kept.push({ startSec: warnStart, endSec: start, text: srtTopMsg(warnMsg(roundedDuration, presses)) });
     }
 
-    warnOverlaps.sort((a, b) => a.startSec - b.startSec);
-    let cursor = warnStart;
-    for (const ov of warnOverlaps) {
-      if (ov.startSec - cursor >= 0.25) {
-        finalItems.push({ startSec: cursor, endSec: ov.startSec, text: warnBanner });
-      }
-      finalItems.push(ov);
-      cursor = Math.max(cursor, ov.endSec);
-    }
-    if (start - cursor >= 0.25) {
-      finalItems.push({ startSec: cursor, endSec: start, text: warnBanner });
-    }
+    // 3. الجدار ثم رسالة الحجب بعده (لتُرسم فوقه إن أمكن)
+    kept.push({ startSec: start, endSec: end, text: srtWall() });
+    kept.push({ startSec: start, endSec: end, text: srtTopMsg(hideMsg(roundedDuration, presses)) });
 
-    // 3. حقن جدار التعتيم الأسود
-    finalItems.push({ startSec: start, endSec: end, text: blackoutText });
-    finalItems.sort((a, b) => a.startSec - b.startSec);
-    current = finalItems;
+    kept.sort((a, b) => a.startSec - b.startSec);
+    current = kept;
+    prevEnd = end;
   }
 
   return current;
@@ -181,31 +186,45 @@ function buildShieldedSrt(cues, texts, targetId, drawingRe = null) {
   return srtOutput;
 }
 
-// دوال مساعدة لملفات ASS
+// ===== دوال ASS =====
+
+// يرجع true لأي سطر حوار يتداخل (كلياً أو جزئياً) مع مشهد محجوب
 function isCueInsideShield(startStr, endStr, targetId, customScenes = null) {
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
   if (!scenes.length) return false;
   const sSec = parseSubTimeSec(startStr);
   const eSec = parseSubTimeSec(endStr);
-  return scenes.some(sc => sSec >= sc.start && eSec <= sc.end);
+  return scenes.some(sc => sSec < sc.end && eSec > sc.start);
 }
 
 function buildAssShieldLines(targetId, customScenes = null) {
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
   if (!scenes.length) return [];
+
+  const topTag = `{\\an8\\1c${WARN_ASS}\\3c&H000000&\\bord3\\shad0}`;
+  const wallTag = `{\\an5\\1c&H000000&\\3c&H000000&\\bord0\\shad0}`;
+  const wall = wallTag + Array.from({ length: WALL_ROWS }, () => WALL_ROW).join('\\N');
+
   const extra = [];
+  let prevEnd = 0;
+
   for (const sc of scenes) {
     const start = sc.start;
     const end = sc.end;
-    const warnStart = Math.max(0, start - 10);
     const { roundedDuration, presses } = calcSceneMetrics(start, end);
+    const warnStart = Math.max(prevEnd, start - WARN_SEC);
 
-    const warnLine = `{\\an8\\1c&H00FFFF&\\3c&H000000&\\bord3}⚠️ تنبيه: مشهد غير عائلي بعد قليل (مدته ${roundedDuration} ثانية - قدّم ${presses} مرات) ⚠️`;
-    const wallRow = `██████████████████████████████`;
-    const blackoutBlock = `{\\an2\\1c&H00FFFF&}⚠️ مشهد محجوب (${roundedDuration} ثانية - قدّم ${presses} مرات) ⚠️\\N{\\1c&H000000&\\3c&H000000&}` + Array.from({ length: 12 }, () => wallRow).join('\\N');
+    if (start - warnStart >= 1) {
+      const warnLine = topTag + warnMsg(roundedDuration, presses);
+      extra.push(`Dialogue: 99,${formatAssTimeSec(warnStart)},${formatAssTimeSec(start)},Default,,0,0,0,,${addAssRlm(warnLine)}`);
+    }
 
-    extra.push(`Dialogue: 99,${formatAssTimeSec(warnStart)},${formatAssTimeSec(start)},Default,,0,0,0,,${addAssRlm(warnLine)}`);
-    extra.push(`Dialogue: 99,${formatAssTimeSec(start)},${formatAssTimeSec(end)},Default,,0,0,0,,${addAssRlm(blackoutBlock)}`);
+    // الجدار في طبقة 98 والرسالة في طبقة 99 فتظهر الرسالة فوق الجدار
+    extra.push(`Dialogue: 98,${formatAssTimeSec(start)},${formatAssTimeSec(end)},Default,,0,0,0,,${wall}`);
+    const hideLine = topTag + hideMsg(roundedDuration, presses);
+    extra.push(`Dialogue: 99,${formatAssTimeSec(start)},${formatAssTimeSec(end)},Default,,0,0,0,,${addAssRlm(hideLine)}`);
+
+    prevEnd = end;
   }
   return extra;
 }
