@@ -160,7 +160,7 @@ function forceAlif(tok) {
   const m = FORCE_PREFIX_RE.exec(n);
   if (!m) return null;
   const stem = m[3];
-  if (stem.length < 2 || stem.length === n.length) return null;
+  if (stem.length < 3 || stem.length === n.length) return null;
   w = FORCE_MAP.get(stem);
   return w ? n.slice(0, n.length - stem.length) + w : null;
 }
@@ -183,7 +183,7 @@ module.exports = function createSpellFixer(fixTypoToken) {
   }
 
   function fixYa(tok) {
-    if (tok.length < 3) return tok;
+    if (tok.length < 2) return tok;
     const n = norm(tok);
     for (const c of candidates(n)) {
       if (KEEP_YA.has(c) || FORM_V.test(c)) return tok;
