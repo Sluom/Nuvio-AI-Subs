@@ -23,16 +23,36 @@ function hexToAss(hex) {
 const WARN_ASS = hexToAss(WARN_COLOR_HEX);
 const WALL_ROW = '█'.repeat(WALL_COLS);
 
-// مشاهد تجريبية للفحص (تشتغل تلقائياً على أي فلم حالياً)
-// لاحقاً نربطها بقاعدة البيانات أو الكشف التلقائي حسب targetId
+// ===== قاعدة المشاهد (يدوية حالياً) =====
+// المفتاح: معرّف IMDb للفلم 'tt0000000' أو للحلقة 'tt0000000:1:2'
+// القيمة: قائمة [بداية, نهاية] بالثواني، أو بصيغة 'دقيقة:ثانية' أو 'ساعة:دقيقة:ثانية'
+const SCENES_DB = {
+  // 'tt0000000': [['12:30', '13:10'], ['45:00', '46:20'], [3400, 3450]],
+};
+const SCENE_PAD_SEC = 2;        // هامش أمان قبل المشهد وبعده (لاختلاف التوقيت بين الإصدارات)
+const USE_TEST_SCENES = true;  // true = مشاهد الاختبار على كل الأفلام
+
 const TEST_SCENES = [
-  { start: 20, end: 45 },   // تجربة 1: التنبيه من 00:10 والتعتيم من 00:20 إلى 00:45
-  { start: 300, end: 315 }  // تجربة 2: التنبيه من 04:50 والتعتيم من 05:00 إلى 05:15
+  { start: 20, end: 45 },
+  { start: 300, end: 315 }
 ];
 
+function toSec(v) {
+  if (typeof v === 'number') return v;
+  const p = String(v).trim().split(':').map(Number);
+  if (!p.length || p.some(n => !Number.isFinite(n))) return NaN;
+  return p.reduce((acc, n) => acc * 60 + n, 0);
+}
+
 function getScenesForMedia(targetId) {
-  // حالياً نرجع المشاهد التجريبية للتأكد من عمل المشغل
-  return TEST_SCENES;
+  if (USE_TEST_SCENES) return TEST_SCENES;
+  const raw = SCENES_DB[targetId];
+  if (!Array.isArray(raw)) return [];
+  return raw.map(pair => {
+    const a = toSec(pair[0]);
+    const b = toSec(pair[1]);
+    return { start: Math.max(0, a - SCENE_PAD_SEC), end: b + SCENE_PAD_SEC };
+  });
 }
 
 function parseSubTimeSec(t) {
@@ -114,6 +134,11 @@ function srtTopMsg(text) {
   return `{\\an8\\1c${WARN_ASS}\\3c&H000000&}<font color="${WARN_COLOR_HEX}">${text}</font>`;
 }
 
+// رسالة التنبيه المدموجة فوق الحوار: بلا وسم مكان حتى لا تنتقل معها سطور الحوار
+function srtBanner(text) {
+  return `<font color="${WARN_COLOR_HEX}">${text}</font>`;
+}
+
 // ===== SRT: جدار التعتيم في منتصف الشاشة (an5) =====
 function srtWall() {
   const row = `<font color="#000000">${WALL_ROW}</font>`;
@@ -147,18 +172,44 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
       }
     }
 
-    // 2. التنبيه المسبق: سطر مستقل في أعلى الشاشة، لا يلمس الحوار ولا يغيّره
+    // 2. التنبيه المسبق: Nuvio يتجاهل وسوم المكان في SRT، فندمج الرسالة كسطر أول
+    //    فوق الحوار نفسه (لا تتداخل معه) ونملأ الفراغات بتنبيه مستقل
     const warnStart = Math.max(prevEnd, start - WARN_SEC);
-    if (start - warnStart >= 1) {
-      kept.push({ startSec: warnStart, endSec: start, text: srtTopMsg(warnMsg(roundedDuration, presses)) });
+    const banner = srtBanner(warnMsg(roundedDuration, presses));
+    const hasWarn = start - warnStart >= 1;
+    const next = [];
+    const inWindow = [];
+    for (const it of kept) {
+      if (!hasWarn || it.endSec <= warnStart || it.startSec >= start) {
+        next.push(it);
+        continue;
+      }
+      if (it.startSec < warnStart) {
+        next.push({ startSec: it.startSec, endSec: warnStart, text: it.text });
+      }
+      inWindow.push({
+        startSec: Math.max(warnStart, it.startSec),
+        endSec: Math.min(start, it.endSec),
+        text: `${banner}\n${it.text}`
+      });
+    }
+    if (hasWarn) {
+      inWindow.sort((a, b) => a.startSec - b.startSec);
+      let cursor = warnStart;
+      for (const ov of inWindow) {
+        if (ov.startSec - cursor >= 0.25) next.push({ startSec: cursor, endSec: ov.startSec, text: banner });
+        next.push(ov);
+        cursor = Math.max(cursor, ov.endSec);
+      }
+      if (start - cursor >= 0.25) next.push({ startSec: cursor, endSec: start, text: banner });
     }
 
-    // 3. الجدار ثم رسالة الحجب بعده (لتُرسم فوقه إن أمكن)
-    kept.push({ startSec: start, endSec: end, text: srtWall() });
-    kept.push({ startSec: start, endSec: end, text: srtTopMsg(hideMsg(roundedDuration, presses)) });
+    // 3. الجدار ثم رسالة الحجب بعده
+    next.push({ startSec: start, endSec: end, text: srtWall() });
+    next.push({ startSec: start, endSec: end, text: srtTopMsg(hideMsg(roundedDuration, presses)) });
 
-    kept.sort((a, b) => a.startSec - b.startSec);
-    current = kept;
+    next.sort((a, b) => a.startSec - b.startSec);
+    current = next;
     prevEnd = end;
   }
 
