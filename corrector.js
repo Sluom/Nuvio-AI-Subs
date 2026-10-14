@@ -560,7 +560,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
 
   const CHUNK = CORRECTOR_CHUNK;
   // رفعنا النسخة إلى ARB7 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
-  const cacheVersion = process.env.CACHE_VER || 'ARB7';
+  const cacheVersion = process.env.CACHE_VER || 'ARB1';
   const lineCacheKey = cacheVersion + '_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
