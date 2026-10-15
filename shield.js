@@ -1,5 +1,5 @@
 // shield.js
-// درع الترجمة: ربط مباشر مع أوقات حجب سينمانا (cee.buzz / cinemana) + نظام التصويت الصارم + جدار كامل الشاشة
+// درع الترجمة (خاص بالأفلام فقط): مطابقة زمنية صارمة 100% + هامش 2.5 ثانية + تجاهل صامت وكامل للمسلسلات
 
 const axiosDefault = require('axios');
 
@@ -17,24 +17,20 @@ const WALL_ROWS = 16;                 // 16 سطر لتغطية ارتفاع ا�
 const ASS_WALL_COLS = 54;             // عرض الجدار لملفات ASS
 const ASS_WALL_ROWS = 18;             // ارتفاع الجدار لملفات ASS
 
-// ===== 2. إعدادات سينمانا (Cee / Cinemana) ونظام التصويت والثقة =====
+// ===== 2. إعدادات الدقة الصارمة للأفلام فقط =====
 const TMDB_API_KEY = '16fc93e65cf8c9184b8ac53006288677';
-const CEE_API_BASES = [
-  'https://cee.buzz/api/android',
-  'https://cinemana.shabakaty.cc/api/android'
-];
-const MIN_AI_CONFIDENCE = 85;         // أقل نسبة ثقة (85%) لتفعيل الجدار عند غياب أوقات سينمانا
-const SCENE_PAD_BEFORE_SEC = 4;       // هامش أمان قبل المشهد
-const SCENE_PAD_AFTER_SEC = 3;        // هامش أمان بعد نهاية المشهد
+const MIN_AI_CONFIDENCE = 90;         // دقة مطابقة صارمة (90%) لمنع أي انحراف بالثواني
+const SCENE_PAD_BEFORE_SEC = 2.5;     // هامش 2.5 ثانية فقط قبل المشهد
+const SCENE_PAD_AFTER_SEC = 2.5;      // هامش 2.5 ثانية فقط بعد المشهد
 const USE_TEST_SCENES = false;        // false = التشغيل الفعلي
 const HTTP_TIMEOUT_MS = 8500;
 const MAX_HTTP_BYTES = 2 * 1024 * 1024;
 const MAX_CACHE_ENTRIES = 500;
 
 const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
-  'Accept': 'application/json, text/html, application/xhtml+xml, */*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7',
+  'Accept-Language': 'en-US,en;q=0.9'
 };
 
 function getAiShared() {
@@ -58,9 +54,9 @@ const WALL_ROW = WALL_CHAR.repeat(WALL_COLS);
 const FULL_SRT_WALL = Array.from({ length: WALL_ROWS }, () => WALL_ROW).join('\n');
 const ASS_WALL_ROW = WALL_CHAR.repeat(ASS_WALL_COLS);
 
-// ===== قائمة أولوية يدوية (اختيارية) =====
+// ===== قائمة أولوية يدوية للأفلام (اختيارية) =====
 const SCENES_DB = {
-  // 'tt0000000': [['12:30', '13:10'], ['45:00', '46:20']],
+  // 'tt0993846': [['01:12', '01:48'], ['11:18', '12:05']],
 };
 
 const TEST_SCENES = [
@@ -68,7 +64,14 @@ const TEST_SCENES = [
   { start: 300, end: 315, type: 'wall' }
 ];
 
-// كاش معزول للمصادر وللروابط
+// فحص صارم: يقبل معرّف الفلم فقط (tt1234567) ويرفض أي مسلسل يحتوي على نقطتين (:) بصمت تام
+function isMovieTargetId(targetId) {
+  const raw = String(targetId || '').trim();
+  if (!raw || raw.includes(':')) return false;
+  return /^tt\d{6,10}$/i.test(raw);
+}
+
+// كاش معزول للأفلام وملفات الترجمة
 const EVIDENCE_CACHE = new Map();
 const RESOLVED_SCENES_CACHE = new Map();
 const LATEST_TARGET_SCENES = new Map();
@@ -76,21 +79,22 @@ const IN_FLIGHT_EVIDENCE = new Map();
 const IN_FLIGHT_TRACKS = new Map();
 
 function getTrackCacheKey(targetId, cues) {
-  if (!targetId) return '';
-  if (!Array.isArray(cues) || cues.length === 0) return String(targetId);
+  if (!isMovieTargetId(targetId)) return '';
+  if (!Array.isArray(cues) || cues.length === 0) return String(targetId).toLowerCase();
   const first = String(cues[0]?.start || '').trim();
   const last = String(cues[cues.length - 1]?.end || '').trim();
-  return `${targetId}::${cues.length}::${first}::${last}`;
+  return `${String(targetId).toLowerCase()}::${cues.length}::${first}::${last}`;
 }
 
 function saveTrackScenesToCache(targetId, trackKey, scenes) {
-  if (!targetId) return;
+  if (!isMovieTargetId(targetId)) return;
+  const cleanId = String(targetId).trim().toLowerCase();
   if (RESOLVED_SCENES_CACHE.size >= MAX_CACHE_ENTRIES) {
     const oldestKey = RESOLVED_SCENES_CACHE.keys().next().value;
     if (oldestKey !== undefined) RESOLVED_SCENES_CACHE.delete(oldestKey);
   }
   if (trackKey) RESOLVED_SCENES_CACHE.set(trackKey, scenes);
-  LATEST_TARGET_SCENES.set(targetId, scenes);
+  LATEST_TARGET_SCENES.set(cleanId, scenes);
 }
 
 function toSec(v) {
@@ -150,7 +154,7 @@ function normalizeScenes(rawScenes) {
   const merged = [];
   for (const sc of valid) {
     const last = merged[merged.length - 1];
-    if (!last || sc.type !== last.type || sc.start > last.end + 4) {
+    if (!last || sc.type !== last.type || sc.start > last.end + 3) {
       merged.push({ ...sc });
     } else {
       last.end = Math.max(last.end, sc.end);
@@ -160,7 +164,8 @@ function normalizeScenes(rawScenes) {
 }
 
 function getManualScenes(targetId) {
-  const raw = SCENES_DB[targetId];
+  if (!isMovieTargetId(targetId)) return null;
+  const raw = SCENES_DB[targetId] || SCENES_DB[String(targetId).toLowerCase()];
   if (!Array.isArray(raw) || !raw.length) return null;
   const list = [];
   for (const pair of raw) {
@@ -175,6 +180,7 @@ function getManualScenes(targetId) {
 }
 
 function getScenesForMedia(targetId, cues = null) {
+  if (!isMovieTargetId(targetId)) return [];
   if (USE_TEST_SCENES) return TEST_SCENES;
   const manual = getManualScenes(targetId);
   if (manual) return manual;
@@ -182,8 +188,9 @@ function getScenesForMedia(targetId, cues = null) {
     const tk = getTrackCacheKey(targetId, cues);
     if (RESOLVED_SCENES_CACHE.has(tk)) return RESOLVED_SCENES_CACHE.get(tk) || [];
   }
-  if (targetId && LATEST_TARGET_SCENES.has(targetId)) {
-    return LATEST_TARGET_SCENES.get(targetId) || [];
+  const cleanId = String(targetId).trim().toLowerCase();
+  if (LATEST_TARGET_SCENES.has(cleanId)) {
+    return LATEST_TARGET_SCENES.get(cleanId) || [];
   }
   return [];
 }
@@ -240,184 +247,10 @@ async function safeHttpGet(url, extraHeaders = {}, customTimeout = HTTP_TIMEOUT_
   return res.data;
 }
 
-// ===== تطبيع الأسماء العربية والإنجليزية لمطابقة بحث سينمانا و Cee =====
-function normalizeSearchTitle(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
-    .replace(/[\u0623\u0625\u0622\u0671]/g, '\u0627')
-    .replace(/\u0649/g, '\u064A')
-    .replace(/\u0629/g, '\u0647')
-    .replace(/[^a-z0-9\u0600-\u06ff]+/g, ' ')
-    .trim();
-}
-
-function uniqueStrings(list) {
-  const out = [];
-  for (const x of list) {
-    const s = String(x || '').trim();
-    if (s && !out.includes(s)) out.push(s);
-  }
-  return out;
-}
-
-function calcCinemanaTitleScore(itemTitle, normalizedTargetNames) {
-  const t = normalizeSearchTitle(itemTitle);
-  if (!t) return 0;
-  if (normalizedTargetNames.includes(t)) return 100;
-  const partial = normalizedTargetNames.some(n => {
-    if (Math.min(n.length, t.length) < 3) return false;
-    return t.includes(n) || n.includes(t);
-  });
-  return partial ? 50 : 0;
-}
-
-function pickBestCinemanaItem(results, meta) {
-  if (!Array.isArray(results) || !results.length) return null;
-  const wantSeries = Boolean(meta.isSeries);
-  const normNames = (meta.searchTerms || [meta.title]).map(normalizeSearchTitle).filter(Boolean);
-  let best = null;
-  let bestScore = 0;
-
-  for (const it of results) {
-    if (!it || !it.nb) continue;
-
-    if (it.imdbUrlRef && meta.baseImdbId && String(it.imdbUrlRef).toLowerCase().includes(meta.baseImdbId)) {
-      return it;
-    }
-
-    if (it.kind !== undefined && it.kind !== null) {
-      const isItemSeries = parseInt(it.kind, 10) === 2;
-      if (isItemSeries !== wantSeries) continue;
-    }
-
-    let score = Math.max(
-      calcCinemanaTitleScore(it.en_title, normNames),
-      calcCinemanaTitleScore(it.ar_title, normNames)
-    );
-    if (score === 0) continue;
-
-    const y = parseInt(it.year, 10);
-    if (meta.year && y) {
-      if (y === meta.year) score += 30;
-      else if (Math.abs(y - meta.year) === 1) score += 10;
-      else if (!wantSeries) score -= 60;
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = it;
-    }
-  }
-
-  return bestScore >= 50 ? best : null;
-}
-
-// استخراج فترات الحجب من حقل skippingDurations
-function parseSkippingDurationsField(rawField) {
-  if (!rawField) return [];
-  let data = rawField;
-  if (typeof data === 'string') {
-    try { data = JSON.parse(data); } catch (_) { return []; }
-  }
-
-  const scenes = [];
-
-  if (data && typeof data === 'object' && !Array.isArray(data)) {
-    const starts = Array.isArray(data.start) ? data.start : [];
-    const ends = Array.isArray(data.end) ? data.end : [];
-    const count = Math.min(starts.length, ends.length);
-    for (let i = 0; i < count; i++) {
-      const s = toSec(starts[i]);
-      const e = toSec(ends[i]);
-      if (Number.isFinite(s) && Number.isFinite(e) && e > s && s >= 0 && (e - s <= 1200)) {
-        scenes.push({ start: s, end: e, type: 'wall' });
-      }
-    }
-  } else if (Array.isArray(data)) {
-    for (const item of data) {
-      if (!item) continue;
-      const s = toSec(item.start ?? item[0]);
-      const e = toSec(item.end ?? item[1]);
-      if (Number.isFinite(s) && Number.isFinite(e) && e > s && s >= 0 && (e - s <= 1200)) {
-        scenes.push({ start: s, end: e, type: 'wall' });
-      }
-    }
-  }
-
-  return normalizeScenes(scenes);
-}
-
-// ===== المصدر الأساسي الأول (Tier 0): جلب أوقات القطع الرسمية من Cee.buzz / Cinemana =====
-async function fetchCeeCinemanaSkipping(meta) {
-  if (!meta) return null;
-  const searchTerms = uniqueStrings(meta.searchTerms && meta.searchTerms.length ? meta.searchTerms : [meta.title]);
-  if (!searchTerms.length) return null;
-
-  const searchType = meta.isSeries ? 'series' : 'movies';
-  const currentYear = new Date().getFullYear();
-
-  for (const apiBase of CEE_API_BASES) {
-    const providerLabel = apiBase.includes('cee.buzz') ? 'Cee.buzz' : 'Cinemana';
-    try {
-      let matchedItem = null;
-
-      for (const term of searchTerms) {
-        const enc = encodeURIComponent(term);
-        const searchUrl = `${apiBase}/AdvancedSearch?level=0&videoTitle=${enc}&staffTitle=${enc}&year=1900,${currentYear}&page=0&type=${searchType}&itemsPerPage=12`;
-        try {
-          const list = await safeHttpGet(searchUrl, {}, 9000);
-          matchedItem = pickBestCinemanaItem(list, meta);
-          if (matchedItem) break;
-        } catch (_) {}
-      }
-
-      if (!matchedItem || !matchedItem.nb) continue;
-
-      let videoId = String(matchedItem.nb);
-      if (meta.isSeries) {
-        const sNum = Number(meta.season) || 1;
-        const eNum = Number(meta.episode) || 1;
-        const eps = await safeHttpGet(`${apiBase}/videoSeason/id/${matchedItem.nb}`, {}, 9000);
-        if (!Array.isArray(eps)) continue;
-        const foundEp = eps.find(ep =>
-          parseInt(ep?.season, 10) === sNum &&
-          parseInt(ep?.episodeNummer ?? ep?.episodeNumber, 10) === eNum
-        );
-        if (!foundEp || !foundEp.nb) continue;
-        videoId = String(foundEp.nb);
-      }
-
-      const info = await safeHttpGet(`${apiBase}/allVideoInfo/id/${videoId}`, {}, 9000);
-      if (!info || typeof info !== 'object') continue;
-
-      if (info.imdbUrlRef && meta.baseImdbId) {
-        const refMatch = String(info.imdbUrlRef).match(/tt\d+/i);
-        if (refMatch && refMatch[0].toLowerCase() !== meta.baseImdbId && refMatch[0].toLowerCase() !== meta.episodeImdbId) {
-          continue;
-        }
-      }
-
-      const scenes = parseSkippingDurationsField(info.skippingDurations);
-      console.log(`[درع Nuvio 🎯 ${providerLabel}] تم العثور على العمل (nb=${videoId}) | الفترات في skippingDurations=${scenes.length}`);
-
-      return {
-        source: `${providerLabel}(nb:${videoId})`,
-        videoId,
-        scenes,
-        hasSkipping: scenes.length > 0
-      };
-    } catch (_) {}
-  }
-
-  return null;
-}
-
 function extractRegexTimestampsFromDescriptions(descList) {
   if (!Array.isArray(descList)) return [];
   const extracted = [];
   const rangeRe = /\b(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:to|[-–—]|until)\s*(\d{1,2}:\d{2}(?::\d{2})?)\b/gi;
-  const pointRe = /\b(?:at|around|mark|timestamp)\s+(\d{1,2}:\d{2}(?::\d{2})?)\b/gi;
 
   for (const text of descList) {
     const s = String(text || '');
@@ -429,59 +262,192 @@ function extractRegexTimestampsFromDescriptions(descList) {
         extracted.push({ start: a, end: b, type: 'wall' });
       }
     }
-    while ((m = pointRe.exec(s)) !== null) {
-      const a = toSec(m[1]);
-      if (Number.isFinite(a) && a > 0) {
-        extracted.push({ start: Math.max(0, a - 5), end: a + 35, type: 'wall' });
-      }
-    }
   }
   return extracted;
 }
 
-// ===== استخراج رقم IMDb الخاص بالحلقة =====
-async function resolveEpisodeSpecificImdbId(baseImdbId, season, episode, seriesTitle, episodeTitle) {
-  if (episodeTitle) {
-    try {
-      const cleanEp = episodeTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-      if (cleanEp.length >= 3) {
-        const firstLetter = cleanEp[0];
-        const sug = await safeHttpGet(`https://v3.sg.media-imdb.com/suggestion/${firstLetter}/${encodeURIComponent(cleanEp.slice(0, 35))}.json`);
-        const list = Array.isArray(sug?.d) ? sug.d : [];
-        const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        const targetNorm = norm(episodeTitle);
-        const found = list.find(x =>
-          /^tt\d+$/i.test(x.id) &&
-          x.id !== baseImdbId &&
-          (norm(x.l) === targetNorm || norm(x.l).includes(targetNorm)) &&
-          /episode/i.test(String(x.q || x.qid || ''))
-        ) || list.find(x => /^tt\d+$/i.test(x.id) && x.id !== baseImdbId && /episode/i.test(String(x.q || x.qid || '')));
+// ===== 1. جلب بيانات الفلم فقط (يرفض المسلسلات تماماً) =====
+async function resolveMovieMeta(targetId) {
+  if (!isMovieTargetId(targetId)) return null;
+  const imdbId = String(targetId).trim().toLowerCase();
 
-        if (found) {
-          return { episodeImdbId: found.id.toLowerCase(), episodeTitle };
+  let title = '';
+  let year = null;
+  let runtimeSec = 0;
+
+  // أ) جلب من TMDB للتأكد من أنه فلم سينمائي وليس مسلسلاً
+  try {
+    const findEn = await safeHttpGet(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=en-US`, {}, 6500);
+    if (Array.isArray(findEn?.tv_results) && findEn.tv_results.length > 0 && (!findEn.movie_results || !findEn.movie_results.length)) {
+      return null; // إذا كان مسلسلاً نتجاهله تماماً
+    }
+    const movieObj = (findEn?.movie_results || [])[0];
+    if (movieObj) {
+      title = String(movieObj.title || movieObj.original_title || '').trim();
+      const dateStr = String(movieObj.release_date || '');
+      if (dateStr.length >= 4) year = parseInt(dateStr.slice(0, 4), 10) || null;
+    }
+  } catch (_) {}
+
+  // ب) جلب من IMDb Suggestion API
+  if (!title || !year) {
+    try {
+      const sug = await safeHttpGet(`https://v3.sg.media-imdb.com/suggestion/t/${imdbId}.json`);
+      const item = Array.isArray(sug?.d) ? sug.d.find(x => x.id === imdbId) || sug.d[0] : null;
+      if (item) {
+        if (/tvSeries|tvMiniSeries|tvEpisode/i.test(String(item.qid || item.q || ''))) {
+          return null; // استبعاد المسلسلات
+        }
+        if (!title) title = String(item.l || '').trim();
+        if (!year && Number.isFinite(Number(item.y))) year = Number(item.y);
+      }
+    } catch (_) {}
+  }
+
+  // ج) جلب احتياطي من Cinemeta للأفلام فقط
+  if (!title || !year) {
+    try {
+      const cm = await safeHttpGet(`https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`);
+      const meta = cm?.meta;
+      if (meta) {
+        if (!title && meta.name) title = String(meta.name).trim();
+        if (!year && meta.year) {
+          const yMatch = String(meta.year).match(/\d{4}/);
+          if (yMatch) year = Number(yMatch[0]);
+        }
+        if (meta.runtime) {
+          const rm = String(meta.runtime).match(/(\d+)/);
+          if (rm) runtimeSec = parseInt(rm[1], 10) * 60;
         }
       }
     } catch (_) {}
   }
 
-  try {
-    const data = await safeHttpGet(`https://api.imdbapi.dev/titles/${baseImdbId}/episodes?season=${season}`, { Accept: 'application/json' });
-    const eps = data?.episodes || data?.items || (Array.isArray(data) ? data : []);
-    if (Array.isArray(eps) && eps.length > 0) {
-      const epItem = eps.find(e => Number(e?.episodeNumber || e?.episode) === Number(episode)) || eps[episode - 1];
-      const epId = epItem?.id || epItem?.imdbId || epItem?.tconst;
-      if (epId && /^tt\d+$/i.test(String(epId))) {
-        return {
-          episodeImdbId: String(epId).toLowerCase(),
-          episodeTitle: String(epItem?.title || epItem?.primaryTitle || episodeTitle || '').trim()
-        };
+  if (!title) return null;
+
+  return {
+    imdbId,
+    title,
+    year,
+    runtimeSec
+  };
+}
+
+// ===== 2. المصادر الـ 6 للأفلام (مرتبة هرمياً حسب الدقة) =====
+
+// [المصدر 1 - التوقيت الجاهز بالثانية]: CringeMDb
+async function fetchCringeMdb(meta) {
+  if (!meta || !meta.title) return null;
+  const slug = slugifyStandard(meta.title);
+  if (!slug) return null;
+
+  const urls = [];
+  if (meta.year) urls.push(`https://cringemdb.com/movie/${slug}-${meta.year}`);
+  urls.push(`https://cringemdb.com/movie/${slug}`);
+
+  for (const url of urls) {
+    try {
+      const html = await safeHttpGet(url);
+      if (typeof html !== 'string' || html.length < 500) continue;
+
+      const text = stripHtmlTags(html);
+      const isSafe = /is SAFE to watch with parents/i.test(text) ||
+        (/Sex Scene\s*NO/i.test(text) && /Nudity\s*NO/i.test(text) && /Sexual Violence\s*NO/i.test(text));
+
+      const timeRegex = /(\d{1,2}:\d{2}(?::\d{2})?)\s+to\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*\.?\s*(Sex scene|Nudity|Sexual Violence|Suggestive)\b([^.*]*?)(?=(?:\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}|CringeMDb Staff Says|Top Billed Cast|$))/gi;
+      const directScenes = [];
+      const descriptions = [];
+      let m;
+
+      while ((m = timeRegex.exec(text)) !== null) {
+        const startSec = toSec(m[1]);
+        const endSec = toSec(m[2]);
+        const category = String(m[3] || '').trim();
+        const details = String(m[4] || '')
+          .replace(/Unverified.*$/i, '')
+          .replace(/Skippable without missing the plot/gi, '')
+          .trim();
+
+        const isBriefSuggestiveOnly = /Suggestive/i.test(category) && !/\b(naked|nude|sex|breast|topless|lingerie|stripper|underwear|bed|kissing|making out)\b/i.test(details);
+        if (Number.isFinite(startSec) && Number.isFinite(endSec) && endSec > startSec && !isBriefSuggestiveOnly) {
+          directScenes.push({ start: startSec, end: endSec, type: 'wall', note: `${category}: ${details.slice(0, 180)}` });
+          descriptions.push(`[EXACT TIMESTAMP ${m[1]} to ${m[2]} (${startSec}s - ${endSec}s)] (${category}): ${details.slice(0, 220)}`);
+        }
       }
-    }
+
+      const staffMatch = text.match(/CringeMDb Staff Says:\s*([^.*]+(?:\.[^.*]+){0,4})/i);
+      if (staffMatch) descriptions.push(`Staff Note: ${staffMatch[1].trim().slice(0, 300)}`);
+
+      const hasAdult = !isSafe || directScenes.length > 0;
+      return {
+        source: 'CringeMDb',
+        voteWeight: directScenes.length > 0 ? 3 : (hasAdult ? 1 : 0),
+        isClean: isSafe && directScenes.length === 0,
+        hasAdult,
+        directScenes,
+        descriptions
+      };
+    } catch (_) {}
+  }
+  return null;
+}
+
+// [المصدر 2 - الأدق في التسلسل الزمني الكامل]: Kids-In-Mind
+async function fetchKidsInMind(meta) {
+  if (!meta || !meta.title) return null;
+  const { firstLetter, clean, fullNoArticles } = slugifyKidsInMind(meta.title);
+  if (!clean) return null;
+
+  const candidates = [
+    `https://kids-in-mind.com/${firstLetter}/${clean}.htm`,
+    `https://kids-in-mind.com/${firstLetter}/${fullNoArticles}.htm`,
+    meta.year ? `https://kids-in-mind.com/${firstLetter}/${clean}${meta.year}.htm` : null
+  ].filter(Boolean);
+
+  for (const url of candidates) {
+    try {
+      const html = await safeHttpGet(url);
+      if (typeof html !== 'string' || html.length < 500) continue;
+      if (meta.year && !html.includes(String(meta.year))) continue;
+
+      const text = stripHtmlTags(html);
+      const secMatch = text.match(/SEX\/NUDITY\s*(\d{1,2})\s*[-–—]\s*([\s\S]*?)(?=VIOLENCE\/GORE|LANGUAGE|PROFANITY|SUBSTANCE USE|DISCUSSION TOPICS|MESSAGE|$)/i);
+      if (!secMatch) continue;
+
+      const score = parseInt(secMatch[1], 10);
+      const desc = secMatch[2].trim().slice(0, 3500);
+      const hasAdult = score >= 3 || /\b(nudity|nude|naked|sex|intercourse|breasts|topless|prostitute|stripper|orgy|rape|masturbat|thrusting|making love|buttocks)\b/i.test(desc);
+      return {
+        source: 'Kids-In-Mind',
+        score,
+        voteWeight: score >= 5 ? 2 : (hasAdult ? 1 : 0),
+        isClean: score <= 1 && !hasAdult,
+        hasAdult,
+        directScenes: extractRegexTimestampsFromDescriptions([desc]),
+        descriptions: desc ? [`[Kids-In-Mind Score ${score}/10 - STRICT CHRONOLOGICAL SCENE ORDER]: ${desc}`] : []
+      };
+    } catch (_) {}
+  }
+  return null;
+}
+
+// [المصدر 3 - الأشمل عالمياً]: IMDb Parents Guide + Plot Synopsis
+async function fetchImdbParentsGuide(meta) {
+  if (!meta || !meta.imdbId) return null;
+  const imdbId = meta.imdbId;
+
+  // 3-أ: عبر api.imdbapi.dev
+  try {
+    const data = await safeHttpGet(`https://api.imdbapi.dev/titles/${imdbId}/parentsGuide`, { Accept: 'application/json' });
+    const guide = data?.parentalGuide || data?.parentsGuide || data;
+    const parsed = extractImdbGuideData(guide);
+    if (parsed && (parsed.descriptions.length > 0 || parsed.isClean)) return parsed;
   } catch (_) {}
 
+  // 3-ب: عبر IMDb GraphQL
   try {
     const { axios } = getAiShared();
-    const query = `query { title(id: "${baseImdbId}") { episodes { episodes(first: 50) { edges { node { id titleText { text } series { displayableEpisodeNumber { episodeNumber { episodeNumber } seasonNumber { seasonNumber } } } } } } } } }`;
+    const query = `query { title(id: "${imdbId}") { parentsGuide { guideItems(first: 50) { edges { node { category { id } text { plainText } } } } } } }`;
     const gqlRes = await axios.post('https://api.graphql.imdb.com/', { query }, {
       headers: {
         ...BROWSER_HEADERS,
@@ -490,192 +456,45 @@ async function resolveEpisodeSpecificImdbId(baseImdbId, season, episode, seriesT
       },
       timeout: HTTP_TIMEOUT_MS
     });
-    const edges = gqlRes.data?.data?.title?.episodes?.episodes?.edges;
-    if (Array.isArray(edges)) {
-      for (const edge of edges) {
-        const node = edge?.node;
-        const sNum = Number(node?.series?.displayableEpisodeNumber?.seasonNumber?.seasonNumber);
-        const eNum = Number(node?.series?.displayableEpisodeNumber?.episodeNumber?.episodeNumber);
-        if (sNum === Number(season) && eNum === Number(episode) && /^tt\d+$/i.test(String(node?.id || ''))) {
-          return {
-            episodeImdbId: String(node.id).toLowerCase(),
-            episodeTitle: String(node?.titleText?.text || episodeTitle || '').trim()
-          };
-        }
-      }
+    const edges = gqlRes.data?.data?.title?.parentsGuide?.guideItems?.edges;
+    if (Array.isArray(edges) && edges.length > 0) {
+      const nudityItems = edges
+        .map(e => e?.node)
+        .filter(n => n && /NUDITY|SEX/i.test(String(n.category?.id || '')))
+        .map(n => String(n.text?.plainText || '').trim())
+        .filter(Boolean);
+
+      const realNudityItems = nudityItems.filter(txt => !/^(none|no nudity|no sex|nothing|n\/a)\.?$/i.test(txt));
+
+      return {
+        source: 'IMDb-ParentsGuide',
+        itemCount: realNudityItems.length,
+        voteWeight: realNudityItems.length >= 2 ? 2 : (realNudityItems.length === 1 ? 1 : 0),
+        isClean: realNudityItems.length === 0,
+        hasAdult: realNudityItems.length > 0,
+        directScenes: extractRegexTimestampsFromDescriptions(realNudityItems),
+        descriptions: realNudityItems.slice(0, 35)
+      };
     }
   } catch (_) {}
 
-  return null;
-}
-
-// ===== جلب معلومات الفلم أو الحلقة (مع الأسماء الإنجليزية والعربية من TMDB لبحث سينمانا) =====
-async function resolveMediaMeta(targetId) {
-  const raw = String(targetId || '').trim();
-  const parts = raw.split(':');
-  const imdbMatch = parts[0].match(/^(tt\d{6,10})$/i);
-  if (!imdbMatch) return null;
-
-  const baseImdbId = imdbMatch[1].toLowerCase();
-  const isSeries = parts.length >= 3 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
-  const season = isSeries ? parseInt(parts[1], 10) : null;
-  const episode = isSeries ? parseInt(parts[2], 10) : null;
-
-  let title = '';
-  let arTitle = '';
-  let originalTitle = '';
-  let year = null;
-  let episodeImdbId = null;
-  let episodeTitle = '';
-  let episodePlot = '';
-
+  // 3-ج: عبر صفحة HTML المباشرة
   try {
-    const findEn = await safeHttpGet(`https://api.themoviedb.org/3/find/${baseImdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=en-US`, {}, 6500);
-    const listEn = isSeries ? (findEn?.tv_results || []) : (findEn?.movie_results || []);
-    const itemEn = listEn[0] || (findEn?.movie_results || [])[0] || (findEn?.tv_results || [])[0];
-    if (itemEn) {
-      title = String(itemEn.title || itemEn.name || '').trim();
-      originalTitle = String(itemEn.original_title || itemEn.original_name || '').trim();
-      const dateStr = String(itemEn.release_date || itemEn.first_air_date || '');
-      if (dateStr.length >= 4) year = parseInt(dateStr.slice(0, 4), 10) || null;
-
-      if (itemEn.id) {
-        const kind = isSeries ? 'tv' : 'movie';
-        const infoAr = await safeHttpGet(`https://api.themoviedb.org/3/${kind}/${itemEn.id}?api_key=${TMDB_API_KEY}&language=ar`, {}, 5500).catch(() => null);
-        if (infoAr) {
-          arTitle = String(infoAr.title || infoAr.name || '').trim();
-        }
+    const html = await safeHttpGet(`https://www.imdb.com/title/${imdbId}/parentalguide`);
+    if (typeof html === 'string' && html.length > 1000) {
+      const nextMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+      if (nextMatch) {
+        const json = JSON.parse(nextMatch[1]);
+        const parsed = extractImdbGuideData(json);
+        if (parsed && (parsed.descriptions.length > 0 || parsed.isClean)) return parsed;
       }
     }
   } catch (_) {}
 
-  if (!title || !year) {
-    try {
-      const sug = await safeHttpGet(`https://v3.sg.media-imdb.com/suggestion/t/${baseImdbId}.json`);
-      const item = Array.isArray(sug?.d) ? sug.d.find(x => x.id === baseImdbId) || sug.d[0] : null;
-      if (item) {
-        if (!title) title = String(item.l || '').trim();
-        if (!year && Number.isFinite(Number(item.y))) year = Number(item.y);
-      }
-    } catch (_) {}
-  }
-
-  if (!title || !year || isSeries) {
-    try {
-      const type = isSeries ? 'series' : 'movie';
-      const cm = await safeHttpGet(`https://v3-cinemeta.strem.io/meta/${type}/${baseImdbId}.json`);
-      const meta = cm?.meta;
-      if (meta) {
-        if (!title && meta.name) title = String(meta.name).trim();
-        if (!year && meta.year) {
-          const yMatch = String(meta.year).match(/\d{4}/);
-          if (yMatch) year = Number(yMatch[0]);
-        }
-        if (isSeries && Array.isArray(meta.videos)) {
-          const epObj = meta.videos.find(v => Number(v.season) === season && Number(v.episode) === episode);
-          if (epObj) {
-            if (epObj.imdb_id && /^tt\d+$/i.test(epObj.imdb_id)) episodeImdbId = epObj.imdb_id.toLowerCase();
-            if (epObj.name || epObj.title) episodeTitle = String(epObj.name || epObj.title).trim();
-            if (epObj.overview || epObj.description) episodePlot = String(epObj.overview || epObj.description).trim();
-          }
-        }
-      }
-    } catch (_) {}
-  }
-
-  if (isSeries && !episodeImdbId) {
-    const epResolved = await resolveEpisodeSpecificImdbId(baseImdbId, season, episode, title, episodeTitle);
-    if (epResolved && epResolved.episodeImdbId) {
-      episodeImdbId = epResolved.episodeImdbId;
-      if (!episodeTitle && epResolved.episodeTitle) episodeTitle = epResolved.episodeTitle;
-    }
-  }
-
-  const searchTerms = uniqueStrings([title, arTitle, originalTitle]);
-
-  return {
-    targetId: raw,
-    baseImdbId,
-    episodeImdbId,
-    isSeries,
-    season,
-    episode,
-    title,
-    arTitle,
-    originalTitle,
-    searchTerms,
-    year,
-    episodeTitle,
-    episodePlot
-  };
-}
-
-// ===== المصادر الستة ونظام التصويت الاحتياطي =====
-
-// [المصدر 1]: IMDb Parents Guide
-async function fetchImdbParentsGuide(meta) {
-  if (!meta) return null;
-  const idsToTry = meta.isSeries
-    ? [meta.episodeImdbId].filter(Boolean)
-    : [meta.baseImdbId].filter(Boolean);
-
-  for (const imdbId of idsToTry) {
-    try {
-      const data = await safeHttpGet(`https://api.imdbapi.dev/titles/${imdbId}/parentsGuide`, { Accept: 'application/json' });
-      const guide = data?.parentalGuide || data?.parentsGuide || data;
-      const parsed = extractImdbGuideData(guide, imdbId);
-      if (parsed && (parsed.descriptions.length > 0 || parsed.isClean)) return parsed;
-    } catch (_) {}
-
-    try {
-      const { axios } = getAiShared();
-      const query = `query { title(id: "${imdbId}") { parentsGuide { guideItems(first: 45) { edges { node { category { id } text { plainText } } } } } } }`;
-      const gqlRes = await axios.post('https://api.graphql.imdb.com/', { query }, {
-        headers: {
-          ...BROWSER_HEADERS,
-          'Content-Type': 'application/json',
-          'x-imdb-client-name': 'imdb-web-next-localized'
-        },
-        timeout: HTTP_TIMEOUT_MS
-      });
-      const edges = gqlRes.data?.data?.title?.parentsGuide?.guideItems?.edges;
-      if (Array.isArray(edges) && edges.length > 0) {
-        const nudityItems = edges
-          .map(e => e?.node)
-          .filter(n => n && /NUDITY|SEX/i.test(String(n.category?.id || '')))
-          .map(n => String(n.text?.plainText || '').trim())
-          .filter(Boolean);
-
-        const realNudityItems = nudityItems.filter(txt => !/^(none|no nudity|no sex|nothing|n\/a)\.?$/i.test(txt));
-
-        return {
-          source: `IMDb-GraphQL(${imdbId})`,
-          itemCount: realNudityItems.length,
-          voteWeight: realNudityItems.length >= 2 ? 2 : (realNudityItems.length === 1 ? 1 : 0),
-          isClean: realNudityItems.length === 0,
-          hasAdult: realNudityItems.length > 0,
-          directScenes: extractRegexTimestampsFromDescriptions(realNudityItems),
-          descriptions: realNudityItems.slice(0, 30)
-        };
-      }
-    } catch (_) {}
-
-    try {
-      const html = await safeHttpGet(`https://www.imdb.com/title/${imdbId}/parentalguide`);
-      if (typeof html === 'string' && html.length > 1000) {
-        const nextMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-        if (nextMatch) {
-          const json = JSON.parse(nextMatch[1]);
-          const parsed = extractImdbGuideData(json, imdbId);
-          if (parsed && (parsed.descriptions.length > 0 || parsed.isClean)) return parsed;
-        }
-      }
-    } catch (_) {}
-  }
   return null;
 }
 
-function extractImdbGuideData(obj, imdbId = '') {
+function extractImdbGuideData(obj) {
   if (!obj || typeof obj !== 'object') return null;
   const rawStr = JSON.stringify(obj);
   const descriptions = [];
@@ -711,113 +530,20 @@ function extractImdbGuideData(obj, imdbId = '') {
   const isNone = (severity === 'NONE' || descriptions.length === 0) && !/MODERATE|SEVERE/i.test(severity);
   const hasAdult = !isNone && (descriptions.length > 0 || /MODERATE|SEVERE/i.test(severity));
   return {
-    source: `IMDb-Guide(${imdbId})`,
+    source: 'IMDb-ParentsGuide',
     severity,
     itemCount: descriptions.length,
     voteWeight: /SEVERE|MODERATE/i.test(severity) || descriptions.length >= 2 ? 2 : (hasAdult ? 1 : 0),
     isClean: isNone,
     hasAdult,
     directScenes: extractRegexTimestampsFromDescriptions(descriptions),
-    descriptions: descriptions.slice(0, 30)
+    descriptions: descriptions.slice(0, 35)
   };
-}
-
-// [المصدر 2 - أفلام]: Kids-In-Mind
-async function fetchKidsInMind(meta) {
-  if (!meta || !meta.title || meta.isSeries) return null;
-  const { firstLetter, clean, fullNoArticles } = slugifyKidsInMind(meta.title);
-  if (!clean) return null;
-
-  const candidates = [
-    `https://kids-in-mind.com/${firstLetter}/${clean}.htm`,
-    `https://kids-in-mind.com/${firstLetter}/${fullNoArticles}.htm`,
-    meta.year ? `https://kids-in-mind.com/${firstLetter}/${clean}${meta.year}.htm` : null
-  ].filter(Boolean);
-
-  for (const url of candidates) {
-    try {
-      const html = await safeHttpGet(url);
-      if (typeof html !== 'string' || html.length < 500) continue;
-      if (meta.year && !html.includes(String(meta.year))) continue;
-
-      const text = stripHtmlTags(html);
-      const secMatch = text.match(/SEX\/NUDITY\s*(\d{1,2})\s*[-–—]\s*([\s\S]*?)(?=VIOLENCE\/GORE|LANGUAGE|PROFANITY|SUBSTANCE USE|DISCUSSION TOPICS|MESSAGE|$)/i);
-      if (!secMatch) continue;
-
-      const score = parseInt(secMatch[1], 10);
-      const desc = secMatch[2].trim().slice(0, 3000);
-      const hasAdult = score >= 3 || /\b(nudity|nude|naked|sex|intercourse|breasts|topless|prostitute|stripper|orgy|rape|masturbat|thrusting|making love)\b/i.test(desc);
-      return {
-        source: 'Kids-In-Mind',
-        score,
-        voteWeight: score >= 5 ? 2 : (hasAdult ? 1 : 0),
-        isClean: score <= 1 && !hasAdult,
-        hasAdult,
-        directScenes: extractRegexTimestampsFromDescriptions([desc]),
-        descriptions: desc ? [`[Kids-In-Mind Score ${score}/10]: ${desc}`] : []
-      };
-    } catch (_) {}
-  }
-  return null;
-}
-
-// [المصدر 3 - أفلام]: CringeMDb
-async function fetchCringeMdb(meta) {
-  if (!meta || !meta.title || meta.isSeries) return null;
-  const slug = slugifyStandard(meta.title);
-  if (!slug) return null;
-
-  const urls = [];
-  if (meta.year) urls.push(`https://cringemdb.com/movie/${slug}-${meta.year}`);
-  urls.push(`https://cringemdb.com/movie/${slug}`);
-
-  for (const url of urls) {
-    try {
-      const html = await safeHttpGet(url);
-      if (typeof html !== 'string' || html.length < 500) continue;
-
-      const text = stripHtmlTags(html);
-      const isSafe = /is SAFE to watch with parents/i.test(text) ||
-        (/Sex Scene\s*NO/i.test(text) && /Nudity\s*NO/i.test(text) && /Sexual Violence\s*NO/i.test(text));
-
-      const timeRegex = /(\d{1,2}:\d{2}(?::\d{2})?)\s+to\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*\.?\s*(Sex scene|Nudity|Sexual Violence|Suggestive)\b([^.*]*?)(?=(?:\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}|CringeMDb Staff Says|Top Billed Cast|$))/gi;
-      const directScenes = [];
-      const descriptions = [];
-      let m;
-
-      while ((m = timeRegex.exec(text)) !== null) {
-        const startSec = toSec(m[1]);
-        const endSec = toSec(m[2]);
-        const category = String(m[3] || '').trim();
-        const details = String(m[4] || '')
-          .replace(/Unverified.*$/i, '')
-          .replace(/Skippable without missing the plot/gi, '')
-          .trim();
-
-        const isBriefSuggestiveOnly = /Suggestive/i.test(category) && !/\b(naked|nude|sex|breast|topless|lingerie|stripper|underwear|bed)\b/i.test(details);
-        if (Number.isFinite(startSec) && Number.isFinite(endSec) && endSec > startSec && !isBriefSuggestiveOnly) {
-          directScenes.push({ start: startSec, end: endSec, type: 'wall' });
-          descriptions.push(`[${m[1]} - ${m[2]}] (${category}): ${details.slice(0, 200)}`);
-        }
-      }
-
-      const hasAdult = !isSafe || directScenes.length > 0;
-      return {
-        source: 'CringeMDb',
-        voteWeight: directScenes.length > 0 ? 2 : (hasAdult ? 1 : 0),
-        isClean: isSafe && directScenes.length === 0,
-        hasAdult,
-        directScenes,
-        descriptions
-      };
-    } catch (_) {}
-  }
-  return null;
 }
 
 // [المصدر 4]: Plugged In
 async function fetchPluggedIn(meta) {
-  if (!meta || !meta.title || meta.isSeries) return null;
+  if (!meta || !meta.title) return null;
   const slug = slugifyStandard(meta.title);
   if (!slug) return null;
 
@@ -828,10 +554,10 @@ async function fetchPluggedIn(meta) {
     const secMatch = text.match(/Sexual\s*(?:&|and)\s*Romantic Content([\s\S]*?)(?=Violent Content|Crude or Profane Language|Drug\s*(?:&|and)\s*Alcohol Content|Other Noteworthy Elements|Conclusion|$)/i);
     if (!secMatch) return null;
 
-    const desc = secMatch[1].trim().slice(0, 2200);
+    const desc = secMatch[1].trim().slice(0, 2500);
     if (!desc || desc.length < 15) return null;
     const isClean = /^(none|nothing|not applicable|no sexual content)\b/i.test(desc);
-    const hasExplicitKeywords = /\b(nude|nudity|naked|sex|intercourse|breasts|topless|prostitute|stripper|rape|making love|thrusting|orgy)\b/i.test(desc);
+    const hasExplicitKeywords = /\b(nude|nudity|naked|sex|intercourse|breasts|topless|prostitute|stripper|rape|making love|thrusting|orgy|buttocks)\b/i.test(desc);
 
     return {
       source: 'PluggedIn',
@@ -839,7 +565,7 @@ async function fetchPluggedIn(meta) {
       isClean,
       hasAdult: !isClean && hasExplicitKeywords,
       directScenes: extractRegexTimestampsFromDescriptions([desc]),
-      descriptions: [`[PluggedIn]: ${desc}`]
+      descriptions: [`[PluggedIn Review]: ${desc}`]
     };
   } catch (_) {
     return null;
@@ -848,7 +574,7 @@ async function fetchPluggedIn(meta) {
 
 // [المصدر 5]: Parent Previews
 async function fetchParentPreviews(meta) {
-  if (!meta || !meta.title || meta.isSeries) return null;
+  if (!meta || !meta.title) return null;
   const slug = slugifyStandard(meta.title);
   if (!slug) return null;
 
@@ -859,7 +585,7 @@ async function fetchParentPreviews(meta) {
     const secMatch = text.match(/Sexual Content:\s*([\s\S]*?)(?=Profanity:|Alcohol\s*\/\s*Drug Use:|Violence:|Overall\s+[A-F]|$)/i);
     if (!secMatch) return null;
 
-    const desc = secMatch[1].trim().slice(0, 1800);
+    const desc = secMatch[1].trim().slice(0, 2000);
     if (!desc) return null;
     const isClean = /^none\b/i.test(desc);
     const hasExplicitKeywords = /\b(nude|nudity|naked|sex|intercourse|breasts|topless|prostitute|stripper|rape|thrusting|post coital)\b/i.test(desc);
@@ -879,7 +605,7 @@ async function fetchParentPreviews(meta) {
 
 // [المصدر 6]: DoesTheDogDie
 async function fetchDoesTheDogDie(meta) {
-  if (!meta || !meta.title || meta.isSeries) return null;
+  if (!meta || !meta.title) return null;
   try {
     const searchData = await safeHttpGet(`https://www.doesthedogdie.com/dddsearch?q=${encodeURIComponent(meta.title)}`, {
       Accept: 'application/json',
@@ -925,85 +651,32 @@ async function fetchDoesTheDogDie(meta) {
   }
 }
 
-// ===== 3. محرك جمع الأدلة: يفحص Cee/Cinemana أولاً، ثم ينتقل للتصويت الاحتياطي =====
-async function getOrGatherEvidence(targetId) {
-  if (EVIDENCE_CACHE.has(targetId)) return EVIDENCE_CACHE.get(targetId);
-  if (IN_FLIGHT_EVIDENCE.has(targetId)) return IN_FLIGHT_EVIDENCE.get(targetId);
+// ===== 3. محرك جمع الأدلة الهرمي والتصويت للأفلام =====
+async function getOrGatherMovieEvidence(targetId) {
+  if (!isMovieTargetId(targetId)) return null;
+  const cleanId = String(targetId).trim().toLowerCase();
+
+  if (EVIDENCE_CACHE.has(cleanId)) return EVIDENCE_CACHE.get(cleanId);
+  if (IN_FLIGHT_EVIDENCE.has(cleanId)) return IN_FLIGHT_EVIDENCE.get(cleanId);
 
   const p = (async () => {
     try {
-      const meta = await resolveMediaMeta(targetId);
+      const meta = await resolveMovieMeta(cleanId);
       if (!meta) return null;
 
-      // الخطوة 0 (الأساسية): فحص حقل skippingDurations من Cee.buzz / Cinemana
-      const ceeResult = await fetchCeeCinemanaSkipping(meta);
-      if (ceeResult && ceeResult.hasSkipping) {
-        const paddedCeeScenes = normalizeScenes(
-          ceeResult.scenes.map(sc => ({
-            start: Math.max(0, sc.start - SCENE_PAD_BEFORE_SEC),
-            end: sc.end + SCENE_PAD_AFTER_SEC,
-            type: 'wall'
-          }))
-        );
+      // جلب المصادر الـ 6 للأفلام بالتوازي للحصول على أعلى دقة وتكامل
+      const settled = await Promise.allSettled([
+        fetchCringeMdb(meta),
+        fetchKidsInMind(meta),
+        fetchImdbParentsGuide(meta),
+        fetchPluggedIn(meta),
+        fetchParentPreviews(meta),
+        fetchDoesTheDogDie(meta)
+      ]);
 
-        const label = meta.isSeries
-          ? `${meta.title} S${meta.season}E${meta.episode}`
-          : (meta.title || meta.targetId);
-
-        console.log(`[درع Nuvio 🛡️] ${label} | تم اعتماد أوقات الحجب المباشرة من [${ceeResult.source}] بنجاح (${paddedCeeScenes.length} مشهد).`);
-
-        const ceeBundle = {
-          meta,
-          evidence: {
-            fromCinemana: true,
-            activeCount: 1,
-            cleanVotes: 0,
-            adultVotes: 1,
-            totalVoteWeight: 3,
-            passedVoting: true,
-            directScenes: paddedCeeScenes,
-            combinedReport: ''
-          }
-        };
-
-        if (EVIDENCE_CACHE.size >= MAX_CACHE_ENTRIES) {
-          const oldK = EVIDENCE_CACHE.keys().next().value;
-          if (oldK !== undefined) EVIDENCE_CACHE.delete(oldK);
-        }
-        EVIDENCE_CACHE.set(targetId, ceeBundle);
-        return ceeBundle;
-      }
-
-      // الخطوة الاحتياطية: إذا لم تتوفر أوقات في سينمانا/Cee، نشغّل المصادر الستة ونظام التصويت
-      const activeSources = [];
-      if (meta.isSeries) {
-        const imdbGuide = await fetchImdbParentsGuide(meta);
-        if (imdbGuide) activeSources.push(imdbGuide);
-      } else {
-        const [imdbRes, kimRes, cringeRes] = await Promise.allSettled([
-          fetchImdbParentsGuide(meta),
-          fetchKidsInMind(meta),
-          fetchCringeMdb(meta)
-        ]);
-
-        const imdb = imdbRes.status === 'fulfilled' ? imdbRes.value : null;
-        const kim = kimRes.status === 'fulfilled' ? kimRes.value : null;
-        const cringe = cringeRes.status === 'fulfilled' ? cringeRes.value : null;
-
-        if (imdb) activeSources.push(imdb);
-        if (kim) activeSources.push(kim);
-        if (cringe) activeSources.push(cringe);
-
-        const [pluggedRes, ppRes, dddRes] = await Promise.allSettled([
-          fetchPluggedIn(meta),
-          fetchParentPreviews(meta),
-          fetchDoesTheDogDie(meta)
-        ]);
-
-        if (pluggedRes.status === 'fulfilled' && pluggedRes.value) activeSources.push(pluggedRes.value);
-        if (ppRes.status === 'fulfilled' && ppRes.value) activeSources.push(ppRes.value);
-        if (dddRes.status === 'fulfilled' && dddRes.value) activeSources.push(dddRes.value);
-      }
+      const activeSources = settled
+        .filter(r => r.status === 'fulfilled' && r.value)
+        .map(r => r.value);
 
       let cleanVotes = 0;
       let adultVotes = 0;
@@ -1011,8 +684,6 @@ async function getOrGatherEvidence(targetId) {
       const directScenes = [];
       const allDescriptions = [];
       const sourceNames = [];
-
-      if (ceeResult) sourceNames.push(`${ceeResult.source}:0-skips`);
 
       for (const src of activeSources) {
         sourceNames.push(src.source);
@@ -1030,34 +701,21 @@ async function getOrGatherEvidence(targetId) {
       }
 
       const passedVoting = directScenes.length > 0 || (
-        meta.isSeries
-          ? adultVotes >= 1
-          : (adultVotes >= 1 && (totalVoteWeight >= cleanVotes || adultVotes >= cleanVotes))
+        adultVotes >= 1 && (totalVoteWeight >= cleanVotes || adultVotes >= cleanVotes)
       );
 
-      const label = meta.isSeries
-        ? `${meta.title} S${meta.season}E${meta.episode} (${meta.episodeImdbId || 'no-ep-id'})`
-        : (meta.title || meta.targetId);
-
-      console.log(`[درع Nuvio 🛡️] ${label} | المصادر=[${sourceNames.join(', ') || 'لا يوجد'}] | تصويت حجب=${adultVotes} (وزن=${totalVoteWeight}) | نظيف=${cleanVotes} | أوقات مباشرة=${directScenes.length} | قرار التصويت=${passedVoting ? 'مفعل' : 'متخطى'}`);
+      console.log(`[درع الأفلام 🛡️] ${meta.title} (${meta.year || cleanId}) | المصادر=[${sourceNames.join(', ') || 'لا يوجد'}] | تصويت حجب=${adultVotes} (وزن=${totalVoteWeight}) | نظيف=${cleanVotes} | أوقات مباشرة=${directScenes.length} | القرار=${passedVoting ? 'مفعل' : 'فلم نظيف'}`);
 
       const bundle = {
         meta,
         evidence: {
-          fromCinemana: false,
           activeCount: activeSources.length,
           cleanVotes,
           adultVotes,
           totalVoteWeight,
           passedVoting,
-          directScenes: normalizeScenes(
-            directScenes.map(sc => ({
-              start: Math.max(0, sc.start - SCENE_PAD_BEFORE_SEC),
-              end: sc.end + SCENE_PAD_AFTER_SEC,
-              type: 'wall'
-            }))
-          ),
-          combinedReport: allDescriptions.join('\n\n').slice(0, 9500)
+          rawDirectScenes: normalizeScenes(directScenes),
+          combinedReport: allDescriptions.join('\n\n').slice(0, 12000)
         }
       };
 
@@ -1065,18 +723,18 @@ async function getOrGatherEvidence(targetId) {
         const oldK = EVIDENCE_CACHE.keys().next().value;
         if (oldK !== undefined) EVIDENCE_CACHE.delete(oldK);
       }
-      EVIDENCE_CACHE.set(targetId, bundle);
+      EVIDENCE_CACHE.set(cleanId, bundle);
       return bundle;
     } finally {
-      IN_FLIGHT_EVIDENCE.delete(targetId);
+      IN_FLIGHT_EVIDENCE.delete(cleanId);
     }
   })();
 
-  IN_FLIGHT_EVIDENCE.set(targetId, p);
+  IN_FLIGHT_EVIDENCE.set(cleanId, p);
   return p;
 }
 
-// ===== 4. بناء خريطة الترجمة ومطابقتها عبر Gemini بنظام الثقة (احتياطي عند غياب أوقات سينمانا) =====
+// ===== 4. بناء خريطة الترجمة الكاملة ومعايرة التوقيت عبر Gemini (دقة >= 90%) =====
 function buildSubtitleTimelineSummary(cues, texts) {
   if (!Array.isArray(cues) || !cues.length) return { summaryText: '', maxEndSec: 0 };
 
@@ -1091,19 +749,20 @@ function buildSubtitleTimelineSummary(cues, texts) {
       .replace(/\s+/g, ' ')
       .trim();
     if (endSec > startSec && cleanTxt) {
-      parsedCues.push({ startSec: Math.round(startSec), endSec: Math.round(endSec), text: cleanTxt.slice(0, 85) });
+      parsedCues.push({ startSec: Math.round(startSec), endSec: Math.round(endSec), text: cleanTxt.slice(0, 90) });
     }
   }
 
   if (!parsedCues.length) return { summaryText: '', maxEndSec: 0 };
   const maxEndSec = parsedCues[parsedCues.length - 1].endSec;
 
+  // رصد كل الفجوات الصامتة (>= 4 ثوانٍ) لأنها تحدد بداية ونهاية المشاهد البصرية بالثانية
   const gaps = [];
   for (let i = 1; i < parsedCues.length; i++) {
     const prev = parsedCues[i - 1];
     const curr = parsedCues[i];
     const gapDur = curr.startSec - prev.endSec;
-    if (gapDur >= 5 && gapDur <= 260) {
+    if (gapDur >= 4 && gapDur <= 300) {
       gaps.push({
         gapStart: prev.endSec,
         gapEnd: curr.startSec,
@@ -1114,18 +773,19 @@ function buildSubtitleTimelineSummary(cues, texts) {
     }
   }
 
+  // دمج الأسطر المتقاربة جداً (< 1.5 ثانية) لإرسال خريطة الفلم كاملة (حتى 1500 كتلة حوارية) بدون فقدان أي مشهد
   const mergedTimeline = [];
   for (const c of parsedCues) {
     const last = mergedTimeline[mergedTimeline.length - 1];
-    if (last && (c.startSec - last.endSec <= 2) && (last.text.length + c.text.length <= 130)) {
+    if (last && (c.startSec - last.endSec <= 1) && (last.text.length + c.text.length <= 120)) {
       last.endSec = c.endSec;
-      last.text += ' / ' + c.text;
+      last.text += ' | ' + c.text;
     } else {
       mergedTimeline.push({ ...c });
     }
   }
 
-  const maxLines = 650;
+  const maxLines = 1500;
   const step = mergedTimeline.length <= maxLines ? 1 : Math.ceil(mergedTimeline.length / maxLines);
   const timelineLines = [];
   for (let i = 0; i < mergedTimeline.length; i += step) {
@@ -1133,17 +793,17 @@ function buildSubtitleTimelineSummary(cues, texts) {
     timelineLines.push(`[${c.startSec}s-${c.endSec}s] ${c.text}`);
   }
 
-  const gapLines = gaps.slice(0, 120).map(g =>
+  const gapLines = gaps.slice(0, 180).map(g =>
     `GAP [${g.gapStart}s -> ${g.gapEnd}s (${g.duration}s)] Before: "${g.beforeText}" | After: "${g.afterText}"`
   );
 
   return {
     maxEndSec,
-    summaryText: `TOTAL_SUBTITLE_DURATION_SEC: ${maxEndSec}\n\nSILENT_GAPS:\n${gapLines.join('\n')}\n\nDIALOGUE_TIMELINE:\n${timelineLines.join('\n')}`
+    summaryText: `TOTAL_SUBTITLE_DURATION_SEC: ${maxEndSec}\n\nSILENT_GAPS:\n${gapLines.join('\n')}\n\nCOMPLETE_MOVIE_DIALOGUE_TIMELINE:\n${timelineLines.join('\n')}`
   };
 }
 
-async function matchScenesWithGemini(meta, evidence, cues, texts, keysArray, modelName) {
+async function calibrateMovieScenesWithGemini(meta, evidence, cues, texts, keysArray, modelName) {
   if (!Array.isArray(keysArray) || !keysArray.length) return [];
   const shared = getAiShared();
   if (!shared.acquireKey) return [];
@@ -1155,25 +815,28 @@ async function matchScenesWithGemini(meta, evidence, cues, texts, keysArray, mod
     ? shared.normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite')
     : 'gemini-3.1-flash-lite';
 
-  const directJson = JSON.stringify(evidence.directScenes || []);
-  const prompt = `You are a high-precision parental-control synchronization engine.
-Media: "${meta.title || meta.targetId}" (${meta.year || 'Unknown Year'})${meta.isSeries ? ` - Season ${meta.season}, Episode ${meta.episode} ("${meta.episodeTitle || ''}")` : ''}.
+  const directJson = JSON.stringify(evidence.rawDirectScenes || []);
+  const prompt = `You are an ultra-precise movie timestamp synchronization engine (zero-tolerance for >3 second drift).
+Movie: "${meta.title}" (${meta.year || 'Unknown Year'}).
 
-DIRECT_TIMESTAMPS_FROM_SOURCES:
+DIRECT_TIMESTAMPS_FROM_CRINGEMDB:
 ${directJson}
 
-VERIFIED_PARENTAL_GUIDE_FOR_THIS_TITLE:
+VERIFIED_PARENTAL_GUIDES (Kids-In-Mind Chronological Order, IMDb, PluggedIn, ParentPreviews):
 ${evidence.combinedReport}
 
-SUBTITLE_TIMELINE_AND_SILENT_GAPS:
+ACTUAL_SUBTITLE_TIMELINE_AND_SILENT_GAPS_OF_THIS_VIDEO_FILE:
 ${summaryText}
 
-STRICT RULES (READ CAREFULLY):
-1. You may ONLY locate visual nudity/sex scenes that are explicitly described in VERIFIED_PARENTAL_GUIDE_FOR_THIS_TITLE.
-2. FORBIDDEN FALSE POSITIVES: NEVER flag a scene just because characters talk about a brothel, a whore, Ros, bastards, stripping, or sex while having a normal clothed conversation! Verbal mentions in dialogue are NOT visual nudity scenes!
-3. For each visual nudity/sex scene in VERIFIED_PARENTAL_GUIDE_FOR_THIS_TITLE, find the exact timestamp in SUBTITLE_TIMELINE_AND_SILENT_GAPS where that specific physical scene/bath/brothel action actually takes place on screen.
-4. Assign a "confidence" score (0 to 100) for each matched timestamp. Give >= 85 ONLY if the scene setting, characters present, and silent gap/action clearly match the visual description in the Parental Guide. If you are guessing or unsure of the exact time, give confidence < 50.
-5. Output ONLY a JSON array: [{"start": <seconds>, "end": <seconds>, "confidence": <0-100>}]. If no scene can be pinpointed with certainty, output [].`;
+STRICT SYNCHRONIZATION PROTOCOL:
+1. Identify ALL explicit sex scenes, nudity scenes (female/male nudity, topless, exposed breasts/buttocks/genitals), strip club/orgy scenes, or sexual violence explicitly described in VERIFIED_PARENTAL_GUIDES or DIRECT_TIMESTAMPS_FROM_CRINGEMDB.
+2. ZERO-DRIFT CALIBRATION: Video releases (BluRay vs Web-DL) can differ by a few seconds due to studio intro logos. Anchor every scene to the ACTUAL_SUBTITLE_TIMELINE_AND_SILENT_GAPS_OF_THIS_VIDEO_FILE:
+   - Look at the exact dialogue lines spoken right before the scene starts, during the scene, and right after the scene ends.
+   - If a nudity/sex scene starts while characters are speaking in that room/bed/party, set "start" to the EXACT second that specific conversation/action begins.
+   - Set "end" to the EXACT second the visual nudity/sex scene ends and the next scene/dialogue begins.
+3. NEVER flag mere verbal mentions of sex/nudity during normal clothed dialogue.
+4. Give a "confidence" score (0-100). Output ONLY scenes with confidence >= ${MIN_AI_CONFIDENCE} where the exact second-level boundaries are verified against the subtitle timeline or CringeMDb.
+5. Output ONLY a valid JSON array: [{"start": <number_in_seconds>, "end": <number_in_seconds>, "confidence": <0-100>}].`;
 
   const apiBase = shared.DEFAULT_GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -1186,7 +849,7 @@ STRICT RULES (READ CAREFULLY):
     try {
       const r = await shared.axios.post(url, {
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.05, responseMimeType: 'application/json' },
+        generationConfig: { temperature: 0.0, responseMimeType: 'application/json' },
         safetySettings: shared.SAFETY_SETTINGS_OFF
       }, {
         headers: {
@@ -1194,7 +857,7 @@ STRICT RULES (READ CAREFULLY):
           'x-goog-api-key': cleanKey,
           ...(shared.GEMINI_CLIENT_HEADER ? { 'x-goog-api-client': shared.GEMINI_CLIENT_HEADER } : {})
         },
-        timeout: 35000,
+        timeout: 38000,
         httpAgent: shared.httpAgent,
         httpsAgent: shared.httpsAgent
       });
@@ -1210,7 +873,7 @@ STRICT RULES (READ CAREFULLY):
           .map(x => ({
             start: Number(x.start),
             end: Number(x.end),
-            confidence: Number(x.confidence ?? 90)
+            confidence: Number(x.confidence ?? 95)
           }))
           .filter(x =>
             Number.isFinite(x.start) &&
@@ -1223,7 +886,6 @@ STRICT RULES (READ CAREFULLY):
           );
       }
     } catch (e) {
-      console.log(`[درع Nuvio ⚠️] محاولة Gemini ${attempt + 1} فشلت: ${e && e.message}`);
       if (shared.isGeminiAuthFailure && shared.isGeminiAuthFailure(e)) {
         if (shared.deadKeys) shared.deadKeys.add(activeKey);
         continue;
@@ -1237,18 +899,20 @@ STRICT RULES (READ CAREFULLY):
   return [];
 }
 
-// ===== الدالة الرئيسية لتحضير الدرع =====
+// ===== الدالة الرئيسية لتحضير الدرع (للأفلام فقط) =====
 async function prepareShield(targetId, cues, texts = null, keysArray = [], modelName = null) {
+  // إذا لم يكن فلماً (أي مسلسل يحتوي على : أو غير صالح) نخرج فوراً وبصمت تام بدون أي لوغ
+  if (!isMovieTargetId(targetId)) return [];
   if (USE_TEST_SCENES) return TEST_SCENES;
-  if (!targetId) return [];
 
-  const manual = getManualScenes(targetId);
+  const cleanId = String(targetId).trim().toLowerCase();
+  const manual = getManualScenes(cleanId);
   if (manual) return manual;
 
-  const trackKey = getTrackCacheKey(targetId, cues);
+  const trackKey = getTrackCacheKey(cleanId, cues);
   if (trackKey && RESOLVED_SCENES_CACHE.has(trackKey)) {
     const cached = RESOLVED_SCENES_CACHE.get(trackKey);
-    LATEST_TARGET_SCENES.set(targetId, cached);
+    LATEST_TARGET_SCENES.set(cleanId, cached);
     return cached;
   }
 
@@ -1258,55 +922,51 @@ async function prepareShield(targetId, cues, texts = null, keysArray = [], model
 
   const task = (async () => {
     try {
-      const bundle = await getOrGatherEvidence(targetId);
+      const bundle = await getOrGatherMovieEvidence(cleanId);
       if (!bundle) return [];
       const { meta, evidence } = bundle;
 
-      // 1. إذا جُلبت الأوقات مباشرة من سينمانا (cee.buzz / cinemana) نعتمدها فوراً بدون استدعاء الذكاء الاصطناعي
-      if (evidence.fromCinemana && evidence.directScenes.length > 0) {
-        saveTrackScenesToCache(targetId, trackKey, evidence.directScenes);
-        return evidence.directScenes;
-      }
-
-      // 2. بوابة التصويت الصارمة عند عدم توفر أوقات سينمانا
+      // 1. إذا كان الفلم نظيفاً بالتصويت
       if (!evidence.passedVoting) {
-        saveTrackScenesToCache(targetId, trackKey, []);
+        saveTrackScenesToCache(cleanId, trackKey, []);
         return [];
       }
 
-      let highConfidenceWalls = evidence.directScenes.slice();
-
-      // 3. مطابقة التوقيت عبر Gemini بثقة عالية (>= 85%)
-      if (evidence.combinedReport.length > 0) {
-        const aiScenes = await matchScenesWithGemini(meta, evidence, cues, texts, keysArray, modelName);
+      // 2. معايرة الأوقات عبر Gemini مع خطوط الترجمة + أوقات CringeMDb
+      let calibratedScenes = [];
+      if (evidence.combinedReport.length > 0 || evidence.rawDirectScenes.length > 0) {
+        const aiScenes = await calibrateMovieScenesWithGemini(meta, evidence, cues, texts, keysArray, modelName);
         if (aiScenes.length > 0) {
-          const paddedAi = aiScenes.map(sc => ({
+          calibratedScenes = aiScenes.map(sc => ({
             start: Math.max(0, sc.start - SCENE_PAD_BEFORE_SEC),
             end: sc.end + SCENE_PAD_AFTER_SEC,
             type: 'wall'
           }));
-          highConfidenceWalls = normalizeScenes([...highConfidenceWalls, ...paddedAi]);
         }
       }
 
-      if (highConfidenceWalls.length > 0) {
-        console.log(`[درع Nuvio 🛡️] تم تثبيت (${highConfidenceWalls.length}) جدار حجب كامل الشاشة بثقة عالية (>=${MIN_AI_CONFIDENCE}%).`);
-        saveTrackScenesToCache(targetId, trackKey, highConfidenceWalls);
-        return highConfidenceWalls;
+      // 3. إذا لم يستجب Gemini لأي سبب، نستخدم أوقات CringeMDb المباشرة مع هامش الـ 2.5 ثانية
+      if (calibratedScenes.length === 0 && evidence.rawDirectScenes.length > 0) {
+        calibratedScenes = evidence.rawDirectScenes.map(sc => ({
+          start: Math.max(0, sc.start - SCENE_PAD_BEFORE_SEC),
+          end: sc.end + SCENE_PAD_AFTER_SEC,
+          type: 'wall'
+        }));
       }
 
-      // 4. صمام الأمان (التنبيه المبكر بأول 10 ثوانٍ)
-      const earlyAdvisory = [{
-        start: 3,
-        end: 13,
-        type: 'advisory',
-        msg: `🟨⚠️ تنبيه عائلي: العمل يحتوي على مشاهد غير عائلية (تصويت المصادر: ${evidence.adultVotes}) ⚠️🟨`
-      }];
-      console.log(`[درع Nuvio ⚠️] التصويت إيجابي (${evidence.adultVotes}) بدون توقيت مؤكد -> تم تفعيل التنبيه المبكر بأول 10 ثواني بدلاً من التخمين.`);
-      saveTrackScenesToCache(targetId, trackKey, earlyAdvisory);
-      return earlyAdvisory;
+      const finalWalls = normalizeScenes(calibratedScenes);
+
+      if (finalWalls.length > 0) {
+        const preview = finalWalls.map(w => `${formatSrtTimeSec(w.start).slice(0, 8)}->${formatSrtTimeSec(w.end).slice(0, 8)}`).join(', ');
+        console.log(`[درع الأفلام 🛡️] ${meta.title}: تم تثبيت (${finalWalls.length}) مشهد بدقة عالية (هامش ${SCENE_PAD_BEFORE_SEC}ث): [${preview}]`);
+        saveTrackScenesToCache(cleanId, trackKey, finalWalls);
+        return finalWalls;
+      }
+
+      saveTrackScenesToCache(cleanId, trackKey, []);
+      return [];
     } catch (err) {
-      console.log(`[درع Nuvio ⚠️] خطأ غير متوقع أثناء فحص (${targetId}): ${err && err.message}`);
+      console.log(`[درع الأفلام ⚠️] خطأ أثناء فحص الفلم (${cleanId}): ${err && err.message}`);
       return [];
     } finally {
       if (trackKey) IN_FLIGHT_TRACKS.delete(trackKey);
@@ -1340,8 +1000,9 @@ function srtWarnBanner(text) {
   return `<b><font color="${WARN_COLOR_HEX}">${text}</font></b>`;
 }
 
-// ===== تطبيق الدرع على SRT (جدار كامل الشاشة بدون أي كلمة أو ترجمة أثناء التفعيل) =====
+// ===== تطبيق الدرع على SRT (للأفلام فقط) =====
 function applyShieldToSrtItems(items, targetId, customScenes = null, originalCues = null) {
+  if (!isMovieTargetId(targetId)) return items;
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId, originalCues));
   if (!scenes.length) return items;
 
@@ -1349,39 +1010,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null, originalCue
   let prevEnd = 0;
 
   for (const sc of scenes) {
-    if (sc.type === 'advisory') {
-      const advStart = sc.start;
-      const advEnd = sc.end;
-      const advBanner = srtWarnBanner(sc.msg);
-      const next = [];
-      const overlaps = [];
-
-      for (const it of current) {
-        if (it.endSec <= advStart || it.startSec >= advEnd) {
-          next.push(it);
-        } else {
-          if (it.startSec < advStart) next.push({ startSec: it.startSec, endSec: advStart, text: it.text });
-          const oS = Math.max(advStart, it.startSec);
-          const oE = Math.min(advEnd, it.endSec);
-          if (oE - oS >= 0.15) overlaps.push({ startSec: oS, endSec: oE, text: `${advBanner}\n${it.text}` });
-          if (it.endSec > advEnd) next.push({ startSec: advEnd, endSec: it.endSec, text: it.text });
-        }
-      }
-
-      overlaps.sort((a, b) => a.startSec - b.startSec);
-      let cursor = advStart;
-      for (const ov of overlaps) {
-        if (ov.startSec - cursor >= 0.25) next.push({ startSec: cursor, endSec: ov.startSec, text: advBanner });
-        next.push(ov);
-        cursor = Math.max(cursor, ov.endSec);
-      }
-      if (advEnd - cursor >= 0.25) next.push({ startSec: cursor, endSec: advEnd, text: advBanner });
-
-      next.sort((a, b) => a.startSec - b.startSec);
-      current = next;
-      continue;
-    }
-
     const start = sc.start;
     const end = sc.end;
     const durationSec = calcSceneDurationSec(start, end);
@@ -1459,7 +1087,10 @@ function buildShieldedSrt(cues, texts, targetId, drawingRe = null) {
     if (endSec > startSec) rawItems.push({ startSec, endSec, text });
   });
 
-  const shielded = applyShieldToSrtItems(rawItems, targetId, null, cues);
+  const shielded = isMovieTargetId(targetId)
+    ? applyShieldToSrtItems(rawItems, targetId, null, cues)
+    : rawItems;
+
   let srtOutput = '';
   shielded.forEach((it, idx) => {
     srtOutput += `${idx + 1}\n${formatSrtTimeSec(it.startSec)} --> ${formatSrtTimeSec(it.endSec)}\n${it.text}\n\n`;
@@ -1467,16 +1098,18 @@ function buildShieldedSrt(cues, texts, targetId, drawingRe = null) {
   return srtOutput;
 }
 
-// ===== دوال ASS =====
+// ===== دوال ASS (للأفلام فقط) =====
 function isCueInsideShield(startStr, endStr, targetId, customScenes = null) {
+  if (!isMovieTargetId(targetId)) return false;
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
   if (!scenes.length) return false;
   const sSec = parseSubTimeSec(startStr);
   const eSec = parseSubTimeSec(endStr);
-  return scenes.some(sc => sc.type !== 'advisory' && sSec < sc.end && eSec > sc.start);
+  return scenes.some(sc => sSec < sc.end && eSec > sc.start);
 }
 
 function buildAssShieldLines(targetId, customScenes = null) {
+  if (!isMovieTargetId(targetId)) return [];
   const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
   if (!scenes.length) return [];
 
@@ -1488,12 +1121,6 @@ function buildAssShieldLines(targetId, customScenes = null) {
   let prevEnd = 0;
 
   for (const sc of scenes) {
-    if (sc.type === 'advisory') {
-      const advLine = warnTopTag + sc.msg;
-      extra.push(`Dialogue: 99,${formatAssTimeSec(sc.start)},${formatAssTimeSec(sc.end)},Default,,0,0,0,,${addAssRlm(advLine)}`);
-      continue;
-    }
-
     const start = sc.start;
     const end = sc.end;
     const durationSec = calcSceneDurationSec(start, end);
