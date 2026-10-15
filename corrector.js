@@ -682,9 +682,13 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
   console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
+  const [{ texts: finalCorrections, missing }] = await Promise.all([
+    correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`),
+    shield.prepareShield(targetId, cues, null, keysArray, modelName)
+  ]);
 
   const srtOutput = shield.buildShieldedSrt(cues, finalCorrections, targetId, DRAWING_RE);
+
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
@@ -747,7 +751,10 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
 
   console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
-  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
+    const [{ texts, missing }] = await Promise.all([
+    correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`),
+    shield.prepareShield(targetId, cues, null, keysArray, modelName)
+  ]);
 
   // الملف الأصلي (Script Info + Styles + Fonts + كل الأسطر) محفوظ، ونستبدل نص الأسطر فقط
   if (isRealAss) {
