@@ -11,29 +11,34 @@ const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 
 // ============================================================
-// إعدادات الأزمنة والحدود (متوافقة مع Render ومنع التايم آوت)
+// إعدادات السرعة اللحظية والحدود لكل موقع
 // ============================================================
-const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 4000, subdl: 5000, subsource: 5000 };
+// سقف جلب القوائم الأولية بالتوازي
+const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3200, subdl: 3800, subsource: 3800 };
 
-// 5 ثوانٍ صافية كحد أقصى لفحص واستخراج ملفات ZIP و ASS قبل إرسال القائمة للمشغل
-const VERIFY_WINDOW_MS = 5000;
+// نافذة التصفية اللحظية الخفيفة لاستخراج ASS وفحص SRT (2.8 ثانية فقط لضمان الظهور التلقائي في Nuvio)
+const FAST_VERIFY_WINDOW_MS = 2800;
 
-// أقصى زمن لتحميل وفك ضغط ملف واحد
-const VERIFY_TIMEOUT_MS = 8000;
+// أقصى زمن لفحص ملف مضغوط واحد أثناء التصفية السريعة
+const VERIFY_TIMEOUT_MS = 2600;
 
-// عدد الفحوصات المتوازية في نفس اللحظة
-const CONCURRENCY_LIMIT = 10;
+// عدد الفحوصات المتوازية اللحظية
+const CONCURRENCY_LIMIT = 8;
 
-// الحد الأقصى لإجمالي الروابط المفحوصة للعمل الواحد
-const MAX_CANDIDATES = 120;
+// الحد الأقصى لترجمات SRT الجاهزة لكل موقع من المواقع الثلاثة
+const MAX_SRT_PER_SITE = 20;
 
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const resultCache = new Map();
 
-// كاش للنصوص العربية المستخرجة لتعمل الترجمات الجاهزة فوراً (0 ثانية انتظار)
 const MAX_RAW_CACHE = 150;
 const rawTextCache = new Map();
+
+const assFormatRe = /^(ass|ssa)$/i;
+const assFileRe = /\.(ass|ssa)(\b|$)/i;
+const rarFileRe = /\.(rar|7z)(\?|$)/i;
+const osFileIdRe = /\/file\/(\d+)/i;
 
 function setRawCache(key, text) {
     if (!key || !text) return;
@@ -61,6 +66,14 @@ function makeRawKey(url, epInfo) {
     return [url, epTag].join('|');
 }
 
+function setResultCache(key, value) {
+    if (resultCache.size >= MAX_RESULT_CACHE && !resultCache.has(key)) {
+        const oldestKey = resultCache.keys().next().value;
+        if (oldestKey) resultCache.delete(oldestKey);
+    }
+    resultCache.set(key, { time: Date.now(), value });
+}
+
 function withTimeout(promise, ms, name) {
     let timer;
     const timeout = new Promise(resolve => {
@@ -72,9 +85,21 @@ function withTimeout(promise, ms, name) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-const assFormatRe = /^(ass|ssa)$/i;
-const assFileRe = /\.(ass|ssa)\b/i;
+function extractOsFileId(url) {
+    const m = String(url || '').match(osFileIdRe);
+    return m ? m[1] : null;
+}
 
+function normalizeNameSig(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/\.(srt|ass|ssa|zip|gz)$/i, '')
+        .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+// ============================================================
+// 1. جلب OpenSubtitles.org القديم (ASS بدون أي فلتر + SRT العربي)
+// ============================================================
 async function fetchOsLegacyArabic(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt0*/, '');
@@ -110,24 +135,44 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
             const fallbackData = await fetchLegacyData(fallbackUrl);
             const epNum = parseInt(episode, 10);
             const epRe = new RegExp('(?:e|ep|episode)[._ -]*0*' + epNum + '(?:[^0-9]|$)', 'i');
-            data = [...data, ...fallbackData.filter(r => isAssEntry(r) && epRe.test(r.SubFileName || ''))];
+            data = [...data, ...fallbackData.filter(r => epRe.test(r.SubFileName || ''))];
         }
 
-        const total = data.length;
-        const assOnly = data.filter(e => e.SubDownloadLink && isAssEntry(e)).map(e => ({
-            url: e.SubDownloadLink,
-            format: 'ass',
-            fileName: e.SubFileName || e.MovieReleaseName || 'OS_Legacy_Ara',
-            _source: 'os_legacy'
-        }));
-        console.log('[جلب عربي - OS Legacy] رجع ' + total + ' نتيجة، المعتمد ASS فقط: ' + assOnly.length + ' (الـ SRT مستبعد).');
-        return assOnly;
+        const out = [];
+        let assCount = 0;
+        let srtCount = 0;
+
+        for (const e of data) {
+            if (!e || !e.SubDownloadLink) continue;
+            const isAss = isAssEntry(e);
+            if (!isAss && String(e.SubBad) === '1') continue;
+
+            if (isAss) assCount++;
+            else srtCount++;
+
+            out.push({
+                url: e.SubDownloadLink,
+                format: isAss ? 'ass' : 'srt',
+                fileName: e.SubFileName || e.MovieReleaseName || 'OS_Legacy_Ara',
+                _source: isAss ? 'os_legacy' : 'opensubtitles',
+                _site: 'opensubtitles',
+                _osFileId: String(e.IDSubtitleFile || extractOsFileId(e.SubDownloadLink) || ''),
+                _sig: e.SubHash || normalizeNameSig(e.SubFileName || e.SubDownloadLink),
+                _fastVerified: true
+            });
+        }
+
+        console.log('[جلب عربي - OS Legacy] رجع ' + data.length + ' نتيجة -> ' + assCount + ' ASS و ' + srtCount + ' SRT.');
+        return out;
     } catch (e) {
         console.log('[جلب عربي - OS Legacy] خطأ: ' + e.message);
         return [];
     }
 }
 
+// ============================================================
+// 2. جلب OpenSubtitles العادي v3 (SRT + ASS)
+// ============================================================
 async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const isSeries = type === 'series' || type === 'anime' || !!season;
@@ -137,7 +182,7 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     try {
         const response = await axios.get('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + targetId + '.json', {
             headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' },
-            timeout: 4000
+            timeout: 3200
         });
 
         const data = response.data || {};
@@ -146,12 +191,19 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
             .map(s => {
                 const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
                 const rawUrl = (s.url || '').toLowerCase();
-                const isAss = subFormat === 'ssa' || subFormat === 'ass' || /\.(ass|ssa)/.test(rawUrl);
+                const rawName = s.SubFileName || s.title || s.name || 'OS_Mirror_Ara';
+                const isAss = subFormat === 'ssa' || subFormat === 'ass' || assFileRe.test(rawUrl) || assFileRe.test(rawName);
+                const fileId = extractOsFileId(s.url) || String(s.id || '');
                 return {
                     url: s.url,
                     format: isAss ? 'ass' : 'srt',
-                    fileName: s.SubFileName || s.title || s.name || 'OS_Mirror_Ara',
-                    _source: 'os_mirror'
+                    fileName: rawName,
+                    _source: 'opensubtitles',
+                    _site: 'opensubtitles',
+                    _osFileId: fileId,
+                    _sig: fileId || cleanPath(s.url),
+                    _directUtf8: !isAss && rawUrl.includes('subencoding-stremio-utf8'),
+                    _fastVerified: true
                 };
             });
         console.log('[جلب عربي - OS Mirror] ' + out.length + ' ترجمة عربية.');
@@ -162,26 +214,34 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     }
 }
 
-function isCleanArabicText(text, cues) {
+function isCleanArabicSrtText(text, cues) {
     if (!text || !Array.isArray(cues) || cues.length < 10) {
         return { ok: false, reason: 'cues=' + (cues ? cues.length : 0) };
     }
 
     const cuesText = cues.map(c => c.text || '').join(' ').replace(/\{[^}]*\}|<[^>]*>/g, '');
     const arabicCount = (cuesText.match(/[\u0600-\u06FF]/g) || []).length;
-    if (arabicCount < 200) {
+    if (arabicCount < 150) {
         return { ok: false, reason: 'arabic=' + arabicCount };
     }
 
-    // فحص حروف ويندوز المعطوبة (Mojibake / رموز الاستبدال غير المفهومة)
+    // فحص حروف ويندوز المعطوبة (Mojibake) خاص بصيغ SRT فقط
     const replacementCount = (cuesText.match(/\uFFFD/g) || []).length;
     const mojibakeCount = (cuesText.match(/[\u00C0-\u00FF]/g) || []).length;
 
     if (replacementCount > 5 || mojibakeCount > 15 || mojibakeCount > arabicCount * 0.05) {
-        return { ok: false, reason: 'ترميز ويندوز معطوب (mojibake=' + mojibakeCount + ', replacement=' + replacementCount + ')' };
+        return { ok: false, reason: 'ترميز ويندوز معطوب' };
     }
 
     return { ok: true, cuesText };
+}
+
+function detectAssContent(text, item) {
+    if (item && item.format === 'ass') return true;
+    const fName = (item && (item.fileName || item.title || item.url)) || '';
+    if (assFileRe.test(fName)) return true;
+    if (!text) return false;
+    return /^\s*Dialogue:/im.test(text) || /\[Events\]/i.test(text) || /\[Script Info\]/i.test(text);
 }
 
 async function verifyArabicSub(s, subsourceKey, epInfo = null) {
@@ -198,22 +258,28 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
             ]);
         }
 
+        if (!text || !String(text).trim()) return null;
+
+        // إذا كان الملف ASS: مستبعد من أي فلتر بشكل مطلق ويُقبل فوراً
+        if (detectAssContent(text, s)) {
+            setRawCache(rawKey, text);
+            return { ...s, format: 'ass', _verified: true };
+        }
+
+        // إذا كان الملف SRT: تصفية سريعة ضد الملفات الفارغة أو ترميز ويندوز المعطوب
         const cues = extractCuesUniversal(text);
-        const check = isCleanArabicText(text, cues);
+        const check = isCleanArabicSrtText(text, cues);
         if (!check.ok) {
-            console.log('[فحص عربي] ✗ ' + s._source + ': مستبعد (' + check.reason + ') <- ' + s.url);
             return null;
         }
 
         const sig = crypto.createHash('md5')
             .update(check.cuesText.replace(/[^\p{L}\p{N}]+/gu, ''))
             .digest('hex');
-        const realFormat = /^\s*Dialogue:/im.test(text) ? 'ass' : 'srt';
 
         setRawCache(rawKey, text);
-        return { ...s, format: realFormat, _sig: sig };
-    } catch (e) {
-        console.log('[فحص عربي] ✗ ' + s._source + ': ' + e.message + ' <- ' + s.url);
+        return { ...s, format: 'srt', _sig: sig, _verified: true };
+    } catch {
         return null;
     } finally {
         clearTimeout(timer);
@@ -225,165 +291,283 @@ async function getRawArabicSubContent(targetUrl, subsourceKey, epInfo = null) {
     const cached = getRawCache(rawKey);
     if (cached) return cached;
 
-    const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
+    const { fetchAndExtractSub } = require('./ai').shared;
     const text = await fetchAndExtractSub(targetUrl, subsourceKey, epInfo);
-    const cues = extractCuesUniversal(text);
-    const check = isCleanArabicText(text, cues);
-    if (!check.ok) throw new Error('ملف الترجمة غير صالح (' + check.reason + ')');
+    if (!text || !String(text).trim()) {
+        throw new Error('ملف الترجمة فارغ');
+    }
 
     setRawCache(rawKey, text);
     return text;
 }
 
-function startVerification(list, subsourceKey, epInfo, windowMs) {
-    const results = [];
-    let done = false, hardTimer, resolveEarly;
-    const early = new Promise(r => { resolveEarly = r; });
+// فحص متوازٍ خفيف ولحظي لاستخراج ملفات ASS وفحص SRT ضمن نافذة زمنية قصيرة
+function runFastParallelCheck(candidates, subsourceKey, epInfo, windowMs) {
+    const verified = [];
+    let done = false, timer, resolveWindow;
+    const windowPromise = new Promise(r => { resolveWindow = r; });
 
     const finish = () => {
         if (done) return;
         done = true;
-        clearTimeout(hardTimer);
-        resolveEarly();
+        clearTimeout(timer);
+        resolveWindow();
     };
 
-    if (!list.length) {
+    if (!candidates.length) {
         finish();
-        return { results, early, all: Promise.resolve() };
+        return { verified, windowPromise, allPromise: Promise.resolve() };
     }
 
-    hardTimer = setTimeout(finish, windowMs);
+    timer = setTimeout(finish, windowMs);
 
     let idx = 0;
-    const workerCount = Math.min(CONCURRENCY_LIMIT, list.length);
+    const workerCount = Math.min(CONCURRENCY_LIMIT, candidates.length);
     const workers = Array.from({ length: workerCount }, async () => {
-        while (idx < list.length) {
-            const current = list[idx++];
-            if (!current) continue;
+        while (idx < candidates.length) {
+            const item = candidates[idx++];
+            if (!item) continue;
             try {
-                const r = await verifyArabicSub(current, subsourceKey, epInfo);
-                if (r) results.push(r);
+                const res = await verifyArabicSub(item, subsourceKey, epInfo);
+                if (res) verified.push(res);
             } catch {
-                // ignore individual failure
+                // ignore individual error
             }
         }
     });
 
-    const all = Promise.all(workers).then(finish);
-    return { results, early, all };
+    const allPromise = Promise.all(workers).then(finish);
+    return { verified, windowPromise, allPromise };
 }
 
-const SOURCE_ORDER = { subdl: 0, subsource: 1, os_legacy: 2, os_mirror: 3 };
-const sourceRank = s => (SOURCE_ORDER[s._source] ?? 9);
+// تصفية خفيفة ولحظية لروابط الموقع قبل الفحص (استبعاد RAR والروابط المكررة)
+function lightweightPreFilter(list, siteKey) {
+    const assList = [];
+    const srtList = [];
+    const seenUrls = new Set();
+    const seenNames = new Set();
 
-function buildValue(verified) {
-    const sorted = verified.slice().sort((a, b) => {
-        if (a.format !== b.format) return a.format === 'ass' ? -1 : 1;
-        return sourceRank(a) - sourceRank(b);
-    });
+    // في SubDL نفضل الروابط الرسمية السريعة (dl.subdl.com) أولاً قبل مرآة strem.top التي تعطي 429
+    const ordered = siteKey === 'subdl'
+        ? [
+            ...list.filter(x => x && x.url && !String(x.url).includes('strem.top')),
+            ...list.filter(x => x && x.url && String(x.url).includes('strem.top'))
+        ]
+        : list;
 
-    const seenSig = new Set();
-    const good = sorted.filter(s => {
-        const key = [s.format, s._sig].join(':');
-        if (seenSig.has(key)) return false;
-        seenSig.add(key);
-        return true;
-    });
+    for (const raw of ordered) {
+        if (!raw || !raw.url) continue;
+        const urlStr = String(raw.url);
+        if (rarFileRe.test(urlStr)) continue;
+
+        const item = {
+            ...raw,
+            _source: raw._source || siteKey,
+            _site: siteKey
+        };
+
+        const isAss = item.format === 'ass' || assFormatRe.test(item.subFormat || '') || assFileRe.test(item.fileName || item.title || urlStr);
+
+        // استبعاد ASS من أي فلتر أو حذف مكرر نهائياً
+        if (isAss) {
+            assList.push({ ...item, format: 'ass' });
+            continue;
+        }
+
+        const cleanU = cleanPath(urlStr);
+        if (seenUrls.has(cleanU)) continue;
+        seenUrls.add(cleanU);
+
+        const nameKey = normalizeNameSig(item.fileName || item.title || '');
+        if (nameKey && nameKey.length > 6 && seenNames.has(nameKey) && srtList.length >= MAX_SRT_PER_SITE) {
+            continue;
+        }
+        if (nameKey) seenNames.add(nameKey);
+
+        srtList.push({ ...item, format: 'srt', _sig: nameKey || cleanU });
+    }
+
+    return { assList, srtList };
+}
+
+function buildFinalArabicLists({ osItems, subdlPre, subsourcePre, verifiedZipItems }) {
+    // 1. قسم ASS: بدون أي فلتر وبدون حذف المكرر وبدون حد أقصى من جميع المواقع
+    const allAss = [];
+    const verifiedUrls = new Set();
+
+    // نجمع أي ASS تم اكتشافه مسبقاً أو استخراجه من داخل ملفات ZIP
+    for (const v of verifiedZipItems) {
+        if (v && v.url) verifiedUrls.add(cleanPath(v.url));
+        if (v && v.format === 'ass') allAss.push(v);
+    }
+
+    for (const a of [...subdlPre.assList, ...subsourcePre.assList]) {
+        if (!verifiedUrls.has(cleanPath(a.url))) {
+            allAss.push(a);
+        }
+    }
+
+    for (const o of osItems) {
+        if (o && o.format === 'ass') {
+            allAss.push(o);
+        }
+    }
+
+    // 2. قسم SRT: تصفية خفيفة ولحظية بحد أقصى 20 ترجمة لكل موقع من المواقع الثلاثة
+    // أ) OpenSubtitles SRT (حد أقصى 20)
+    const osSrt = [];
+    const seenOsIds = new Set();
+    const seenOsSigs = new Set();
+
+    // نضع روابط OS Mirror (المباشرة UTF-8) ثم روابط OS Legacy
+    const osSrtCandidates = [
+        ...osItems.filter(x => x && x.format === 'srt' && x._directUtf8),
+        ...osItems.filter(x => x && x.format === 'srt' && !x._directUtf8)
+    ];
+
+    for (const s of osSrtCandidates) {
+        if (osSrt.length >= MAX_SRT_PER_SITE) break;
+        const idKey = s._osFileId || cleanPath(s.url);
+        const sigKey = s._sig || idKey;
+        if (seenOsIds.has(idKey) || seenOsSigs.has(sigKey)) continue;
+        seenOsIds.add(idKey);
+        seenOsSigs.add(sigKey);
+        osSrt.push(s);
+    }
+
+    // ب) دالة تجميع حتى 20 ترجمة SRT لكل من SubDL و Subsource (المفحوص أولاً ثم التصفية الخفيفة اللحظية)
+    function collectSiteSrt(siteKey, preSrtList) {
+        const out = [];
+        const seenSigs = new Set();
+        const seenCleanUrls = new Set();
+
+        const siteVerifiedSrt = verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'srt');
+        for (const v of siteVerifiedSrt) {
+            if (out.length >= MAX_SRT_PER_SITE) break;
+            const uKey = cleanPath(v.url);
+            const sKey = v._sig || uKey;
+            if (seenCleanUrls.has(uKey) || seenSigs.has(sKey)) continue;
+            seenCleanUrls.add(uKey);
+            seenSigs.add(sKey);
+            out.push(v);
+        }
+
+        // تكملة العدد فوراً إلى 20 من القائمة المصفاة لحظياً (مع استبعاد أي رابط تبين أنه ASS أو معطوب)
+        for (const p of preSrtList) {
+            if (out.length >= MAX_SRT_PER_SITE) break;
+            const uKey = cleanPath(p.url);
+            if (verifiedUrls.has(uKey)) continue;
+            const sKey = p._sig || uKey;
+            if (seenCleanUrls.has(uKey) || seenSigs.has(sKey)) continue;
+            seenCleanUrls.add(uKey);
+            seenSigs.add(sKey);
+            out.push(p);
+        }
+
+        return out;
+    }
+
+    const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
+    const subsourceSrt = collectSiteSrt('subsource', subsourcePre.srtList);
+
+    // قائمة SRT النهائية للترجمات الجاهزة (حتى 20 SubDL + 20 Subsource + 20 OpenSubtitles = 60 كحد أقصى)
+    const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt];
+
+    // قائمة SRT الموثقة للمصحح العربي (تأخذ أول 4 ترجمات مفحوصة ومضمونة بالتناوب بين المصادر)
+    const correctorCandidates = [
+        ...verifiedZipItems.filter(v => v && v.format === 'srt'),
+        ...osSrt,
+        ...subdlSrt,
+        ...subsourceSrt
+    ];
+    const seenCorr = new Set();
+    const correctorSrt = [];
+    for (const c of correctorCandidates) {
+        const u = cleanPath(c.url);
+        if (seenCorr.has(u)) continue;
+        seenCorr.add(u);
+        correctorSrt.push(c);
+        if (correctorSrt.length >= 4) break;
+    }
 
     return {
-        good,
-        value: {
-            srt: good.filter(s => s.format === 'srt'),
-            ass: good.filter(s => s.format === 'ass')
+        ass: allAss,
+        srt: readySrt,
+        correctorSrt,
+        counts: {
+            ass: allAss.length,
+            subdlSrt: subdlSrt.length,
+            subsourceSrt: subsourceSrt.length,
+            osSrt: osSrt.length
         }
     };
 }
 
-function setResultCache(key, value) {
-    if (resultCache.size >= MAX_RESULT_CACHE && !resultCache.has(key)) {
-        const oldestKey = resultCache.keys().next().value;
-        if (oldestKey) resultCache.delete(oldestKey);
-    }
-    resultCache.set(key, { time: Date.now(), value });
-}
-
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     const t0 = Date.now();
-    console.log('[جلب عربي] جاري البحث عن ترجمات عربية (جاهزة + مصحح) للعمل: ' + imdbId + '...');
+    console.log('[جلب عربي] بدء الجلب اللحظي المتوازي للعمل: ' + imdbId + '...');
 
     const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
     const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
     const cacheKey = [imdbId, season, episode, keyHash].join(':');
     const hit = resultCache.get(cacheKey);
     if (hit && Date.now() - hit.time < RESULT_TTL) {
-        console.log('[جلب عربي] النتيجة من الكاش.');
+        console.log('[جلب عربي] النتيجة جاهزة فوراً من الكاش.');
         return hit.value;
     }
 
     const sourceDefs = [
+        { key: 'os_legacy', name: 'OS Legacy', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
+        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) },
         { key: 'subdl', name: 'SubDL', run: () => getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }) },
-        { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) },
-        { key: 'os_legacy', name: 'OS Legacy (ASS)', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
-        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) }
+        { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) }
     ];
-    const names = sourceDefs.map(d => d.name);
 
     const settled = await Promise.allSettled(
         sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), SOURCE_TIMEOUTS[d.key], d.name))
     );
 
-    settled.forEach((r, i) => {
-        if (r.status === 'rejected') {
-            console.log('[جلب عربي - ' + names[i] + '] خطأ غير متوقع: ' + (r.reason && r.reason.message));
-        }
-    });
+    const getList = idx => (settled[idx].status === 'fulfilled' && Array.isArray(settled[idx].value) ? settled[idx].value : []);
+    const osLegacyList = getList(0);
+    const osMirrorList = getList(1);
+    const subdlRawList = getList(2);
+    const subsourceRawList = getList(3);
 
-    const summaryStr = settled.map((r, i) => names[i] + '=' + (r.status === 'fulfilled' ? r.value.length : 'خطأ')).join(' | ');
-    console.log('[جلب عربي] ملخص المصادر: ' + summaryStr + ' (بعد ' + ((Date.now() - t0) / 1000).toFixed(1) + ' ثانية)');
+    const osItems = [...osLegacyList, ...osMirrorList];
+    const subdlPre = lightweightPreFilter(subdlRawList, 'subdl');
+    const subsourcePre = lightweightPreFilter(subsourceRawList, 'subsource');
 
-    const lists = settled.map((r, i) => {
-        if (r.status !== 'fulfilled' || !Array.isArray(r.value)) return [];
-        const srcKey = sourceDefs[i].key;
-        return r.value.map(item => (item && !item._source ? { ...item, _source: srcKey } : item));
-    });
+    console.log('[جلب عربي] القوائم الأولية (' + ((Date.now() - t0) / 1000).toFixed(1) + 'ث): OS=' + osItems.length + ' | SubDL=' + (subdlPre.assList.length + subdlPre.srtList.length) + ' | Subsource=' + (subsourcePre.assList.length + subsourcePre.srtList.length));
 
-    const interleaved = [];
-    const maxLen = Math.max(0, ...lists.map(l => l.length));
-    for (let i = 0; i < maxLen; i++) {
-        for (const l of lists) {
-            if (l[i]) interleaved.push(l[i]);
-        }
+    // ندمج روابط ZIP الرسمية من SubDL و Subsource بالتناوب لفحصها لحظياً واستخراج أي ASS بداخلها
+    const zipCandidates = [];
+    const subdlZips = [...subdlPre.assList, ...subdlPre.srtList.filter(x => !String(x.url).includes('strem.top'))].slice(0, 25);
+    const subsourceZips = [...subsourcePre.assList, ...subsourcePre.srtList].slice(0, 25);
+    const maxZips = Math.max(subdlZips.length, subsourceZips.length);
+    for (let i = 0; i < maxZips; i++) {
+        if (subdlZips[i]) zipCandidates.push(subdlZips[i]);
+        if (subsourceZips[i]) zipCandidates.push(subsourceZips[i]);
     }
 
-    const seenUrls = new Set();
-    const uniqueSubs = interleaved.filter(s => {
-        if (!s || !s.url) return false;
-        const clean = cleanPath(s.url);
-        if (seenUrls.has(clean)) return false;
-        seenUrls.add(clean);
-        return true;
-    });
-
-    const toVerify = uniqueSubs.slice(0, MAX_CANDIDATES);
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
+    const job = runFastParallelCheck(zipCandidates, subsourceKey, epInfo, FAST_VERIFY_WINDOW_MS);
+    await job.windowPromise;
 
-    const job = startVerification(toVerify, subsourceKey, epInfo, VERIFY_WINDOW_MS);
-    await job.early;
+    const snapshot = job.verified.slice();
+    const value = buildFinalArabicLists({ osItems, subdlPre, subsourcePre, verifiedZipItems: snapshot });
 
-    const snapshot = job.results.slice();
-    const { good, value } = buildValue(snapshot);
-    console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => s._source + '/' + s.format).join(' | '));
-    console.log('[جلب عربي] بعد الفحص: ' + snapshot.length + '/' + toVerify.length + ' شغالة، ' + good.length + ' بعد حذف المكرر -> ' + value.ass.length + ' ASS و ' + value.srt.length + ' SRT - الزمن الكلي ' + ((Date.now() - t0) / 1000).toFixed(1) + ' ثانية.');
+    console.log('[جلب عربي] النتيجة اللحظية (' + ((Date.now() - t0) / 1000).toFixed(1) + 'ث): ASS=' + value.counts.ass + ' (بدون فلتر) | SRT الجاهز: SubDL=' + value.counts.subdlSrt + ', Subsource=' + value.counts.subsourceSrt + ', OpenSubtitles=' + value.counts.osSrt);
 
-    if (good.length > 0) setResultCache(cacheKey, value);
+    if (value.ass.length > 0 || value.srt.length > 0) {
+        setResultCache(cacheKey, value);
+    }
 
-    job.all.then(() => {
-        if (job.results.length > snapshot.length) {
-            const full = buildValue(job.results);
-            if (full.good.length > 0) {
-                setResultCache(cacheKey, full.value);
-                console.log('[جلب عربي] تحديث الكاش بالخلفية: ' + full.value.ass.length + ' ASS و ' + full.value.srt.length + ' SRT (كانت ' + (value.ass.length + value.srt.length) + ').');
-            }
+    // تحديث هادئ للكاش إذا استخرجت الفحوصات المتبقية ملفات ASS إضافية من الـ ZIP
+    job.allPromise.then(() => {
+        if (job.verified.length > snapshot.length) {
+            const updated = buildFinalArabicLists({ osItems, subdlPre, subsourcePre, verifiedZipItems: job.verified });
+            setResultCache(cacheKey, updated);
+            console.log('[جلب عربي] تحديث الكاش: ASS=' + updated.counts.ass + ' | SRT=' + updated.srt.length);
         }
     }).catch(() => {});
 
