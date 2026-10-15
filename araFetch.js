@@ -13,7 +13,6 @@ const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
 // ============================================================
 // إعدادات الأزمنة والحدود (متوافقة مع Render ومنع التايم آوت)
 // ============================================================
-// سقف جلب القوائم الأولية لكل مصدر
 const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 4000, subdl: 5000, subsource: 5000 };
 
 // 5 ثوانٍ صافية كحد أقصى لفحص واستخراج ملفات ZIP و ASS قبل إرسال القائمة للمشغل
@@ -22,10 +21,10 @@ const VERIFY_WINDOW_MS = 5000;
 // أقصى زمن لتحميل وفك ضغط ملف واحد
 const VERIFY_TIMEOUT_MS = 8000;
 
-// عدد الفحوصات المتوازية في نفس اللحظة (لمنع استنزاف الرام أو حظر الشبكة عند وجود 100 رابط)
+// عدد الفحوصات المتوازية في نفس اللحظة
 const CONCURRENCY_LIMIT = 10;
 
-// الحد الأقصى لإجمالي الروابط المفحوصة للعمل الواحد (حماية للذاكرة)
+// الحد الأقصى لإجمالي الروابط المفحوصة للعمل الواحد
 const MAX_CANDIDATES = 120;
 
 const RESULT_TTL = 30 * 60 * 1000;
@@ -57,21 +56,24 @@ function getRawCache(key) {
 
 function makeRawKey(url, epInfo) {
     const epTag = epInfo && epInfo.season != null && epInfo.episode != null
-        ? `${epInfo.season}:${epInfo.episode}`
+        ? [epInfo.season, epInfo.episode].join(':')
         : 'movie';
-    return `${url}\vert{}${epTag}`;
+    return [url, epTag].join('|');
 }
 
 function withTimeout(promise, ms, name) {
     let timer;
     const timeout = new Promise(resolve => {
         timer = setTimeout(() => {
-            console.log(`[جلب عربي - ${name}] تجاوز ${(ms / 1000).toFixed(1)} ثانية، تجاهلته وكملت بالباقي.`);
+            console.log('[جلب عربي - ' + name + '] تجاوز ' + (ms / 1000).toFixed(1) + ' ثانية، تجاهلته وكملت بالباقي.');
             resolve([]);
         }, ms);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
+
+const assFormatRe = /^(ass|ssa)$/i;
+const assFileRe = /\.(ass|ssa)\b/i;
 
 async function fetchOsLegacyArabic(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
@@ -79,8 +81,8 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
     const hasSE = season != null && episode != null;
 
     const primaryUrl = hasSE
-        ? `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-ara`
-        : `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
+        ? 'https://rest.opensubtitles.org/search/episode-' + episode + '/imdbid-' + numericId + '/season-' + season + '/sublanguageid-ara'
+        : 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
 
     async function fetchLegacyData(url) {
         let response;
@@ -89,7 +91,8 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
             response = await fetch(url, {
                 headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' }
             });
-            console.log(`[جلب عربي - OS Legacy] ${response.status}${i > 0 ? ` (محاولة ثانية: ${ua})` : ''} <- ${url}`);
+            const retryNote = i > 0 ? ' (محاولة ثانية: ' + ua + ')' : '';
+            console.log('[جلب عربي - OS Legacy] ' + response.status + retryNote + ' <- ' + url);
             if (response.status !== 403) break;
         }
         if (!response || !response.ok) return [];
@@ -97,15 +100,16 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
         return Array.isArray(json) ? json : [];
     }
 
-    const isAssEntry = r => /^(ass|ssa)$/i.test(r.SubFormat || '') || /\.(ass|ssa)\b/i.test(r.SubFileName || '');
+    const isAssEntry = r => assFormatRe.test(r.SubFormat || '') || assFileRe.test(r.SubFileName || '');
 
     try {
         let data = await fetchLegacyData(primaryUrl);
 
         if (hasSE && !data.some(isAssEntry)) {
-            const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
+            const fallbackUrl = 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
             const fallbackData = await fetchLegacyData(fallbackUrl);
-            const epRe = new RegExp(`(?:e|ep|episode)[._ -]*0*${parseInt(episode, 10)}(?:[^0-9]\vert{}$)`, 'i');
+            const epNum = parseInt(episode, 10);
+            const epRe = new RegExp('(?:e|ep|episode)[._ -]*0*' + epNum + '(?:[^0-9]|$)', 'i');
             data = [...data, ...fallbackData.filter(r => isAssEntry(r) && epRe.test(r.SubFileName || ''))];
         }
 
@@ -116,10 +120,10 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
             fileName: e.SubFileName || e.MovieReleaseName || 'OS_Legacy_Ara',
             _source: 'os_legacy'
         }));
-        console.log(`[جلب عربي - OS Legacy] رجع ${total} نتيجة، المعتمد ASS فقط: ${assOnly.length} (الـ SRT مستبعد).`);
+        console.log('[جلب عربي - OS Legacy] رجع ' + total + ' نتيجة، المعتمد ASS فقط: ' + assOnly.length + ' (الـ SRT مستبعد).');
         return assOnly;
     } catch (e) {
-        console.log(`[جلب عربي - OS Legacy] خطأ: ${e.message}`);
+        console.log('[جلب عربي - OS Legacy] خطأ: ' + e.message);
         return [];
     }
 }
@@ -128,10 +132,10 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const isSeries = type === 'series' || type === 'anime' || !!season;
     const mediaType = isSeries ? 'series' : 'movie';
-    const targetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+    const targetId = isSeries && season ? [imdbId, season, episode || 1].join(':') : imdbId;
 
     try {
-        const response = await axios.get(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`, {
+        const response = await axios.get('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + targetId + '.json', {
             headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' },
             timeout: 4000
         });
@@ -150,27 +154,31 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type) {
                     _source: 'os_mirror'
                 };
             });
-        console.log(`[جلب عربي - OS Mirror] ${out.length} ترجمة عربية.`);
+        console.log('[جلب عربي - OS Mirror] ' + out.length + ' ترجمة عربية.');
         return out;
     } catch (e) {
-        console.log(`[جلب عربي - OS Mirror] فشل: ${e.message}`);
+        console.log('[جلب عربي - OS Mirror] فشل: ' + e.message);
         return [];
     }
 }
 
 function isCleanArabicText(text, cues) {
-    if (!text || !Array.isArray(cues) || cues.length < 10) return { ok: false, reason: `cues=${cues ? cues.length : 0}` };
+    if (!text || !Array.isArray(cues) || cues.length < 10) {
+        return { ok: false, reason: 'cues=' + (cues ? cues.length : 0) };
+    }
 
     const cuesText = cues.map(c => c.text || '').join(' ').replace(/\{[^}]*\}|<[^>]*>/g, '');
     const arabicCount = (cuesText.match(/[\u0600-\u06FF]/g) || []).length;
-    if (arabicCount < 200) return { ok: false, reason: `arabic=${arabicCount}` };
+    if (arabicCount < 200) {
+        return { ok: false, reason: 'arabic=' + arabicCount };
+    }
 
     // فحص حروف ويندوز المعطوبة (Mojibake / رموز الاستبدال غير المفهومة)
     const replacementCount = (cuesText.match(/\uFFFD/g) || []).length;
     const mojibakeCount = (cuesText.match(/[\u00C0-\u00FF]/g) || []).length;
 
     if (replacementCount > 5 || mojibakeCount > 15 || mojibakeCount > arabicCount * 0.05) {
-        return { ok: false, reason: `ترميز ويندوز معطوب (mojibake=${mojibakeCount}, replacement=${replacementCount})` };
+        return { ok: false, reason: 'ترميز ويندوز معطوب (mojibake=' + mojibakeCount + ', replacement=' + replacementCount + ')' };
     }
 
     return { ok: true, cuesText };
@@ -193,7 +201,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
         const cues = extractCuesUniversal(text);
         const check = isCleanArabicText(text, cues);
         if (!check.ok) {
-            console.log(`[فحص عربي] ✗ ${s._source}: مستبعد (${check.reason}) <-${s.url}`);
+            console.log('[فحص عربي] ✗ ' + s._source + ': مستبعد (' + check.reason + ') <- ' + s.url);
             return null;
         }
 
@@ -205,7 +213,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
         setRawCache(rawKey, text);
         return { ...s, format: realFormat, _sig: sig };
     } catch (e) {
-        console.log(`[فحص عربي] ✗ ${s._source}: ${e.message} <-${s.url}`);
+        console.log('[فحص عربي] ✗ ' + s._source + ': ' + e.message + ' <- ' + s.url);
         return null;
     } finally {
         clearTimeout(timer);
@@ -221,14 +229,12 @@ async function getRawArabicSubContent(targetUrl, subsourceKey, epInfo = null) {
     const text = await fetchAndExtractSub(targetUrl, subsourceKey, epInfo);
     const cues = extractCuesUniversal(text);
     const check = isCleanArabicText(text, cues);
-    if (!check.ok) throw new Error(`ملف الترجمة غير صالح (${check.reason})`);
+    if (!check.ok) throw new Error('ملف الترجمة غير صالح (' + check.reason + ')');
 
     setRawCache(rawKey, text);
     return text;
 }
 
-// يفحص الروابط بنظام دفعات متوازية (CONCURRENCY_LIMIT)
-// ينتظر حتى VERIFY_WINDOW_MS (5 ثوانٍ) كحد أقصى أو حتى انتهاء كافة الروابط أيهما أقرب، ويكمل الباقي بالخلفية
 function startVerification(list, subsourceKey, epInfo, windowMs) {
     const results = [];
     let done = false, hardTimer, resolveEarly;
@@ -271,16 +277,14 @@ const SOURCE_ORDER = { subdl: 0, subsource: 1, os_legacy: 2, os_mirror: 3 };
 const sourceRank = s => (SOURCE_ORDER[s._source] ?? 9);
 
 function buildValue(verified) {
-    // ترتيب ASS أولاً ثم SRT، وداخل كل نوع حسب أولوية المصدر (SubDL ثم Subsource ثم OpenSubtitles)
     const sorted = verified.slice().sort((a, b) => {
         if (a.format !== b.format) return a.format === 'ass' ? -1 : 1;
         return sourceRank(a) - sourceRank(b);
     });
 
-    // حذف الترجمات المكررة داخل كل صيغة بناءً على بصمة النص الفعلي
     const seenSig = new Set();
     const good = sorted.filter(s => {
-        const key = `${s.format}:${s._sig}`;
+        const key = [s.format, s._sig].join(':');
         if (seenSig.has(key)) return false;
         seenSig.add(key);
         return true;
@@ -305,10 +309,11 @@ function setResultCache(key, value) {
 
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     const t0 = Date.now();
-    console.log(`[جلب عربي] جاري البحث عن ترجمات عربية (جاهزة + مصحح) للعمل: ${imdbId}...`);
+    console.log('[جلب عربي] جاري البحث عن ترجمات عربية (جاهزة + مصحح) للعمل: ' + imdbId + '...');
 
-    const keyHash = crypto.createHash('md5').update(`${subdlKey \vert{}\vert{} ''}\vert{}${subsourceKey || ''}`).digest('hex').slice(0, 8);
-    const cacheKey = `${imdbId}:${season}:${episode}:${keyHash}`;
+    const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
+    const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
+    const cacheKey = [imdbId, season, episode, keyHash].join(':');
     const hit = resultCache.get(cacheKey);
     if (hit && Date.now() - hit.time < RESULT_TTL) {
         console.log('[جلب عربي] النتيجة من الكاش.');
@@ -328,9 +333,13 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     );
 
     settled.forEach((r, i) => {
-        if (r.status === 'rejected') console.log(`[جلب عربي - ${names[i]}] خطأ غير متوقع: ${r.reason && r.reason.message}`);
+        if (r.status === 'rejected') {
+            console.log('[جلب عربي - ' + names[i] + '] خطأ غير متوقع: ' + (r.reason && r.reason.message));
+        }
     });
-    console.log('[جلب عربي] ملخص المصادر: ' + settled.map((r, i) => `${names[i]}=${r.status === 'fulfilled' ? r.value.length : 'خطأ'}`).join(' | ') + ` (بعد ${((Date.now() - t0) / 1000).toFixed(1)} ثانية)`);
+
+    const summaryStr = settled.map((r, i) => names[i] + '=' + (r.status === 'fulfilled' ? r.value.length : 'خطأ')).join(' | ');
+    console.log('[جلب عربي] ملخص المصادر: ' + summaryStr + ' (بعد ' + ((Date.now() - t0) / 1000).toFixed(1) + ' ثانية)');
 
     const lists = settled.map((r, i) => {
         if (r.status !== 'fulfilled' || !Array.isArray(r.value)) return [];
@@ -338,7 +347,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         return r.value.map(item => (item && !item._source ? { ...item, _source: srcKey } : item));
     });
 
-    // دمج بالتناوب (Interleaving) بين جميع المصادر لضمان فحص الجميع بالتساوي خلال الـ 5 ثوانٍ الأولى
     const interleaved = [];
     const maxLen = Math.max(0, ...lists.map(l => l.length));
     for (let i = 0; i < maxLen; i++) {
@@ -359,24 +367,22 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const toVerify = uniqueSubs.slice(0, MAX_CANDIDATES);
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
 
-    // منح 5 ثوانٍ كاملة كحد أقصى لفحص واستخراج ملفات ZIP و ASS
     const job = startVerification(toVerify, subsourceKey, epInfo, VERIFY_WINDOW_MS);
     await job.early;
 
     const snapshot = job.results.slice();
     const { good, value } = buildValue(snapshot);
-    console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => `${s._source}/${s.format}`).join(' | '));
-    console.log(`[جلب عربي] بعد الفحص: ${snapshot.length}/${toVerify.length} شغالة، ${good.length} بعد حذف المكرر → ${value.ass.length} ASS و ${value.srt.length} SRT \vert{} الزمن الكلي ${((Date.now() - t0) / 1000).toFixed(1)} ثانية.`);
+    console.log('[جلب عربي] الشغالة حسب المصدر: ' + good.map(s => s._source + '/' + s.format).join(' | '));
+    console.log('[جلب عربي] بعد الفحص: ' + snapshot.length + '/' + toVerify.length + ' شغالة، ' + good.length + ' بعد حذف المكرر -> ' + value.ass.length + ' ASS و ' + value.srt.length + ' SRT - الزمن الكلي ' + ((Date.now() - t0) / 1000).toFixed(1) + ' ثانية.');
 
     if (good.length > 0) setResultCache(cacheKey, value);
 
-    // إذا كان هناك روابط متبقية (مثل الأعمال التي تتجاوز 50 أو 100 رابط)، يكمل فحصها بالخلفية ويحدث الكاش
     job.all.then(() => {
         if (job.results.length > snapshot.length) {
             const full = buildValue(job.results);
             if (full.good.length > 0) {
                 setResultCache(cacheKey, full.value);
-                console.log(`[جلب عربي] تحديث الكاش بالخلفية: ${full.value.ass.length} ASS و ${full.value.srt.length} SRT (كانت ${value.ass.length + value.srt.length}).`);
+                console.log('[جلب عربي] تحديث الكاش بالخلفية: ' + full.value.ass.length + ' ASS و ' + full.value.srt.length + ' SRT (كانت ' + (value.ass.length + value.srt.length) + ').');
             }
         }
     }).catch(() => {});
