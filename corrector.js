@@ -663,8 +663,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   return { texts: propagateNames(finalTexts, eligible, kinds), missing };
 }
 
-const shield = require('./shield');
-
 const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
@@ -682,13 +680,23 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
   console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const [{ texts: finalCorrections, missing }] = await Promise.all([
-    correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`),
-    shield.prepareShield(targetId, cues, null, keysArray, modelName)
-  ]);
+  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
 
-  const srtOutput = shield.buildShieldedSrt(cues, finalCorrections, targetId, DRAWING_RE);
-
+  let srtOutput = '';
+  let counter = 1;
+  cues.forEach((c, idx) => {
+    if (DRAWING_RE.test(c.text)) return; // لا معنى لأسطر الرسم في SRT
+    // الأسطر غير المصححة خام (فيها \N حرفية)، نحوّلها لسطر جديد
+    let text = String(finalCorrections[idx] || '').replace(/\\+[nN]/g, '\n');
+    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
+    let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
+    if (sTime.length === 10) sTime = '0' + sTime;
+    if (eTime.length === 10) eTime = '0' + eTime;
+    if (sTime.split(',')[1].length === 2) sTime += '0';
+    if (eTime.split(',')[1].length === 2) eTime += '0';
+    srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
+    counter++;
+  });
   return { content: srtOutput, missing, total: cues.length, failed: false };
 }
 
@@ -724,17 +732,15 @@ function parseAssKeepingStructure(text) {
   return { lines, cues, slots };
 }
 
-function rebuildAss(parsed, texts, targetId) {
+function rebuildAss(parsed, texts) {
   const out = parsed.lines.slice();
   const drop = new Set();
   parsed.slots.forEach((lineIdx, k) => {
     if (DROP_DRAWINGS && DRAWING_RE.test(texts[k])) { drop.add(lineIdx); return; }
-    const c = parsed.cues[k];
-    if (shield.isCueInsideShield(c.start, c.end, targetId)) { drop.add(lineIdx); return; }
     const m = out[lineIdx].match(ASS_DLG_RE);
     out[lineIdx] = m[1] + addRlm(String(texts[k]).replace(/\r?\n/g, '\\N'));
   });
-  return out.filter((_, i) => !drop.has(i)).concat(shield.buildAssShieldLines(targetId)).join('\n');
+  return out.filter((_, i) => !drop.has(i)).join('\n');
 }
 
 async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
@@ -751,14 +757,11 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
 
   console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
-    const [{ texts, missing }] = await Promise.all([
-    correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`),
-    shield.prepareShield(targetId, cues, null, keysArray, modelName)
-  ]);
+  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
 
   // الملف الأصلي (Script Info + Styles + Fonts + كل الأسطر) محفوظ، ونستبدل نص الأسطر فقط
   if (isRealAss) {
-    return { content: rebuildAss(parsed, texts, targetId) + '\n', missing, total: cues.length, failed: false };
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
   }
 
   // الأصل كان SRT: نبني ASS من الصفر كما كان
@@ -766,14 +769,12 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   cues.forEach((c, idx) => {
     const text = texts[idx];
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    if (shield.isCueInsideShield(c.start, c.end, targetId)) return;
     assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
   });
-  return { content: ASS_DEFAULT_HEADER + assLines.concat(shield.buildAssShieldLines(targetId)).join('\n') + '\n', missing, total: cues.length, failed: false };
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
 }
 
 module.exports = {
   handleCorrectionSrt,
   handleCorrectionAss
 };
- 
