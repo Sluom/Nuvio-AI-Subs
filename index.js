@@ -725,7 +725,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
 
-        // ب) ترجمات SRT الجاهزة (بحد أقصى 20 لكل موقع من المواقع الثلاثة)
+        // ب) ترجمات SRT الجاهزة (بحد أقصى 20 لكل موقع من المواقع الثلاثة: SubDL, Subsource, OpenSubtitles)
         if (arabicSubs.srt && arabicSubs.srt.length > 0) {
             const siteCounters = {};
             for (let i = 0; i < arabicSubs.srt.length; i++) {
@@ -734,14 +734,9 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 siteCounters[srcLabel] = (siteCounters[srcLabel] || 0) + 1;
                 const siteIdx = siteCounters[srcLabel];
 
-                // روابط OpenSubtitles العادي (subs5.strem.io) الجاهزة بترميز UTF-8 تمر مباشرة أو عبر البروكسي الذكي
-                const readyUrl = sub._directUtf8
-                    ? sub.url
-                    : baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams;
-
                 transSubs.push({
                     id: 'nuvio-ready-ara-srt-' + (i + 1),
-                    url: readyUrl,
+                    url: baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
                     title: 'Nuvio-' + srcLabel + '-ara-srt ' + siteIdx
                 });
@@ -850,7 +845,6 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
         return sendSub(res, mime, 'Ready-Track' + trackNum + '.' + ext, content);
     } catch (e) {
         console.error('[Raw Sub Error] Track ' + trackNum + ':', e.message);
-        // في حال كان الرابط مباشراً (مثل OpenSubtitles) وحظر اتصال السيرفر، نوجه المشغل لتحميله مباشرة
         if (!/\.zip(\?|$)/i.test(targetUrl)) {
             return res.redirect(302, targetUrl);
         }
