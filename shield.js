@@ -1,5 +1,5 @@
 // shield.js
-// درع الترجمة: التدرج الذكي المضمون + تنبيه مسبق يختفي أثناء المشهد + جدار أسود مع إبقاء الحوار
+// درع الترجمة: جدار أبيض مصمت + عزل ذكي لتوقيت كل رابط ترجمة (Track) + جلب دقيق لحلقات المسلسلات
 
 const axiosDefault = require('axios');
 
@@ -8,16 +8,15 @@ const HAS_ARABIC = /[\u0600-\u06FF]/;
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
 
-// ===== إعدادات المظهر والألوان (عدّلها من هنا فقط) =====
+// ===== إعدادات المظهر والألوان =====
 const WARN_SEC = 10;                  // مدة التنبيه المسبق قبل المشهد بالثواني (يختفي عند بدء المشهد)
-const WARN_COLOR_HEX = '#FFD400';     // لون تنبيه "مشهد🔞 قادم" (أصفر ذهبي)
-const WALL_COLOR_HEX = '#000000';     // لون الجدار في المشغلات التي تدعم الألوان
-const WALL_CHAR = '⬛';                // إيموجي المربع الأسود (يضمن ظهور الجدار بالأسود حتى في مشغلات SRT البيضاء)
-const WALL_COLS = 24;                 // عدد المربعات السوداء في كل سطر (24 مربع إيموجي عريض يغطي عرض الشاشة)
-const WALL_ROWS = 14;                 // عدد أسطر الجدار لتغطية ارتفاع الشاشة
+const WARN_COLOR_HEX = '#FFD400';     // لون التنبيه في المشغلات الداعمة وملفات ASS
+const WALL_CHAR = '█';                // المربع النصي المصمت (يظهر كجدار أبيض متلاصق بدون فراغات أو تقطيع)
+const WALL_COLS = 26;                 // 26 مربع مصمت بسطر واحد بدون التفاف
+const WALL_ROWS = 12;                 // 12 سطر لتغطية الشاشة بارتفاع متناسق
 
 // ===== إعدادات الهوامش والتشغيل الفعلي =====
-const SCENE_PAD_BEFORE_SEC = 7;       // هامش أمان مبكر قبل المشهد (لتغطية أول 20 ثانية بالكامل)
+const SCENE_PAD_BEFORE_SEC = 5;       // هامش أمان قبل المشهد
 const SCENE_PAD_AFTER_SEC = 3;        // هامش أمان بعد نهاية المشهد
 const USE_TEST_SCENES = false;        // false = التشغيل الفعلي على الأفلام والمسلسلات
 const HTTP_TIMEOUT_MS = 8500;
@@ -47,9 +46,8 @@ function hexToAss(hex) {
 }
 
 const WARN_ASS = hexToAss(WARN_COLOR_HEX);
-const WALL_ASS = hexToAss(WALL_COLOR_HEX);
 const WALL_ROW = WALL_CHAR.repeat(WALL_COLS);
-const ASS_WALL_ROW = '█'.repeat(42);
+const ASS_WALL_ROW = WALL_CHAR.repeat(36);
 
 // ===== قائمة أولوية يدوية (اختيارية) =====
 const SCENES_DB = {
@@ -61,23 +59,32 @@ const TEST_SCENES = [
   { start: 300, end: 315 }
 ];
 
-// كاش الذاكرة (يحفظ فقط النتائج الناجحة أو المؤكدة)
-const RESOLVED_SCENES_CACHE = new Map();
-const CUES_MEMORY_CACHE = new Map();
-const IN_FLIGHT_REQUESTS = new Map();
+// فصل كاش المصادر (لكل فلم/حلقة) عن كاش التوقيت (لكل رابط ترجمة Track مستقل)
+const EVIDENCE_CACHE = new Map();          // مفتاحه: targetId
+const RESOLVED_SCENES_CACHE = new Map();   // مفتاحه: trackKey (خاص بكل ملف ترجمة)
+const LATEST_TARGET_SCENES = new Map();    // مفتاحه: targetId (لآخر رابط تم تشغيله، يخدم ASS)
+const CUES_MEMORY_CACHE = new Map();       // مفتاحه: targetId
+const IN_FLIGHT_EVIDENCE = new Map();
+const IN_FLIGHT_TRACKS = new Map();
 
-function saveToMemoryCache(key, scenes, cues = null) {
-  if (!key) return;
+function getTrackCacheKey(targetId, cues) {
+  if (!targetId) return '';
+  if (!Array.isArray(cues) || cues.length === 0) return String(targetId);
+  const first = String(cues[0]?.start || '').trim();
+  const last = String(cues[cues.length - 1]?.end || '').trim();
+  return `${targetId}::${cues.length}::${first}::${last}`;
+}
+
+function saveTrackScenesToCache(targetId, trackKey, scenes, cues = null) {
+  if (!targetId) return;
   if (RESOLVED_SCENES_CACHE.size >= MAX_CACHE_ENTRIES) {
     const oldestKey = RESOLVED_SCENES_CACHE.keys().next().value;
-    if (oldestKey !== undefined) {
-      RESOLVED_SCENES_CACHE.delete(oldestKey);
-      CUES_MEMORY_CACHE.delete(oldestKey);
-    }
+    if (oldestKey !== undefined) RESOLVED_SCENES_CACHE.delete(oldestKey);
   }
-  RESOLVED_SCENES_CACHE.set(key, scenes);
+  if (trackKey) RESOLVED_SCENES_CACHE.set(trackKey, scenes);
+  LATEST_TARGET_SCENES.set(targetId, scenes);
   if (Array.isArray(cues) && cues.length > 0) {
-    CUES_MEMORY_CACHE.set(key, cues);
+    CUES_MEMORY_CACHE.set(targetId, cues);
   }
 }
 
@@ -153,12 +160,16 @@ function getManualScenes(targetId) {
   return normalizeScenes(list);
 }
 
-function getScenesForMedia(targetId) {
+function getScenesForMedia(targetId, cues = null) {
   if (USE_TEST_SCENES) return TEST_SCENES;
   const manual = getManualScenes(targetId);
   if (manual) return manual;
-  if (targetId && RESOLVED_SCENES_CACHE.has(targetId)) {
-    return RESOLVED_SCENES_CACHE.get(targetId) || [];
+  if (Array.isArray(cues) && cues.length > 0) {
+    const tk = getTrackCacheKey(targetId, cues);
+    if (RESOLVED_SCENES_CACHE.has(tk)) return RESOLVED_SCENES_CACHE.get(tk) || [];
+  }
+  if (targetId && LATEST_TARGET_SCENES.has(targetId)) {
+    return LATEST_TARGET_SCENES.get(targetId) || [];
   }
   return [];
 }
@@ -241,7 +252,51 @@ function extractRegexTimestampsFromDescriptions(descList) {
   return extracted;
 }
 
-// ===== 1. جلب معلومات الفلم أو الحلقة =====
+// استخراج رقم IMDb الخاص بالحلقة تحديداً (مثل tt1668746 لحلقة Game of Thrones S01E02)
+async function resolveEpisodeSpecificImdbId(baseImdbId, season, episode, seriesTitle, episodeTitle) {
+  // 1. من صفحة حلقات الموسم في IMDb مباشرة (__NEXT_DATA__)
+  try {
+    const html = await safeHttpGet(`https://www.imdb.com/title/${baseImdbId}/episodes/?season=${season}`);
+    if (typeof html === 'string' && html.length > 1000) {
+      const nextMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+      if (nextMatch) {
+        const json = JSON.parse(nextMatch[1]);
+        const items = json?.props?.pageProps?.contentData?.section?.episodes?.items;
+        if (Array.isArray(items)) {
+          const epItem = items.find(it =>
+            Number(it?.episode || it?.episodeNumber) === Number(episode) &&
+            (!it?.season || Number(it?.season || it?.seasonNumber) === Number(season))
+          ) || items[episode - 1];
+          if (epItem && /^tt\d+$/i.test(String(epItem.id || ''))) {
+            return {
+              episodeImdbId: String(epItem.id).toLowerCase(),
+              episodeTitle: String(epItem.titleText || episodeTitle || '').trim(),
+              episodePlot: String(epItem.plot || '').trim()
+            };
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 2. عبر بحث IMDb Suggestion بعنوان المسلسل + عنوان الحلقة
+  if (seriesTitle && episodeTitle) {
+    try {
+      const q = `${seriesTitle} ${episodeTitle}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+      const firstLetter = q[0] || 't';
+      const sug = await safeHttpGet(`https://v3.sg.media-imdb.com/suggestion/${firstLetter}/${encodeURIComponent(q.slice(0, 45))}.json`);
+      const list = Array.isArray(sug?.d) ? sug.d : [];
+      const found = list.find(x => /^tt\d+$/i.test(x.id) && x.id !== baseImdbId && /episode/i.test(String(x.q || x.qid || '')));
+      if (found) {
+        return { episodeImdbId: found.id.toLowerCase(), episodeTitle, episodePlot: '' };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+// ===== 1. جلب معلومات الفلم أو الحلقة بدقة =====
 async function resolveMediaMeta(targetId) {
   const raw = String(targetId || '').trim();
   const parts = raw.split(':');
@@ -292,6 +347,16 @@ async function resolveMediaMeta(targetId) {
     } catch (_) {}
   }
 
+  // إذا كان مسلسلاً ولم يعطنا Cinemeta رقم tt الخاص بالحلقة، نستخرجه من IMDb مباشرة
+  if (isSeries && !episodeImdbId) {
+    const epResolved = await resolveEpisodeSpecificImdbId(baseImdbId, season, episode, title, episodeTitle);
+    if (epResolved) {
+      if (epResolved.episodeImdbId) episodeImdbId = epResolved.episodeImdbId;
+      if (!episodeTitle && epResolved.episodeTitle) episodeTitle = epResolved.episodeTitle;
+      if (!episodePlot && epResolved.episodePlot) episodePlot = epResolved.episodePlot;
+    }
+  }
+
   return {
     targetId: raw,
     baseImdbId,
@@ -306,15 +371,18 @@ async function resolveMediaMeta(targetId) {
   };
 }
 
-// ===== 2. المصادر المرتبة (بالنسخة المضمونة التي أثبتت نجاحها في اللوغ الأول) =====
+// ===== 2. المصادر المرتبة =====
 
-// [المرتبة 1]: IMDb Parents Guide (يجرب api.imdbapi.dev ثم GraphQL البسيط ثم HTML لضمان عدم ضياع أي مشهد)
+// [المرتبة 1]: IMDb Parents Guide (للحلقات يفحص رقم الحلقة حصراً ولا يخلطها بدليل المسلسل الكامل)
 async function fetchImdbParentsGuide(meta) {
   if (!meta) return null;
-  const idsToTry = [meta.episodeImdbId, meta.baseImdbId].filter(Boolean);
+  // هام جداً: في المسلسلات نستخدم episodeImdbId فقط حتى لا نسحب مشاهد 8 مواسم ونطبقها على حلقة واحدة!
+  const idsToTry = meta.isSeries
+    ? [meta.episodeImdbId].filter(Boolean)
+    : [meta.baseImdbId].filter(Boolean);
 
   for (const imdbId of idsToTry) {
-    // 1-أ: عبر api.imdbapi.dev (الأضمن والأغنى بالتفاصيل)
+    // 1-أ: عبر api.imdbapi.dev
     try {
       const data = await safeHttpGet(`https://api.imdbapi.dev/titles/${imdbId}/parentsGuide`, { Accept: 'application/json' });
       const guide = data?.parentalGuide || data?.parentsGuide || data;
@@ -322,7 +390,7 @@ async function fetchImdbParentsGuide(meta) {
       if (parsed && (parsed.descriptions.length > 0 || parsed.isClean)) return parsed;
     } catch (_) {}
 
-    // 1-ب: عبر IMDb GraphQL البسيط والمضمون
+    // 1-ب: عبر IMDb GraphQL
     try {
       const { axios } = getAiShared();
       const query = `query { title(id: "${imdbId}") { parentsGuide { guideItems(first: 45) { edges { node { category { id } text { plainText } } } } } } }`;
@@ -342,16 +410,14 @@ async function fetchImdbParentsGuide(meta) {
           .map(n => String(n.text?.plainText || '').trim())
           .filter(Boolean);
 
-        if (nudityItems.length > 0 || imdbId === meta.baseImdbId) {
-          return {
-            source: 'IMDb-GraphQL',
-            itemCount: nudityItems.length,
-            isClean: nudityItems.length === 0,
-            hasAdult: nudityItems.length > 0,
-            directScenes: extractRegexTimestampsFromDescriptions(nudityItems),
-            descriptions: nudityItems.slice(0, 30)
-          };
-        }
+        return {
+          source: `IMDb-GraphQL(${imdbId})`,
+          itemCount: nudityItems.length,
+          isClean: nudityItems.length === 0,
+          hasAdult: nudityItems.length > 0,
+          directScenes: extractRegexTimestampsFromDescriptions(nudityItems),
+          descriptions: nudityItems.slice(0, 30)
+        };
       }
     } catch (_) {}
 
@@ -376,7 +442,7 @@ async function fetchImdbParentsGuide(meta) {
           }
           if (items.length > 0) {
             return {
-              source: 'IMDb-HTML',
+              source: `IMDb-HTML(${imdbId})`,
               itemCount: items.length,
               isClean: false,
               hasAdult: true,
@@ -631,95 +697,120 @@ async function fetchDoesTheDogDie(meta) {
   }
 }
 
-// ===== 3. محرك التدرج الذكي المضمون =====
-async function gatherCascadedEvidence(meta) {
-  const activeSources = [];
+// ===== 3. محرك جمع الأدلة مع كاش مستقل للعمل =====
+async function getOrGatherEvidence(targetId) {
+  if (EVIDENCE_CACHE.has(targetId)) return EVIDENCE_CACHE.get(targetId);
+  if (IN_FLIGHT_EVIDENCE.has(targetId)) return IN_FLIGHT_EVIDENCE.get(targetId);
 
-  if (meta.isSeries) {
-    // للمسلسلات: نجلب دليل الحلقة (أو المسلسل إن كانت الحلقة مدمجة فيه) + ملخص الحلقة
-    const imdbGuide = await fetchImdbParentsGuide(meta);
-    if (imdbGuide) activeSources.push(imdbGuide);
+  const p = (async () => {
+    try {
+      const meta = await resolveMediaMeta(targetId);
+      if (!meta) return null;
 
-    if (meta.episodePlot) {
-      activeSources.push({
-        source: 'Episode-Plot',
-        isClean: false,
-        hasAdult: false,
-        directScenes: [],
-        descriptions: [`[Season ${meta.season} Episode ${meta.episode} (${meta.episodeTitle}) Overview]: ${meta.episodePlot}`]
-      });
-    }
-  } else {
-    // للأفلام بالتدرج: (1: IMDb + 2: Kids-In-Mind + 3: CringeMDb)
-    const [imdbRes, kimRes, cringeRes] = await Promise.allSettled([
-      fetchImdbParentsGuide(meta),
-      fetchKidsInMind(meta),
-      fetchCringeMdb(meta)
-    ]);
+      const activeSources = [];
+      if (meta.isSeries) {
+        const imdbGuide = await fetchImdbParentsGuide(meta);
+        if (imdbGuide) activeSources.push(imdbGuide);
 
-    const imdb = imdbRes.status === 'fulfilled' ? imdbRes.value : null;
-    const kim = kimRes.status === 'fulfilled' ? kimRes.value : null;
-    const cringe = cringeRes.status === 'fulfilled' ? cringeRes.value : null;
-
-    if (imdb) activeSources.push(imdb);
-    if (kim) activeSources.push(kim);
-    if (cringe) activeSources.push(cringe);
-
-    const hasRichPrimary = Boolean(kim && kim.descriptions.length > 0) ||
-      Boolean(imdb && imdb.itemCount >= 3 && cringe && cringe.directScenes.length > 0);
-    const isDefinitelyClean = Boolean(
-      (imdb && imdb.isClean && (!kim || kim.isClean) && (!cringe || cringe.isClean)) ||
-      (kim && kim.isClean && (!imdb || !imdb.hasAdult))
-    );
-
-    // التدرج إلى 4: PluggedIn -> 5: ParentPreviews -> 6: DoesTheDogDie عند الحاجة
-    if (!hasRichPrimary && !isDefinitelyClean) {
-      const plugged = await fetchPluggedIn(meta);
-      if (plugged) {
-        activeSources.push(plugged);
+        if (meta.episodePlot) {
+          activeSources.push({
+            source: 'Episode-Plot',
+            isClean: false,
+            hasAdult: false,
+            directScenes: [],
+            descriptions: [`[Season ${meta.season} Episode ${meta.episode} (${meta.episodeTitle}) Overview]: ${meta.episodePlot}`]
+          });
+        }
       } else {
-        const pp = await fetchParentPreviews(meta);
-        if (pp) {
-          activeSources.push(pp);
-        } else {
-          const ddd = await fetchDoesTheDogDie(meta);
-          if (ddd) activeSources.push(ddd);
+        const [imdbRes, kimRes, cringeRes] = await Promise.allSettled([
+          fetchImdbParentsGuide(meta),
+          fetchKidsInMind(meta),
+          fetchCringeMdb(meta)
+        ]);
+
+        const imdb = imdbRes.status === 'fulfilled' ? imdbRes.value : null;
+        const kim = kimRes.status === 'fulfilled' ? kimRes.value : null;
+        const cringe = cringeRes.status === 'fulfilled' ? cringeRes.value : null;
+
+        if (imdb) activeSources.push(imdb);
+        if (kim) activeSources.push(kim);
+        if (cringe) activeSources.push(cringe);
+
+        const hasRichPrimary = Boolean(kim && kim.descriptions.length > 0) ||
+          Boolean(imdb && imdb.itemCount >= 3 && cringe && cringe.directScenes.length > 0);
+        const isDefinitelyClean = Boolean(
+          (imdb && imdb.isClean && (!kim || kim.isClean) && (!cringe || cringe.isClean)) ||
+          (kim && kim.isClean && (!imdb || !imdb.hasAdult))
+        );
+
+        if (!hasRichPrimary && !isDefinitelyClean) {
+          const plugged = await fetchPluggedIn(meta);
+          if (plugged) {
+            activeSources.push(plugged);
+          } else {
+            const pp = await fetchParentPreviews(meta);
+            if (pp) {
+              activeSources.push(pp);
+            } else {
+              const ddd = await fetchDoesTheDogDie(meta);
+              if (ddd) activeSources.push(ddd);
+            }
+          }
         }
       }
+
+      let cleanVotes = 0;
+      let adultVotes = 0;
+      const directScenes = [];
+      const allDescriptions = [];
+      const sourceNames = [];
+
+      for (const src of activeSources) {
+        sourceNames.push(src.source);
+        if (src.isClean) cleanVotes++;
+        if (src.hasAdult) adultVotes++;
+        if (Array.isArray(src.directScenes) && src.directScenes.length > 0) {
+          directScenes.push(...src.directScenes);
+        }
+        if (Array.isArray(src.descriptions) && src.descriptions.length > 0) {
+          allDescriptions.push(`=== ${src.source} ===\n${src.descriptions.join('\n')}`);
+        }
+      }
+
+      const label = meta.isSeries
+        ? `${meta.title} S${meta.season}E${meta.episode} (${meta.episodeImdbId || 'no-ep-id'})`
+        : (meta.title || meta.targetId);
+
+      console.log(`[درع Nuvio 🛡️] ${label} | المصادر=[${sourceNames.join(', ')}] | إشارات حجب=${adultVotes} | نظيف=${cleanVotes} | أوقات مباشرة=${directScenes.length}`);
+
+      const bundle = {
+        meta,
+        evidence: {
+          activeCount: activeSources.length,
+          cleanVotes,
+          adultVotes,
+          isConfirmedClean: cleanVotes >= 1 && adultVotes === 0 && directScenes.length === 0,
+          directScenes: normalizeScenes(directScenes),
+          combinedReport: allDescriptions.join('\n\n').slice(0, 9500)
+        }
+      };
+
+      if (EVIDENCE_CACHE.size >= MAX_CACHE_ENTRIES) {
+        const oldK = EVIDENCE_CACHE.keys().next().value;
+        if (oldK !== undefined) EVIDENCE_CACHE.delete(oldK);
+      }
+      EVIDENCE_CACHE.set(targetId, bundle);
+      return bundle;
+    } finally {
+      IN_FLIGHT_EVIDENCE.delete(targetId);
     }
-  }
+  })();
 
-  let cleanVotes = 0;
-  let adultVotes = 0;
-  const directScenes = [];
-  const allDescriptions = [];
-  const sourceNames = [];
-
-  for (const src of activeSources) {
-    sourceNames.push(src.source);
-    if (src.isClean) cleanVotes++;
-    if (src.hasAdult) adultVotes++;
-    if (Array.isArray(src.directScenes) && src.directScenes.length > 0) {
-      directScenes.push(...src.directScenes);
-    }
-    if (Array.isArray(src.descriptions) && src.descriptions.length > 0) {
-      allDescriptions.push(`=== ${src.source} ===\n${src.descriptions.join('\n')}`);
-    }
-  }
-
-  console.log(`[درع Nuvio 🛡️] ${meta.title || meta.targetId} | المصادر=[${sourceNames.join(', ')}] | إشارات حجب=${adultVotes} | نظيف=${cleanVotes} | أوقات مباشرة=${directScenes.length}`);
-
-  return {
-    activeCount: activeSources.length,
-    cleanVotes,
-    adultVotes,
-    isConfirmedClean: cleanVotes >= 1 && adultVotes === 0 && directScenes.length === 0,
-    directScenes: normalizeScenes(directScenes),
-    combinedReport: allDescriptions.join('\n\n').slice(0, 9500)
-  };
+  IN_FLIGHT_EVIDENCE.set(targetId, p);
+  return p;
 }
 
-// ===== 4. بناء خريطة الترجمة ومطابقتها عبر Gemini =====
+// ===== 4. بناء خريطة الترجمة الكاملة بدون حذف أسطر عشوائي =====
 function buildSubtitleTimelineSummary(cues, texts) {
   if (!Array.isArray(cues) || !cues.length) return { summaryText: '', maxEndSec: 0 };
 
@@ -734,7 +825,7 @@ function buildSubtitleTimelineSummary(cues, texts) {
       .replace(/\s+/g, ' ')
       .trim();
     if (endSec > startSec && cleanTxt) {
-      parsedCues.push({ startSec: Math.round(startSec), endSec: Math.round(endSec), text: cleanTxt.slice(0, 80) });
+      parsedCues.push({ startSec: Math.round(startSec), endSec: Math.round(endSec), text: cleanTxt.slice(0, 85) });
     }
   }
 
@@ -757,16 +848,27 @@ function buildSubtitleTimelineSummary(cues, texts) {
     }
   }
 
-  // حجم مثالي (450 سطر) يضمن سرعة وعدم فشل JSON في Gemini مع تغطية الحوار بالكامل
-  const maxLines = 450;
-  const step = parsedCues.length <= maxLines ? 1 : Math.ceil(parsedCues.length / maxLines);
+  // دمج الأسطر المتقاربة زمنياً (أقل من ثانيتين) بدلاً من القفز وحذف نصف الحوار
+  const mergedTimeline = [];
+  for (const c of parsedCues) {
+    const last = mergedTimeline[mergedTimeline.length - 1];
+    if (last && (c.startSec - last.endSec <= 2) && (last.text.length + c.text.length <= 130)) {
+      last.endSec = c.endSec;
+      last.text += ' / ' + c.text;
+    } else {
+      mergedTimeline.push({ ...c });
+    }
+  }
+
+  const maxLines = 650;
+  const step = mergedTimeline.length <= maxLines ? 1 : Math.ceil(mergedTimeline.length / maxLines);
   const timelineLines = [];
-  for (let i = 0; i < parsedCues.length; i += step) {
-    const c = parsedCues[i];
+  for (let i = 0; i < mergedTimeline.length; i += step) {
+    const c = mergedTimeline[i];
     timelineLines.push(`[${c.startSec}s-${c.endSec}s] ${c.text}`);
   }
 
-  const gapLines = gaps.slice(0, 100).map(g =>
+  const gapLines = gaps.slice(0, 120).map(g =>
     `GAP [${g.gapStart}s -> ${g.gapEnd}s (${g.duration}s)] Before: "${g.beforeText}" | After: "${g.afterText}"`
   );
 
@@ -789,23 +891,24 @@ async function matchScenesWithGemini(meta, evidence, cues, texts, keysArray, mod
     : 'gemini-3.1-flash-lite';
 
   const directJson = JSON.stringify(evidence.directScenes || []);
-  const prompt = `You are an expert family-safety timestamp synchronization engine for movies and TV episodes.
-Media: "${meta.title || meta.targetId}" (${meta.year || 'Unknown Year'})${meta.isSeries ? ` - Season ${meta.season}, Episode${meta.episode}` : ''}.
+  const prompt = `You are a precision family-safety timestamp synchronization engine for movies and TV episodes.
+Media: "${meta.title || meta.targetId}" (${meta.year || 'Unknown Year'})${meta.isSeries ? ` - Season ${meta.season}, Episode ${meta.episode} ("${meta.episodeTitle || ''}")` : ''}.
 
 DIRECT_TIMESTAMPS_FROM_CRINGEMDB:
 ${directJson}
 
-PARENTAL_SOURCES_EVIDENCE:
+PARENTAL_SOURCES_EVIDENCE (SPECIFIC TO THIS TITLE/EPISODE):
 ${evidence.combinedReport || 'No external text report available.'}
 
-SUBTITLE_TIMELINE_AND_GAPS:
+SUBTITLE_TIMELINE_AND_GAPS (FROM THE CURRENT SUBTITLE TRACK):
 ${summaryText}
 
-YOUR TASK:
-1. Identify ALL explicit sex scenes, nudity scenes (full nudity, topless, exposed breasts/genitals/buttocks), brothel/strip club scenes, sexual violence/rape, or intense bedroom/bath sexual activity in this specific movie/episode.
-2. CRITICAL FOR SCENE START TIME: Many nudity/brothel/bedroom scenes begin WHILE characters are talking (20 to 30 seconds of dialogue in that room BEFORE the silent gap starts). Set "start" to the VERY FIRST second that the dialogue/scene in that setting begins, NOT just when the silent gap starts!
-3. Do NOT include non-sexual violence or profanity alone.
-4. Output ONLY a valid JSON array of objects: [{"start": <number_in_seconds>, "end": <number_in_seconds>}]. If there are NO such scenes, output [].`;
+STRICT SYNCHRONIZATION RULES:
+1. Identify ONLY the actual visual sex/nudity scenes (full nudity, topless, exposed breasts/genitals/buttocks, brothel/bath/bedroom nudity, or sexual assault) described in PARENTAL_SOURCES_EVIDENCE.
+2. NEVER flag normal non-sexual conversation scenes just because characters mention a woman's name, bastards, marriage, or past relationships while walking, riding horses, or talking!
+3. Match each visual nudity/sex scene in PARENTAL_SOURCES_EVIDENCE to its EXACT moment in SUBTITLE_TIMELINE_AND_GAPS (look for the exact bedroom/bath/brothel dialogue and the silent gap where the physical act happens).
+4. If the nudity happens while characters are talking inside that bedroom/bath/brothel, set "start" to when that specific room's intimate interaction begins, and "end" to when that scene finishes.
+5. Output ONLY a valid JSON array of objects: [{"start": <number_in_seconds>, "end": <number_in_seconds>}]. If no explicit visual scenes exist, output [].`;
 
   const apiBase = shared.DEFAULT_GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -864,7 +967,7 @@ YOUR TASK:
   return [];
 }
 
-// ===== الدالة الرئيسية لتحضير الدرع =====
+// ===== الدالة الرئيسية لتحضير الدرع (تزامن مستقل لكل Track) =====
 async function prepareShield(targetId, cues, texts = null, keysArray = [], modelName = null) {
   if (USE_TEST_SCENES) return TEST_SCENES;
   if (!targetId) return [];
@@ -876,24 +979,26 @@ async function prepareShield(targetId, cues, texts = null, keysArray = [], model
   const manual = getManualScenes(targetId);
   if (manual) return manual;
 
-  if (RESOLVED_SCENES_CACHE.has(targetId)) {
-    return RESOLVED_SCENES_CACHE.get(targetId);
+  const trackKey = getTrackCacheKey(targetId, cues);
+  if (trackKey && RESOLVED_SCENES_CACHE.has(trackKey)) {
+    const cached = RESOLVED_SCENES_CACHE.get(trackKey);
+    LATEST_TARGET_SCENES.set(targetId, cached);
+    return cached;
   }
 
-  if (IN_FLIGHT_REQUESTS.has(targetId)) {
-    return IN_FLIGHT_REQUESTS.get(targetId);
+  if (trackKey && IN_FLIGHT_TRACKS.has(trackKey)) {
+    return IN_FLIGHT_TRACKS.get(trackKey);
   }
 
   const task = (async () => {
     try {
-      const meta = await resolveMediaMeta(targetId);
-      if (!meta) return [];
-
-      const evidence = await gatherCascadedEvidence(meta);
+      const bundle = await getOrGatherEvidence(targetId);
+      if (!bundle) return [];
+      const { meta, evidence } = bundle;
 
       if (evidence.isConfirmedClean) {
         console.log(`[درع Nuvio ✅] العمل (${meta.title || targetId}) نظيف عائلياً.`);
-        saveToMemoryCache(targetId, [], cues);
+        saveTrackScenesToCache(targetId, trackKey, [], cues);
         return [];
       }
 
@@ -913,21 +1018,20 @@ async function prepareShield(targetId, cues, texts = null, keysArray = [], model
         }))
       );
 
-      console.log(`[درع Nuvio 🛡️] اكتمل الفحص لـ (${meta.title || targetId}) -> تم تفعيل الحجب على (${padded.length}) مشهد.`);
-      // لا نحفظ نتيجة فارغة في الكاش إذا كان هناك تصويت إباحي وفشل الموديل مؤقتاً، ليتمكن من المحاولة مجدداً
+      console.log(`[درع Nuvio 🛡️] اكتملت مطابقة التوقيت للرابط (${cues ? cues.length : 0} سطر) -> تم تفعيل الحجب على (${padded.length}) مشهد.`);
       if (padded.length > 0 || evidence.adultVotes === 0) {
-        saveToMemoryCache(targetId, padded, cues);
+        saveTrackScenesToCache(targetId, trackKey, padded, cues);
       }
       return padded;
     } catch (err) {
       console.log(`[درع Nuvio ⚠️] خطأ غير متوقع أثناء فحص (${targetId}): ${err && err.message}`);
       return [];
     } finally {
-      IN_FLIGHT_REQUESTS.delete(targetId);
+      if (trackKey) IN_FLIGHT_TRACKS.delete(trackKey);
     }
   })();
 
-  IN_FLIGHT_REQUESTS.set(targetId, task);
+  if (trackKey) IN_FLIGHT_TRACKS.set(trackKey, task);
   return task;
 }
 
@@ -948,27 +1052,26 @@ function addAssRlm(text) {
   }).join('');
 }
 
-// ===== نص التنبيه المسبق فقط (يختفي أثناء المشهد بناءً على طلبك) =====
-const warnMsg = (d) => `مشهد🔞 قادم (${d} ثانية)`;
+// ===== نص التنبيه المسبق (مزود بإيموجيات صفراء لتظهر ملونة حتى في مشغلات SRT البيضاء) =====
+const warnMsg = (d) => `🟨⚠️ مشهد🔞 قادم (${d} ثانية) ⚠️🟨`;
 
 // ===== تنسيقات SRT =====
 function srtTopWarnMsg(text) {
-  return `{\\an8\\1c${WARN_ASS}\\3c&H000000&}<font color="${WARN_COLOR_HEX}">${text}</font>`;
+  return `<b><font color="${WARN_COLOR_HEX}">${text}</font></b>`;
 }
 
 function srtWarnBanner(text) {
-  return `<font color="${WARN_COLOR_HEX}">${text}</font>`;
+  return `<b><font color="${WARN_COLOR_HEX}">${text}</font></b>`;
 }
 
 function srtWall(rowsCount = WALL_ROWS) {
   const safeRows = Math.max(8, Math.min(WALL_ROWS, Number(rowsCount) || WALL_ROWS));
-  const row = `<font color="${WALL_COLOR_HEX}">${WALL_ROW}</font>`;
-  return `{\\an5\\1c${WALL_ASS}\\3c${WALL_ASS}}` + Array.from({ length: safeRows }, () => row).join('\n');
+  return Array.from({ length: safeRows }, () => WALL_ROW).join('\n');
 }
 
-// ===== تطبيق الدرع على SRT (تنبيه قبل المشهد + جدار أسود وحوار أثناء المشهد بدون نص تنبيه) =====
-function applyShieldToSrtItems(items, targetId, customScenes = null) {
-  const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId));
+// ===== تطبيق الدرع على SRT =====
+function applyShieldToSrtItems(items, targetId, customScenes = null, originalCues = null) {
+  const scenes = normalizeScenes(customScenes || getScenesForMedia(targetId, originalCues));
   if (!scenes.length) return items;
 
   let current = items.slice();
@@ -988,7 +1091,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
     const inShieldWindow = [];
 
     for (const it of current) {
-      // 1. قبل نافذة التنبيه
       if (it.startSec < (hasWarn ? warnStart : start)) {
         const cutEnd = Math.min(it.endSec, hasWarn ? warnStart : start);
         if (cutEnd - it.startSec >= 0.15) {
@@ -996,7 +1098,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
         }
       }
 
-      // 2. داخل نافذة التنبيه المسبق [warnStart, start]
       if (hasWarn && it.endSec > warnStart && it.startSec < start) {
         const wStart = Math.max(warnStart, it.startSec);
         const wEnd = Math.min(start, it.endSec);
@@ -1009,7 +1110,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
         }
       }
 
-      // 3. داخل وقت المشهد المحجوب [start, end] (نحتفظ بالحوار ليظهر مع الجدار)
       if (it.endSec > start && it.startSec < end) {
         const sStart = Math.max(start, it.startSec);
         const sEnd = Math.min(end, it.endSec);
@@ -1022,7 +1122,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
         }
       }
 
-      // 4. بعد انتهاء المشهد
       if (it.endSec > end) {
         const afterStart = Math.max(end, it.startSec);
         if (it.endSec - afterStart >= 0.15) {
@@ -1033,7 +1132,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
 
     const next = outside.slice();
 
-    // أ) إضافة التنبيه المسبق فقط قبل المشهد
     if (hasWarn) {
       inWarnWindow.sort((a, b) => a.startSec - b.startSec);
       let cursor = warnStart;
@@ -1049,7 +1147,6 @@ function applyShieldToSrtItems(items, targetId, customScenes = null) {
       }
     }
 
-    // ب) أثناء المشهد: الجدار الأسود + الحوار فقط (يختفي نص التنبيه أثناء المشهد)
     inShieldWindow.sort((a, b) => a.startSec - b.startSec);
     let shieldCursor = start;
 
@@ -1093,7 +1190,7 @@ function buildShieldedSrt(cues, texts, targetId, drawingRe = null) {
     if (endSec > startSec) rawItems.push({ startSec, endSec, text });
   });
 
-  const shielded = applyShieldToSrtItems(rawItems, targetId);
+  const shielded = applyShieldToSrtItems(rawItems, targetId, null, cues);
   let srtOutput = '';
   shielded.forEach((it, idx) => {
     srtOutput += `${idx + 1}\n${formatSrtTimeSec(it.startSec)} --> ${formatSrtTimeSec(it.endSec)}\n${it.text}\n\n`;
@@ -1115,9 +1212,9 @@ function buildAssShieldLines(targetId, customScenes = null) {
   if (!scenes.length) return [];
 
   const warnTopTag = `{\\an8\\1c${WARN_ASS}\\3c&H000000&\\bord3\\shad0}`;
-  const wallTag = `{\\an5\\1c${WALL_ASS}\\3c${WALL_ASS}\\bord0\\shad0}`;
+  const wallTag = `{\\an5\\1c&HFFFFFF&\\3c&H000000&\\bord2\\shad0}`;
   const dlgOverWallTag = `{\\an2\\1c&HFFFFFF&\\3c&H000000&\\bord3\\shad1}`;
-  const wall = wallTag + Array.from({ length: 16 }, () => ASS_WALL_ROW).join('\\N');
+  const wall = wallTag + Array.from({ length: 14 }, () => ASS_WALL_ROW).join('\\N');
 
   const extra = [];
   let prevEnd = 0;
@@ -1128,18 +1225,15 @@ function buildAssShieldLines(targetId, customScenes = null) {
     const durationSec = calcSceneDurationSec(start, end);
     const warnStart = Math.max(prevEnd, start - WARN_SEC);
 
-    // التنبيه يظهر فقط قبل المشهد ويختفي عند بدء الجدار
     if (start - warnStart >= 1) {
       const warnLine = warnTopTag + warnMsg(durationSec);
       extra.push(`Dialogue: 99,${formatAssTimeSec(warnStart)},${formatAssTimeSec(start)},Default,,0,0,0,,${addAssRlm(warnLine)}`);
     }
 
-    // الجدار الأسود في طبقة 98 أثناء المشهد فقط
     extra.push(`Dialogue: 98,${formatAssTimeSec(start)},${formatAssTimeSec(end)},Default,,0,0,0,,${wall}`);
     prevEnd = end;
   }
 
-  // إظهار الحوار فوق الجدار في طبقة 100
   const cachedCues = targetId ? CUES_MEMORY_CACHE.get(targetId) : null;
   if (Array.isArray(cachedCues) && cachedCues.length > 0) {
     for (const c of cachedCues) {
