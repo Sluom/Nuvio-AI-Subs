@@ -40,7 +40,7 @@ class RequestQueue {
             this.activeCount++;
             Promise.resolve()
                 .then(() => task())
-                .catch(e => console.error("[Queue Error]", e.message))
+                .catch(e => console.error('[Queue Error]', e.message))
                 .finally(() => {
                     this.activeCount--;
                     this.processNext();
@@ -67,7 +67,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys);
 
                 if (r.failed) {
-                    console.error(`[${label}] Track${trackNum}: فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.`);
+                    console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     dropIfNotDone();
                     return;
                 }
@@ -76,16 +76,16 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
 
                 if (r.missing === 0) {
                     const saved = await db.saveDoc('job', cacheKey, { content: r.content });
-                    if (saved) console.log(`[MongoDB] ${label} Track${trackNum}: حُفظت النتيجة الكاملة في التخزين الدائم.`);
-                    if (round > 1) console.log(`[${label}] Track ${trackNum}: اكتملت الترجمة/التصحيح بعد ${round} جولات ✅`);
+                    if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.');
+                    if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
                     return;
                 }
 
-                console.log(`[${label}] Track${trackNum}: ناقص ${r.missing} من ${r.total} سطر (جولة ${round}/${MAX_BACKGROUND_ROUNDS}). النتيجة الحالية جاهزة للمستخدم.`);
+                console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + MAX_BACKGROUND_ROUNDS + '). النتيجة الحالية جاهزة للمستخدم.');
                 if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
             }
         } catch (e) {
-            console.error(`[Background Error - ${label}] Track${trackNum}:`, e.message);
+            console.error('[Background Error - ' + label + '] Track ' + trackNum + ':', e.message);
             dropIfNotDone();
         }
     });
@@ -100,7 +100,7 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     if (cached && (Date.now() - cached.time) < DAY_MS) {
         data = cached.data;
     } else {
-        const r = await axios.get(`https://arm.haglund.dev/api/v2/ids?source=kitsu&id=${encodeURIComponent(kitsuId)}`, {
+        const r = await axios.get('https://arm.haglund.dev/api/v2/ids?source=kitsu&id=' + encodeURIComponent(kitsuId), {
             timeout: 8000,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json' }
         });
@@ -113,11 +113,11 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     if (!imdbId) return null;
 
     const season = data['thetvdb-season'] ?? data['themoviedb-season'] ?? 1;
-    return `${imdbId}:${season}:${kitsuEp}`;
+    return [imdbId, season, kitsuEp].join(':');
 }
 
 async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
-    const metaRes = await axios.get(`https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`, {
+    const metaRes = await axios.get('https://anime-kitsu.strem.fun/meta/anime/kitsu:' + kitsuId + '.json', {
         timeout: 8000,
         headers: { 'User-Agent': 'Stremio/4.4.16 (Windows)' }
     });
@@ -129,7 +129,7 @@ async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     if (epData && epData.imdb_id) {
         const s = epData.imdbSeason || epData.season || 1;
         const e = epData.imdbEpisode || epData.episode || kitsuEp;
-        return `${epData.imdb_id}:${s}:${e}`;
+        return [epData.imdb_id, s, e].join(':');
     }
     return null;
 }
@@ -142,7 +142,7 @@ async function mapKitsuToImdb(targetId) {
     const kitsuEp = parseInt(parts[2], 10);
     if (!kitsuId || isNaN(kitsuEp)) return null;
 
-    console.log(`[Anime Mapper] Searching mapping for Kitsu ID: ${kitsuId}, Ep:${kitsuEp}`);
+    console.log('[Anime Mapper] Searching mapping for Kitsu ID: ' + kitsuId + ', Ep: ' + kitsuEp);
 
     const mappers = [
         ['ARM', () => mapKitsuViaArm(kitsuId, kitsuEp)],
@@ -153,12 +153,12 @@ async function mapKitsuToImdb(targetId) {
         try {
             const mapped = await fn();
             if (mapped) {
-                console.log(`[Anime Mapper] ${name} mapped ${targetId} ->${mapped}`);
+                console.log('[Anime Mapper] ' + name + ' mapped ' + targetId + ' -> ' + mapped);
                 return mapped;
             }
-            console.log(`[Anime Mapper] ${name} returned no IMDb match for${targetId}`);
+            console.log('[Anime Mapper] ' + name + ' returned no IMDb match for ' + targetId);
         } catch (err) {
-            console.error(`[Anime Mapper] ${name} failed for ${targetId} -${err.message}`);
+            console.error('[Anime Mapper] ' + name + ' failed for ' + targetId + ' - ' + err.message);
         }
     }
     return null;
@@ -168,7 +168,7 @@ const absCache = new Map();
 
 async function osCount(id) {
     try {
-        const r = await axios.get(`https://opensubtitles-v3.strem.io/subtitles/series/${id}.json`, { timeout: 8000 });
+        const r = await axios.get('https://opensubtitles-v3.strem.io/subtitles/series/' + id + '.json', { timeout: 8000 });
         return (r.data && Array.isArray(r.data.subtitles)) ? r.data.subtitles.length : 0;
     } catch {
         return 0;
@@ -191,7 +191,7 @@ async function resolveAbsoluteTtId(ttId) {
             return null;
         }
 
-        const meta = await axios.get(`https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`, {
+        const meta = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', {
             timeout: 8000,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
         });
@@ -199,15 +199,15 @@ async function resolveAbsoluteTtId(ttId) {
         const before = videos.filter(v => v.season > 0 && v.season < season).length;
 
         if (before > 0) {
-            const candidate = `${imdbId}:1:${before + episode}`;
+            const candidate = [imdbId, 1, before + episode].join(':');
             const n = await osCount(candidate);
-            console.log(`[TT Remap] ${ttId}: حلقات قبل الموسم=${before} -> ${candidate} (OpenSubtitles:${n} ترجمة)`);
+            console.log('[TT Remap] ' + ttId + ': حلقات قبل الموسم=' + before + ' -> ' + candidate + ' (OpenSubtitles: ' + n + ' ترجمة)');
             if (n > 0) result = candidate;
         } else {
-            console.log(`[TT Remap] ${ttId}: Cinemeta ما رجّع مواسم سابقة، ما أقدر أحسب الرقم المطلق`);
+            console.log('[TT Remap] ' + ttId + ': Cinemeta ما رجّع مواسم سابقة، ما أقدر أحسب الرقم المطلق');
         }
     } catch (err) {
-        console.error(`[TT Remap] فشل لـ ${ttId}:${err.message}`);
+        console.error('[TT Remap] فشل لـ ' + ttId + ': ' + err.message);
         return null;
     }
 
@@ -238,11 +238,11 @@ function matchEpisode(fileName, targetEpisode) {
     const ep = parseInt(targetEpisode, 10).toString();
 
     return [
-        new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${ep}(?:[^0-9]\vert{}$)`, 'i'),
-        new RegExp(`[._ -]0*${ep}[._ -]`, 'i'),
-        new RegExp(`\\[0*${ep}\\]`, 'i'),
-        new RegExp(`\\(0*${ep}\\)`, 'i'),
-        new RegExp(`\\b0*${ep}\\b`, 'i')
+        new RegExp('(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*' + ep + '(?:[^0-9]|$)', 'i'),
+        new RegExp('[._ -]0*' + ep + '[._ -]', 'i'),
+        new RegExp('\\[0*' + ep + '\\]', 'i'),
+        new RegExp('\\(0*' + ep + '\\)', 'i'),
+        new RegExp('\\b0*' + ep + '\\b', 'i')
     ].some(p => p.test(name));
 }
 
@@ -263,6 +263,8 @@ function mkOsSub(url, name, isAss, isHi) {
 }
 
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
+const assLegacyFormatRe = /^(ass|ssa)$/i;
+const assLegacyFileRe = /\.(ass|ssa)/i;
 
 async function fetchLegacyData(url, retryOn403 = false) {
     try {
@@ -274,7 +276,8 @@ async function fetchLegacyData(url, retryOn403 = false) {
             response = await fetch(url, {
                 headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' }
             });
-            console.log(`[Legacy] ${response.status}${i > 0 ? ` (محاولة ثانية: ${ua})` : ''} <- ${url}`);
+            const retryNote = i > 0 ? ' (محاولة ثانية: ' + ua + ')' : '';
+            console.log('[Legacy] ' + response.status + retryNote + ' <- ' + url);
             if (response.status !== 403) break;
         }
 
@@ -282,7 +285,8 @@ async function fetchLegacyData(url, retryOn403 = false) {
         const data = await response.json();
         if (!Array.isArray(data)) return [];
 
-        console.log(`[Legacy] رجع ${data.length} نتيجة، منها ASS: ${data.filter(e => /^(ass\vert{}ssa)$/i.test(e.SubFormat || '') || /\.(ass|ssa)/i.test(e.SubFileName || '')).length}`);
+        const assCount = data.filter(e => assLegacyFormatRe.test(e.SubFormat || '') || assLegacyFileRe.test(e.SubFileName || '')).length;
+        console.log('[Legacy] رجع ' + data.length + ' نتيجة، منها ASS: ' + assCount);
 
         const results = [];
         data.forEach(entry => {
@@ -306,13 +310,13 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
     const hasSE = season != null && episode != null;
 
     const primaryUrl = hasSE
-        ? `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-eng`
-        : `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`;
+        ? 'https://rest.opensubtitles.org/search/episode-' + episode + '/imdbid-' + numericId + '/season-' + season + '/sublanguageid-eng'
+        : 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-eng';
 
     let results = await fetchLegacyData(primaryUrl, true);
 
     if (hasSE && !results.some(r => r.format === 'ass' || r.format === 'ssa')) {
-        const fallbackResults = await fetchLegacyData(`https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-eng`);
+        const fallbackResults = await fetchLegacyData('https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-eng');
         console.log('[Legacy] أسماء ASS: ' + fallbackResults.filter(r => r.format === 'ass' || r.format === 'ssa').map(r => r.fileName).join(' | '));
         const filteredFallback = fallbackResults.filter(r => (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.fileName, episode));
         results = [...results, ...filteredFallback];
@@ -326,9 +330,9 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
     try {
         const isSeries = type === 'series' || type === 'anime' || !!season;
         const mediaType = isSeries ? 'series' : 'movie';
-        const mTargetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+        const mTargetId = isSeries && season ? [imdbId, season, episode || 1].join(':') : imdbId;
 
-        const response = await fetch(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${mTargetId}.json`, {
+        const response = await fetch('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + mTargetId + '.json', {
             headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' }
         });
         if (!response.ok) return [];
@@ -388,7 +392,7 @@ const MANIFEST = {
 function getBaseUrl(req) {
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = req.headers['x-forwarded-proto'] || 'https';
-    return `${proto}://${host}`;
+    return proto + '://' + host;
 }
 
 function parseConfig(raw, onError) {
@@ -430,12 +434,16 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
         ? existingKeys.map((key, i) => {
             const k = attr(key);
             return i === 0
-                ? `<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)" value="${k}"></div>`
-                : `<div class="key-row"><input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)" value="${k}"><button class="remove-btn" onclick="this.parentElement.remove()">X</button></div>`;
+                ? '<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)" value="' + k + '"></div>'
+                : '<div class="key-row"><input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)" value="' + k + '"><button class="remove-btn" onclick="this.parentElement.remove()">X</button></div>';
         }).join('\n')
-        : `<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>`;
+        : '<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>';
 
-    const modelOptions = MODELS.map(([v, n]) => `<option value="${v}"${existingModel === v ? ' selected' : ''}>${n}</option>`).join('');
+    const modelOptions = MODELS.map(([v, n]) => '<option value="' + v + '"' + (existingModel === v ? ' selected' : '') + '>' + n + '</option>').join('');
+    const bannerHtml = existingKeys.length > 0
+        ? '<div class="status-banner">✅ تم تحميل ' + existingKeys.length + ' مفتاح موجود مسبقًا — عدّل حسب حاجتك</div>'
+        : '';
+    const btnText = existingKeys.length > 0 ? 'تحديث الإضافة في Nuvio 🔄' : 'تثبيت الإضافة في Nuvio 🚀';
 
     res.send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -463,27 +471,27 @@ input[type="text"]{width:100%;padding:10px;border-radius:6px;border:1px solid #3
 <body>
 <h1>إعدادات المترجم الذكي</h1>
 <div class="container">
-${existingKeys.length > 0 ? `<div class="status-banner">✅ تم تحميل ${existingKeys.length} مفتاح موجود مسبقًا — عدّل حسب حاجتك</div>` : ''}
+` + bannerHtml + `
 <p style="text-align:center;font-size:14px;color:#cbd5e1;margin-bottom:25px">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
-<div id="keys-container">${keyRowsHtml}</div>
+<div id="keys-container">` + keyRowsHtml + `</div>
 <button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
 <div class="input-group" style="margin-top:20px">
 <label>مفتاح TMDB API (اختياري - لمعرفة أسماء وجنس الشخصيات)</label>
-<input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="${attr(existingTmdbKey)}">
+<input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="` + attr(existingTmdbKey) + `">
 </div>
 <div class="input-group" style="margin-top:20px">
 <label>مفتاح SubDL API (اختياري - مصدر ترجمات إضافي)</label>
-<input type="text" id="subdl-key" placeholder="مفتاح SubDL" value="${attr(existingSubdlKey)}">
+<input type="text" id="subdl-key" placeholder="مفتاح SubDL" value="` + attr(existingSubdlKey) + `">
 </div>
 <div class="input-group">
 <label>مفتاح Subsource API (اختياري - مصدر ترجمات عربية إضافي)</label>
-<input type="text" id="subsource-key" placeholder="مفتاح Subsource" value="${attr(existingSubsourceKey)}">
+<input type="text" id="subsource-key" placeholder="مفتاح Subsource" value="` + attr(existingSubsourceKey) + `">
 </div>
 <div class="input-group" style="margin-top:20px">
 <label>نموذج الترجمة (Translation Model)</label>
-<select id="model-select" style="width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff">${modelOptions}</select>
+<select id="model-select" style="width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff">` + modelOptions + `</select>
 </div>
-<button class="btn" onclick="generateInstallLink()">${existingKeys.length > 0 ? 'تحديث الإضافة في Nuvio 🔄' : 'تثبيت الإضافة في Nuvio 🚀'}</button>
+<button class="btn" onclick="generateInstallLink()">` + btnText + `</button>
 <div id="test-link-box" style="display:none;margin-top:20px;padding:12px;background:#0f172a;border-radius:8px;border:1px solid #334155">
 <label style="margin-bottom:8px">رابط اختبار (JSON) - انسخه للفحص اليدوي بالمفاتيح:</label>
 <input type="text" id="test-link-input" readonly style="width:100%;padding:8px;border-radius:6px;border:1px solid #334155;background:#1e293b;color:#38bdf8;font-size:12px;box-sizing:border-box" onclick="this.select()">
@@ -553,6 +561,7 @@ const SOURCE_LABELS = {
 };
 
 const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
+const assExtRe = /\.(ass|ssa)$/i;
 
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -581,16 +590,16 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             if (mapped) {
                 finalTargetId = mapped;
                 finalType = 'series';
-                console.log(`[Anime Mapper] Successfully mapped! ${targetId} ->${finalTargetId}`);
+                console.log('[Anime Mapper] Successfully mapped! ' + targetId + ' -> ' + finalTargetId);
             } else {
-                console.log(`[Anime Mapper] No mapping found for ${targetId}, using it as-is.`);
+                console.log('[Anime Mapper] No mapping found for ' + targetId + ', using it as-is.');
             }
         }
 
         if (!originalKitsuId && /^tt\d+:\d+:\d+$/.test(finalTargetId)) {
             const alt = await resolveAbsoluteTtId(finalTargetId);
             if (alt) {
-                console.log(`[TT Remap] Using absolute numbering: ${finalTargetId} ->${alt}`);
+                console.log('[TT Remap] Using absolute numbering: ' + finalTargetId + ' -> ' + alt);
                 finalTargetId = alt;
                 finalType = 'series';
             }
@@ -620,27 +629,27 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 subdlKey: addonCfg.subdlKey,
                 subsourceKey: addonCfg.subsourceKey
             });
-            console.log(`[لوغ الفحص] تم العثور على ${arabicSubs.ass.length} ترجمة ASS عربية و ${arabicSubs.srt.length} ترجمة SRT عربية للعمل ${finalTargetId}`);
+            console.log('[لوغ الفحص] تم العثور على ' + arabicSubs.ass.length + ' ترجمة ASS عربية و ' + arabicSubs.srt.length + ' ترجمة SRT عربية للعمل ' + finalTargetId);
         } catch (err) {
             console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
         }
 
-        const osUrl = `https://opensubtitles-v3.strem.io/subtitles/${finalType}/${finalTargetId}.json`;
-        console.log(`[Fetch] Requesting subtitles from: ${osUrl}`);
+        const osUrl = 'https://opensubtitles-v3.strem.io/subtitles/' + finalType + '/' + finalTargetId + '.json';
+        console.log('[Fetch] Requesting subtitles from: ' + osUrl);
 
         const [r, assResults] = await Promise.all([
             axios.get(osUrl, { timeout: 10000 }).catch(e => {
-                console.log(`[Fetch] OpenSubtitles فشل لـ ${finalTargetId}:${e.message}`);
+                console.log('[Fetch] OpenSubtitles فشل لـ ' + finalTargetId + ': ' + e.message);
                 return null;
             }),
             getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType }).catch(() => [])
         ]);
 
         if (r && r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
-        console.log(`[Fetch] OpenSubtitles returned ${subtitlesData.length} subtitle(s) for${finalTargetId}`);
+        console.log('[Fetch] OpenSubtitles returned ' + subtitlesData.length + ' subtitle(s) for ' + finalTargetId);
 
         const assOnly = (assResults || []).filter(s => s.format === 'ass' || s.format === 'ssa');
-        console.log(`[Fetch] Legacy OpenSubtitles.org returned ${assOnly.length} ASS/SSA subtitle(s) for ${finalTargetId} (${assOnly.filter(s => isHearingImpairedSub(s)).length} SDH, pushed to the back)`);
+        console.log('[Fetch] Legacy OpenSubtitles.org returned ' + assOnly.length + ' ASS/SSA subtitle(s) for ' + finalTargetId + ' (' + assOnly.filter(s => isHearingImpairedSub(s)).length + ' SDH, pushed to the back)');
 
         let osClean = [], osHi = [];
 
@@ -650,12 +659,12 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 return TARGET_LANGS.some(l => lang.startsWith(l));
             });
 
-            console.log(`[SDH Filter] ${validSubs.filter(s => !isHearingImpairedSub(s)).length}/${validSubs.length} valid subtitle(s) are non-SDH for${finalTargetId}`);
+            console.log('[SDH Filter] ' + validSubs.filter(s => !isHearingImpairedSub(s)).length + '/' + validSubs.length + ' valid subtitle(s) are non-SDH for ' + finalTargetId);
 
             const srtOnly = validSubs.filter(s => {
-                const fname = (s.subtitleFileName || '').toLowerCase();
-                const url = (s.url || '').toLowerCase();
-                return !/\.(ass|ssa)$/.test(fname) && !/\.(ass|ssa)/.test(url);
+                const fname = s.subtitleFileName || '';
+                const url = s.url || '';
+                return !assExtRe.test(fname) && !assExtRe.test(url);
             });
 
             osClean = srtOnly.filter(s => !isHearingImpairedSub(s)).sort(byEng);
@@ -665,7 +674,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         let extClean = [], extHi = [];
 
         if (osClean.length < WANTED_TRACKS) {
-            console.log(`[SubDL/Subsource] OpenSubtitles رجّع ${osClean.length}/${WANTED_TRACKS} ترجمة غير SDH لـ ${finalTargetId}، أجرب SubDL و Subsource للتكملة...`);
+            console.log('[SubDL/Subsource] OpenSubtitles رجّع ' + osClean.length + '/' + WANTED_TRACKS + ' ترجمة غير SDH لـ ' + finalTargetId + '، أجرب SubDL و Subsource للتكملة...');
 
             const [subdlSubs, subsourceSubs] = await Promise.all([
                 getSubDL({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey }).catch(() => []),
@@ -679,23 +688,23 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
             extClean = extSubs.filter(s => !s.hearingImpaired).sort(byEng);
             extHi = extSubs.filter(s => s.hearingImpaired).sort(byEng);
-            console.log(`[SubDL/Subsource] راح أستخدم ${extClean.length} غير SDH و ${extHi.length} SDH (احتياط).`);
+            console.log('[SubDL/Subsource] راح أستخدم ' + extClean.length + ' غير SDH و ' + extHi.length + ' SDH (احتياط).');
         }
 
         const srtSubs = [...osClean, ...extClean, ...osHi, ...extHi];
 
         const transSubs = [];
-        const streamRawSrt = configParam ? `/${configParam}/stream-raw.srt` : '/stream-raw.srt';
-        const streamRawAss = configParam ? `/${configParam}/stream-raw.ass` : '/stream-raw.ass';
+        const streamRawSrt = configParam ? '/' + configParam + '/stream-raw.srt' : '/stream-raw.srt';
+        const streamRawAss = configParam ? '/' + configParam + '/stream-raw.ass' : '/stream-raw.ass';
 
-        const streamAraSrt = configParam ? `/${configParam}/stream-ara.srt` : '/stream-ara.srt';
-        const streamAraAss = configParam ? `/${configParam}/stream-ara.ass` : '/stream-ara.ass';
+        const streamAraSrt = configParam ? '/' + configParam + '/stream-ara.srt' : '/stream-ara.srt';
+        const streamAraAss = configParam ? '/' + configParam + '/stream-ara.ass' : '/stream-ara.ass';
 
-        const streamPathSrt = configParam ? `/${configParam}/stream-ai.srt` : '/stream-ai.srt';
-        const streamPathAss = configParam ? `/${configParam}/stream-ai.ass` : '/stream-ai.ass';
+        const streamPathSrt = configParam ? '/' + configParam + '/stream-ai.srt' : '/stream-ai.srt';
+        const streamPathAss = configParam ? '/' + configParam + '/stream-ai.ass' : '/stream-ai.ass';
 
-        let extraParams = `&id=${finalTargetId}`;
-        if (originalKitsuId) extraParams += `&kitsu=${originalKitsuId}`;
+        let extraParams = '&id=' + finalTargetId;
+        if (originalKitsuId) extraParams += '&kitsu=' + originalKitsuId;
 
         // ============================================================
         // 1. الخانة الأولى: الترجمات العربية الجاهزة (ASS أولاً ثم SRT - عدد مفتوح)
@@ -705,10 +714,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 const sub = arabicSubs.ass[i];
                 const srcLabel = getSourceLabel(sub._source);
                 transSubs.push({
-                    id: `nuvio-ready-ara-ass-${i + 1}`,
-                    url: `${baseUrl}${streamRawAss}?url=${encodeURIComponent(sub.url)}&track=${i + 1}${extraParams}`,
+                    id: 'nuvio-ready-ara-ass-' + (i + 1),
+                    url: baseUrl + streamRawAss + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio-${srcLabel}-ara-ass${i + 1}`
+                    title: 'Nuvio-' + srcLabel + '-ara-ass ' + (i + 1)
                 });
             }
         }
@@ -718,10 +727,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 const sub = arabicSubs.srt[i];
                 const srcLabel = getSourceLabel(sub._source);
                 transSubs.push({
-                    id: `nuvio-ready-ara-srt-${i + 1}`,
-                    url: `${baseUrl}${streamRawSrt}?url=${encodeURIComponent(sub.url)}&track=${i + 1}${extraParams}`,
+                    id: 'nuvio-ready-ara-srt-' + (i + 1),
+                    url: baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio-${srcLabel}-ara-srt${i + 1}`
+                    title: 'Nuvio-' + srcLabel + '-ara-srt ' + (i + 1)
                 });
             }
         }
@@ -733,10 +742,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             const maxAraSrt = Math.min(4, arabicSubs.srt.length);
             for (let i = 0; i < maxAraSrt; i++) {
                 transSubs.push({
-                    id: `nuvio-ara-srt-${i + 1}`,
-                    url: `${baseUrl}${streamAraSrt}?url=${encodeURIComponent(arabicSubs.srt[i].url)}&track=${i + 1}${extraParams}`,
+                    id: 'nuvio-ara-srt-' + (i + 1),
+                    url: baseUrl + streamAraSrt + '?url=' + encodeURIComponent(arabicSubs.srt[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio AI Arabic SRT ${i + 1}`
+                    title: 'Nuvio AI Arabic SRT ' + (i + 1)
                 });
             }
         }
@@ -745,10 +754,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             const maxAraAss = Math.min(4, arabicSubs.ass.length);
             for (let i = 0; i < maxAraAss; i++) {
                 transSubs.push({
-                    id: `nuvio-ara-ass-${i + 1}`,
-                    url: `${baseUrl}${streamAraAss}?url=${encodeURIComponent(arabicSubs.ass[i].url)}&track=${i + 1}${extraParams}`,
+                    id: 'nuvio-ara-ass-' + (i + 1),
+                    url: baseUrl + streamAraAss + '?url=' + encodeURIComponent(arabicSubs.ass[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio AI Arabic ASS ${i + 1}`
+                    title: 'Nuvio AI Arabic ASS ' + (i + 1)
                 });
             }
         }
@@ -760,10 +769,10 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
                 transSubs.push({
-                    id: `nuvio-ai-srt-${i + 1}`,
-                    url: `${baseUrl}${streamPathSrt}?url=${encodeURIComponent(sub.url)}&track=${i + 1}${extraParams}`,
+                    id: 'nuvio-ai-srt-' + (i + 1),
+                    url: baseUrl + streamPathSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio AI SRT ${i + 1} (Sync${String.fromCharCode(65 + i)})`
+                    title: 'Nuvio AI SRT ' + (i + 1) + ' (Sync ' + String.fromCharCode(65 + i) + ')'
                 });
             }
         }
@@ -772,27 +781,27 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             const maxAss = Math.min(2, assOnly.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
-                    id: `nuvio-ai-ass-${i + 1}`,
-                    url: `${baseUrl}${streamPathAss}?url=${encodeURIComponent(assOnly[i].url)}&track=${i + 7}${extraParams}`,
+                    id: 'nuvio-ai-ass-' + (i + 1),
+                    url: baseUrl + streamPathAss + '?url=' + encodeURIComponent(assOnly[i].url) + '&track=' + (i + 7) + extraParams,
                     lang: 'ara',
-                    title: `Nuvio AI ASS ${i + 1} (Sync${String.fromCharCode(65 + i)})`
+                    title: 'Nuvio AI ASS ' + (i + 1) + ' (Sync ' + String.fromCharCode(65 + i) + ')'
                 });
             }
-            console.log(`[Fetch] Added ${maxAss} ASS track(s) from ${assOnly.length} original ASS source(s) for${finalTargetId}`);
+            console.log('[Fetch] Added ' + maxAss + ' ASS track(s) from ' + assOnly.length + ' original ASS source(s) for ' + finalTargetId);
         } else {
-            console.log(`[Fetch] No original ASS/SSA found for ${finalTargetId} - skipping ASS tracks`);
+            console.log('[Fetch] No original ASS/SSA found for ' + finalTargetId + ' - skipping ASS tracks');
         }
 
         return res.json({ subtitles: transSubs });
     } catch (err) {
-        console.error(`[Subtitles Error] ${targetId} -${err.message}`);
+        console.error('[Subtitles Error] ' + targetId + ' - ' + err.message);
         return res.json({ subtitles: [] });
     }
 });
 
 const sendSub = (res, mime, name, body) => {
     res.setHeader('Content-Type', mime);
-    res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+    res.setHeader('Content-Disposition', 'inline; filename="' + name + '"');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(body);
 };
@@ -821,9 +830,9 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
         const cfg = parseConfig(req.params.config);
         const epInfo = parseEpInfoFromTargetId(targetId);
         const content = await getRawArabicSubContent(targetUrl, cfg.subsourceKey, epInfo);
-        return sendSub(res, mime, `Ready-Track${trackNum}.${ext}`, content);
+        return sendSub(res, mime, 'Ready-Track' + trackNum + '.' + ext, content);
     } catch (e) {
-        console.error(`[Raw Sub Error] Track ${trackNum}:`, e.message);
+        console.error('[Raw Sub Error] Track ' + trackNum + ':', e.message);
         return res.status(502).send('Failed to load ready subtitle');
     }
 };
@@ -837,7 +846,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
     if (!targetUrl) return res.status(400).send('Missing URL');
 
-    const cacheKey = `${label}_${targetId}_${targetUrl}`;
+    const cacheKey = [label, targetId, targetUrl].join('_');
     let cached = translationCache[cacheKey];
 
     if (!cached) {
@@ -846,7 +855,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
         if (!translationCache[cacheKey]) {
             if (stored && stored.content) {
                 translationCache[cacheKey] = { status: 'done', content: stored.content, complete: true };
-                console.log(`[MongoDB] ${label} Track${trackNum}: الترجمة جاهزة من التخزين الدائم.`);
+                console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': الترجمة جاهزة من التخزين الدائم.');
             } else {
                 const cfg = parseConfig(req.params.config);
                 startTranslationJob({
@@ -861,14 +870,14 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     }
 
     if (cached && cached.status === 'done') {
-        return sendSub(res, mime, `Trans-Track${trackNum}-${label}.${ext}`, cached.content);
+        return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, cached.content);
     }
 
-    sendSub(res, mime, `Trans-Wait-${label}.${ext}`, waitBody);
+    sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, waitBody);
 };
 
-const SRT_WAIT = `1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n`;
-const ASS_WAIT = `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.`;
+const SRT_WAIT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
+const ASS_WAIT = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.';
 
 app.all(['/stream-raw.srt', '/:config/stream-raw.srt'],
     rawStreamRoute('srt', 'application/x-subrip; charset=utf-8'));
@@ -889,7 +898,7 @@ app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
 
 app.listen(PORT, () => {
-    console.log(`✅ Nuvio AI Subs Server is LIVE on port ${PORT}`);
+    console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
 });
 
