@@ -1,13 +1,10 @@
-// corrector-marks.js
-// الفكرة: الموديل يقترح، والكود يقرر ويصلح. هنا كل ما يخص التنصيص والأقواس وعلامات الأسماء.
-//
-// السياسة (الأولوية من الأعلى للأسفل):
-//  1) أسماء الأشخاص = تنصيص " "   |   المدن والدول والشركات والمؤسسات والأكلات = أقواس ( )
-//  2) قائمة KNOWN_ENTITIES (مدن ودول معروفة): دائمًا أقواس، بدون أي نقاش مع الموديل. أضف إليها ما تشاء.
-//  3) باقي الكلمات التي علّمها الموديل: تُرسل لنداء تصنيف واحد صغير (شخص / جهة أو مكان / ليس اسمًا)
-//     ويُطبَّق الجواب على كل الملف. وإن فشل النداء نرجع للأغلبية.
-//  4) داخل الأسطر المنقولة (q) لا نلمس الأسماء، لأن القاعدة 7 تمنع التنصيص الداخلي.
-//  5) الكود يفرض: لا مسافات داخل العلامات، ولا قبل علامات الترقيم، وتوازن العلامات، وتنصيص مستقيم " فقط.
+// corrector-marks.js (النسخة النهائية المتوافقة مع name-book.js)
+// الفكرة:
+//  1) ينظف علامات التنصيص والأقواس والمسافات في كل سطر (fixMarks, tidyQuotes, tidyParens).
+//  2) يفرض قواعد الأسطر المقتبسة (q) لمنع التنصيص الداخلي.
+//  3) يعمل كشبكة أمان احتياطية للأسماء المفردة التي لم يدخلها قاموس name-book (أو عند تعذر بناء القاموس).
+
+'use strict';
 
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
@@ -17,7 +14,7 @@ const NAME_MIN_WRAPS = 2;      // أقل عدد مرات لُفّ فيها ال�
 const NAME_MIN_RATIO = 0.6;    // نسبة المرات الملفوفة من كل ظهور
 const NAME_MIN_LEN = 3;
 
-// مدن ودول معروفة: تظهر دائمًا بين أقواس (عدّل القائمة كما تريد)
+// مدن ودول معروفة: تظهر دائمًا بين أقواس
 const KNOWN_ENTITIES_RAW = `لندن باريس نيويورك شيكاغو بوسطن ميامي هوليوود طوكيو بكين موسكو روما برلين مدريد فيينا
 القاهرة بغداد دمشق بيروت الرياض دبي أبوظبي الدوحة القدس إسطنبول سيدني تورنتو أمستردام برشلونة ميلانو البندقية
 أمريكا بريطانيا إنجلترا اسكتلندا أيرلندا فرنسا ألمانيا إيطاليا إسبانيا روسيا الصين اليابان كندا مصر العراق سوريا
@@ -54,8 +51,7 @@ function tidyQuotes(line) {
 
 function tidyParens(line) {
   return line
-    .replace(/\(\s+/g, '(')
-    .replace(/\s+\)/g, ')')
+    .replace(/\(\s+/g, '(') .replace(/\s+\)/g, ')')
     .replace(/\)([\p{L}\p{N}])/gu, ') $1');
 }
 
@@ -102,67 +98,76 @@ function fixMarks(text, q = null) {
 }
 
 // ============================================================
-// اتساق الأسماء على مستوى الملف كله
+// اتساق الأسماء الاحتياطي على مستوى الملف (لما لم يدخل في name-book)
 // ============================================================
 const AR_TOKEN = /"([^"\n]*)"|\(([^()\n]*)\)|([\u0621-\u065F\u0670-\u06D3]+)/g;
 const ONE_WORD = /^[\u0621-\u065F\u0670-\u06D3]+$/;
-const nameKey = w => w.replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآٱ]/g, 'ا');
+const nameKey = w => String(w).replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآٱ]/g, 'ا');
 const KNOWN_ENTITIES = new Set(KNOWN_ENTITIES_RAW.split(/\s+/).filter(Boolean).map(nameKey));
 
-// الكلمات المفردة التي علّمها الموديل (تنصيص أو أقواس) وتحتاج تصنيفًا، مع جملة مثال بدون علامات
-function collectNameCandidates(texts, eligible, max = 300) {
+// حماية الكلمات الملتبسة والوظيفية من التعميم الأعمى في النظام الاحتياطي
+const FALLBACK_NO_BARE = new Set(
+  'الله الرب على إلى الى حتى متى لدى سوى عدا سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
+    .split(/\s+/).map(nameKey));
+
+// الكلمات المفردة التي علّمها الموديل وتحتاج تصنيفًا (مع استبعاد ما يعرفه القاموس book)
+function collectNameCandidates(texts, eligible, max = 300, book = null) {
   const seen = new Map();
   texts.forEach((t, i) => {
     if (!eligible[i]) return;
-    for (const m of String(t).matchAll(AR_TOKEN)) {
+    const { masked } = maskTags(t);
+    for (const m of masked.matchAll(AR_TOKEN)) {
       const w = (m[1] != null && ONE_WORD.test(m[1])) ? m[1] : (m[2] != null && ONE_WORD.test(m[2])) ? m[2] : null;
       if (!w) continue;
       const k = nameKey(w);
       if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || seen.has(k)) continue;
-      const ex = String(t).replace(/<[^>]*>|\{[^}]*\}/g, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      if (book && book.lookup(w)) continue;
+      const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
       seen.set(k, { w, ex });
     }
   });
   return [...seen.values()].slice(0, max);
 }
 
-// texts: النصوص النهائية
-// eligible[i]: هل نلمس السطر؟ (عربي ومصحح وليس سطر كلام منقول q ولا رسم)
-// kinds: Map(مفتاح الكلمة -> 'person' | 'entity' | 'none') من نداء التصنيف (اختياري)
-function propagateNames(texts, eligible, kinds = new Map()) {
+// texts: النصوص النهائية | eligible[i]: هل نلمس السطر؟ | kinds: نتيجة classifyNames | book: قاموس name-book
+function propagateNames(texts, eligible, kinds = new Map(), book = null) {
   const st = new Map();   // key -> { q, p, b }
   const get = k => { let o = st.get(k); if (!o) st.set(k, o = { q: 0, p: 0, b: 0 }); return o; };
 
   texts.forEach((t, i) => {
     if (!eligible[i]) return;
-    for (const m of String(t).matchAll(AR_TOKEN)) {
+    const { masked } = maskTags(t);
+    for (const m of masked.matchAll(AR_TOKEN)) {
       if (m[3]) get(nameKey(m[3])).b++;
       else if (m[1] && ONE_WORD.test(m[1])) get(nameKey(m[1])).q++;
       else if (m[2] && ONE_WORD.test(m[2])) get(nameKey(m[2])).p++;
     }
   });
 
-  // names: key -> 'q' (تنصيص) أو 'p' (أقواس)   |   wrapBare: الكلمات التي نعلّمها أيضًا حيث نسيها الموديل
   const names = new Map(), wrapBare = new Set();
-  for (const k of KNOWN_ENTITIES) { if (st.has(k)) { names.set(k, 'p'); wrapBare.add(k); } }
+  if (!book) {
+    for (const k of KNOWN_ENTITIES) { if (st.has(k)) { names.set(k, 'p'); wrapBare.add(k); } }
+  }
 
   for (const [k, o] of st) {
     if (names.has(k) || k.length < NAME_MIN_LEN) continue;
+    if (book && book.lookup(k)) continue;   // نترك كل ما يعرفه القاموس لـ applyNameBook
     const marked = o.q + o.p;
     if (!marked) continue;
-    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO;
+    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k);
     const kind = kinds.get(k);
     if (kind === 'person') { names.set(k, 'q'); if (passes) wrapBare.add(k); }
     else if (kind === 'entity') { names.set(k, 'p'); if (passes) wrapBare.add(k); }
     else if (kind === 'none') { /* ليس اسمًا: لا نلمسه */ }
-    else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }   // لا تصنيف: الأغلبية
+    else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }
   }
   if (!names.size) return texts;
 
   const wrap = (w, kind) => (kind === 'q' ? '"' + w + '"' : '(' + w + ')');
   return texts.map((t, i) => {
     if (!eligible[i]) return t;
-    return String(t).replace(AR_TOKEN, (all, q, p, bare) => {
+    const { masked, tags } = maskTags(t);
+    const updated = masked.replace(AR_TOKEN, (all, q, p, bare) => {
       const marked = (q != null && ONE_WORD.test(q)) ? q : (p != null && ONE_WORD.test(p)) ? p : null;
       const word = bare || marked;
       if (!word) return all;
@@ -172,13 +177,12 @@ function propagateNames(texts, eligible, kinds = new Map()) {
       if (bare && !wrapBare.has(k)) return all;
       return wrap(word, kind);
     });
+    return unmaskTags(updated, tags);
   });
 }
 
-
 // ============================================================
-// نداء تصنيف صغير: شخص / جهة أو مكان / ليس اسمًا. يُستدعى مرة واحدة لكل ملف (دفعات من 80 كلمة).
-// deps: الأدوات الجاهزة من corrector.js (axios, acquireKey, ...) حتى لا نكرر الاستيراد.
+// نداء تصنيف صغير: شخص / جهة أو مكان / ليس اسمًا. يُستدعى فقط للكلمات التي لم يعرفها book.
 // ============================================================
 async function classifyNames(cands, keysArray, modelName, deps) {
   const out = new Map();
