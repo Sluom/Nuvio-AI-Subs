@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 
-module.exports = { getArabicSubsForCorrection, getRawArabicSubContent };
+module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 
 const cleanPath = p => String(p || '').split('?')[0];
 
@@ -33,6 +33,11 @@ const resultCache = new Map();
 
 const MAX_RAW_CACHE = 150;
 const rawTextCache = new Map();
+
+// كاش لحفظ خريطة حلقات المسلسلات لحساب الترقيم المطلق (التركي/اللاتيني/الأنمي)
+const seriesMetaCache = new Map();
+// خريطة لربط رابط الترجمة برقم الحلقة المطلق عند فك الضغط لاحقاً
+const urlEpOverrideMap = new Map();
 
 const assFormatRe = /^(ass|ssa)$/i;
 const assFileRe = /\.(ass|ssa)(\b|$)/i;
@@ -71,6 +76,74 @@ function setResultCache(key, value) {
         if (oldestKey) resultCache.delete(oldestKey);
     }
     resultCache.set(key, { time: Date.now(), value });
+}
+
+function rememberUrlEpOverride(url, epOverride) {
+    if (!url || !epOverride) return;
+    if (urlEpOverrideMap.size >= 500) {
+        const first = urlEpOverrideMap.keys().next().value;
+        if (first) urlEpOverrideMap.delete(first);
+    }
+    urlEpOverrideMap.set(cleanPath(url), epOverride);
+}
+
+function resolveEpInfoForUrl(url, defaultEpInfo) {
+    if (!url) return defaultEpInfo;
+    return urlEpOverrideMap.get(cleanPath(url)) || defaultEpInfo;
+}
+
+// ============================================================
+// حاسبة الترقيم المطلق (Absolute Episode) للأعمال التركية واللاتينية والأنمي
+// ============================================================
+async function getAbsoluteEpisodeNumber(imdbId, season, episode) {
+    const sNum = parseInt(season, 10);
+    const eNum = parseInt(episode, 10);
+    if (!imdbId || !imdbId.startsWith('tt') || isNaN(sNum) || isNaN(eNum) || sNum <= 1) {
+        return null;
+    }
+
+    let seasonCounts = seriesMetaCache.get(imdbId);
+    if (!seasonCounts) {
+        try {
+            const res = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', {
+                timeout: 2200
+            });
+            const videos = (res.data && res.data.meta && Array.isArray(res.data.meta.videos)) ? res.data.meta.videos : [];
+            if (videos.length > 0) {
+                seasonCounts = new Map();
+                for (const v of videos) {
+                    const vs = parseInt(v.season, 10);
+                    const ve = parseInt(v.episode != null ? v.episode : v.number, 10);
+                    if (!isNaN(vs) && vs > 0 && !isNaN(ve) && ve > 0) {
+                        const prevMax = seasonCounts.get(vs) || 0;
+                        if (ve > prevMax) seasonCounts.set(vs, ve);
+                    }
+                }
+                if (seasonCounts.size > 0) {
+                    if (seriesMetaCache.size >= 200) {
+                        const oldest = seriesMetaCache.keys().next().value;
+                        if (oldest) seriesMetaCache.delete(oldest);
+                    }
+                    seriesMetaCache.set(imdbId, seasonCounts);
+                }
+            }
+        } catch (e) {
+            console.log('[ترقيم مطلق] تعذر جلب تقسيمة المواسم من Cinemeta: ' + e.message);
+            return null;
+        }
+    }
+
+    if (!seasonCounts || !seasonCounts.size) return null;
+
+    let offset = 0;
+    for (let s = 1; s < sNum; s++) {
+        const count = seasonCounts.get(s);
+        if (!count) return null; // إذا كان هناك موسم سابق مفقود لا نخمن الرقم
+        offset += count;
+    }
+
+    const absEp = offset + eNum;
+    return absEp > eNum ? absEp : null;
 }
 
 function withTimeout(promise, ms, name) {
@@ -238,21 +311,30 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     let timer;
     try {
         const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
-        const rawKey = makeRawKey(s.url, epInfo);
-        let text = getRawCache(rawKey);
+        // إذا كانت الترجمة قادمة من بحث الترقيم المطلق نستخدم رقم الحلقة المطلق لفك الضغط
+        const effectiveEpInfo = s._epOverride || resolveEpInfoForUrl(s.url, epInfo);
+        const primaryRawKey = makeRawKey(s.url, epInfo);
+        const effectiveRawKey = makeRawKey(s.url, effectiveEpInfo);
+        let text = getRawCache(primaryRawKey) || getRawCache(effectiveRawKey);
 
         if (!text) {
             text = await Promise.race([
-                fetchAndExtractSub(s.url, subsourceKey, epInfo),
+                fetchAndExtractSub(s.url, subsourceKey, effectiveEpInfo),
                 new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS); })
             ]);
         }
 
         if (!text || !String(text).trim()) return null;
 
+        // نحفظ النص في الكاش بكلا المفتاحين (الأصلي والمطلق) لضمان قراءته فوراً في المشغل والمصحح
+        const cacheBoth = txt => {
+            setRawCache(primaryRawKey, txt);
+            if (effectiveRawKey !== primaryRawKey) setRawCache(effectiveRawKey, txt);
+        };
+
         // إذا كان الملف ASS: مستبعد من أي فلتر بشكل مطلق ويُقبل فوراً
         if (detectAssContent(text, s)) {
-            setRawCache(rawKey, text);
+            cacheBoth(text);
             return { ...s, format: 'ass', _verified: true };
         }
 
@@ -267,7 +349,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
             .update(check.cuesText.replace(/[^\p{L}\p{N}]+/gu, ''))
             .digest('hex');
 
-        setRawCache(rawKey, text);
+        cacheBoth(text);
         return { ...s, format: 'srt', _sig: sig, _verified: true };
     } catch {
         return null;
@@ -277,17 +359,20 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
 }
 
 async function getRawArabicSubContent(targetUrl, subsourceKey, epInfo = null) {
-    const rawKey = makeRawKey(targetUrl, epInfo);
-    const cached = getRawCache(rawKey);
+    const effectiveEpInfo = resolveEpInfoForUrl(targetUrl, epInfo);
+    const primaryKey = makeRawKey(targetUrl, epInfo);
+    const effectiveKey = makeRawKey(targetUrl, effectiveEpInfo);
+    const cached = getRawCache(primaryKey) || getRawCache(effectiveKey);
     if (cached) return cached;
 
     const { fetchAndExtractSub } = require('./ai').shared;
-    const text = await fetchAndExtractSub(targetUrl, subsourceKey, epInfo);
+    const text = await fetchAndExtractSub(targetUrl, subsourceKey, effectiveEpInfo);
     if (!text || !String(text).trim()) {
         throw new Error('ملف الترجمة فارغ');
     }
 
-    setRawCache(rawKey, text);
+    setRawCache(primaryKey, text);
+    if (effectiveKey !== primaryKey) setRawCache(effectiveKey, text);
     return text;
 }
 
@@ -485,19 +570,7 @@ function buildFinalArabicLists({ osLegacyAss, osPre, subdlPre, subsourcePre, ver
     };
 }
 
-async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
-    const t0 = Date.now();
-    console.log('[جلب عربي] بدء الجلب اللحظي المتوازي للعمل: ' + imdbId + '...');
-
-    const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
-    const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
-    const cacheKey = [imdbId, season, episode, keyHash].join(':');
-    const hit = resultCache.get(cacheKey);
-    if (hit && Date.now() - hit.time < RESULT_TTL) {
-        console.log('[جلب عربي] النتيجة جاهزة فوراً من الكاش.');
-        return hit.value;
-    }
-
+async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     const sourceDefs = [
         { key: 'os_legacy', name: 'OS Legacy', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
         { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) },
@@ -510,10 +583,54 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     );
 
     const getList = idx => (settled[idx].status === 'fulfilled' && Array.isArray(settled[idx].value) ? settled[idx].value : []);
-    const osLegacyAss = getList(0); // ASS فقط من OpenSubtitles.org
-    const osMirrorList = getList(1); // SRT + ASS من OpenSubtitles v3
-    const subdlRawList = getList(2);
-    const subsourceRawList = getList(3);
+    return {
+        osLegacyAss: getList(0),
+        osMirrorList: getList(1),
+        subdlRawList: getList(2),
+        subsourceRawList: getList(3)
+    };
+}
+
+async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
+    const t0 = Date.now();
+    console.log('[جلب عربي] بدء الجلب اللحظي المتوازي للعمل: ' + imdbId + ' (S:' + season + ' E:' + episode + ')...');
+
+    const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
+    const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
+    const cacheKey = [imdbId, season, episode, keyHash].join(':');
+    const hit = resultCache.get(cacheKey);
+    if (hit && Date.now() - hit.time < RESULT_TTL) {
+        console.log('[جلب عربي] النتيجة جاهزة فوراً من الكاش.');
+        return hit.value;
+    }
+
+    let { osLegacyAss, osMirrorList, subdlRawList, subsourceRawList } = await fetchAllSourcesOnce({
+        imdbId, season, episode, type, subdlKey, subsourceKey
+    });
+
+    const totalInitial = osLegacyAss.length + osMirrorList.length + subdlRawList.length + subsourceRawList.length;
+
+    // إذا كان الموسم > 1 ولم نجد ترجمات (أو وجدنا أقل من ترجمتين)، نجرب الترقيم المطلق للأعمال التركية واللاتينية والأنمي
+    if (season != null && parseInt(season, 10) > 1 && totalInitial < 2) {
+        const absEp = await getAbsoluteEpisodeNumber(imdbId, season, episode);
+        if (absEp) {
+            console.log('[ترقيم مطلق 🔄] الموسم ' + season + ' الحلقة ' + episode + ' لم يرجع ترجمات كافية (' + totalInitial + '). جاري البحث بالرقم المطلق: الموسم 1 الحلقة ' + absEp + '...');
+            const absOverride = { season: '1', episode: String(absEp) };
+            const absRes = await fetchAllSourcesOnce({
+                imdbId, season: 1, episode: absEp, type, subdlKey, subsourceKey
+            });
+
+            const tagAbs = list => list.map(item => {
+                if (item && item.url) rememberUrlEpOverride(item.url, absOverride);
+                return { ...item, _epOverride: absOverride };
+            });
+
+            osLegacyAss = [...osLegacyAss, ...tagAbs(absRes.osLegacyAss)];
+            osMirrorList = [...osMirrorList, ...tagAbs(absRes.osMirrorList)];
+            subdlRawList = [...subdlRawList, ...tagAbs(absRes.subdlRawList)];
+            subsourceRawList = [...subsourceRawList, ...tagAbs(absRes.subsourceRawList)];
+        }
+    }
 
     const osPre = lightweightPreFilter(osMirrorList, 'opensubtitles');
     const subdlPre = lightweightPreFilter(subdlRawList, 'subdl');
