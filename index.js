@@ -261,46 +261,56 @@ function mkOsSub(url, name, isAss, isHi) {
     };
 }
 
-const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
+// للغة الإنجليزية في OpenSubtitles.org: يبدأ TemporaryUserAgent أولاً ثم VLSub دائماً لجمع ملفات ASS حصراً
+const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
+const LEGACY_AGENT_GAP_MS = 1000;
 const assLegacyFormatRe = /^(ass|ssa)$/i;
 const assLegacyFileRe = /\.(ass|ssa)/i;
 
-async function fetchLegacyData(url, retryOn403 = false) {
-    try {
-        const agents = retryOn403 ? LEGACY_AGENTS : LEGACY_AGENTS.slice(0, 1);
-        let response;
+async function fetchLegacyData(url) {
+    const combinedData = [];
 
-        for (let i = 0; i < agents.length; i++) {
-            const ua = agents[i];
-            response = await fetch(url, {
+    for (let i = 0; i < LEGACY_AGENTS.length; i++) {
+        if (i > 0) await sleep(LEGACY_AGENT_GAP_MS);
+        const ua = LEGACY_AGENTS[i];
+        try {
+            const response = await fetch(url, {
                 headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' }
             });
-            const retryNote = i > 0 ? ' (محاولة ثانية: ' + ua + ')' : '';
-            console.log('[Legacy] ' + response.status + retryNote + ' <- ' + url);
-            if (response.status !== 403) break;
+            console.log('[Legacy] ' + response.status + ' (' + ua + ') <- ' + url);
+            if (response && response.ok) {
+                const data = await response.json();
+                if (Array.isArray(data)) combinedData.push(...data);
+            }
+        } catch (e) {
+            console.log('[Legacy] خطأ (' + ua + '):', e.message);
         }
-
-        if (!response || !response.ok) return [];
-        const data = await response.json();
-        if (!Array.isArray(data)) return [];
-
-        const assCount = data.filter(e => assLegacyFormatRe.test(e.SubFormat || '') || assLegacyFileRe.test(e.SubFileName || '')).length;
-        console.log('[Legacy] رجع ' + data.length + ' نتيجة، منها ASS: ' + assCount);
-
-        const results = [];
-        data.forEach(entry => {
-            if (!entry.SubDownloadLink) return;
-            const format = (entry.SubFormat || '').toLowerCase();
-            const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
-            const lower = rawName.toLowerCase();
-            const isAss = format === 'ass' || format === 'ssa' || lower.includes('.ass') || lower.includes('.ssa');
-            results.push(mkOsSub(entry.SubDownloadLink, rawName, isAss, isHiFlag(entry.SubHearingImpaired)));
-        });
-        return results;
-    } catch (e) {
-        console.log('[Legacy] خطأ:', e.message);
-        return [];
     }
+
+    if (combinedData.length === 0) return [];
+
+    const results = [];
+    const seenLinks = new Set();
+
+    combinedData.forEach(entry => {
+        if (!entry || !entry.SubDownloadLink) return;
+        const format = (entry.SubFormat || '').toLowerCase();
+        const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
+        const lower = rawName.toLowerCase();
+        const isAss = assLegacyFormatRe.test(format) || assLegacyFileRe.test(lower);
+
+        // الاحتفاظ بملفات ASS/SSA حصراً
+        if (!isAss) return;
+
+        const linkKey = String(entry.IDSubtitleFile || entry.SubDownloadLink);
+        if (seenLinks.has(linkKey)) return;
+        seenLinks.add(linkKey);
+
+        results.push(mkOsSub(entry.SubDownloadLink, rawName, true, isHiFlag(entry.SubHearingImpaired)));
+    });
+
+    console.log('[Legacy] مجموع الفحصين: ' + combinedData.length + ' نتيجة -> تم استخراج ASS حصراً: ' + results.length);
+    return results;
 }
 
 async function fetchLegacyApiEnglish(imdbId, season, episode) {
@@ -312,15 +322,15 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
         ? 'https://rest.opensubtitles.org/search/episode-' + episode + '/imdbid-' + numericId + '/season-' + season + '/sublanguageid-eng'
         : 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-eng';
 
-    let results = await fetchLegacyData(primaryUrl, true);
+    let results = await fetchLegacyData(primaryUrl);
 
-    if (hasSE && !results.some(r => r.format === 'ass' || r.format === 'ssa')) {
+    if (hasSE && results.length === 0) {
         const fallbackResults = await fetchLegacyData('https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-eng');
-        console.log('[Legacy] أسماء ASS: ' + fallbackResults.filter(r => r.format === 'ass' || r.format === 'ssa').map(r => r.fileName).join(' | '));
-        const filteredFallback = fallbackResults.filter(r => (r.format === 'ass' || r.format === 'ssa') && matchEpisode(r.fileName, episode));
+        console.log('[Legacy] أسماء ASS الاحتياطية: ' + fallbackResults.map(r => r.fileName).join(' | '));
+        const filteredFallback = fallbackResults.filter(r => matchEpisode(r.fileName, episode));
         results = [...results, ...filteredFallback];
     }
-    return results.filter(r => r.format === 'ass' || r.format === 'ssa');
+    return results;
 }
 
 async function fetchMirrorEnglish(imdbId, season, episode, type) {
@@ -713,32 +723,36 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         // أ) جميع ترجمات ASS بدون أي فلتر أو حذف مكرر أو سقف عددي
         // ============================================================
         if (arabicSubs.ass && arabicSubs.ass.length > 0) {
+            const assSiteCounters = {};
             for (let i = 0; i < arabicSubs.ass.length; i++) {
                 const sub = arabicSubs.ass[i];
                 const srcLabel = getSourceLabel(sub._source);
+                assSiteCounters[srcLabel] = (assSiteCounters[srcLabel] || 0) + 1;
+                const siteIdx = assSiteCounters[srcLabel];
+
                 transSubs.push({
-                    id: 'nuvio-ready-ara-ass-' + (i + 1),
+                    id: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx,
                     url: baseUrl + streamRawAss + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'Nuvio-' + srcLabel + '-ara-ass ' + (i + 1)
+                    title: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx
                 });
             }
         }
 
         // ب) ترجمات SRT الجاهزة (بحد أقصى 20 لكل موقع من المواقع الثلاثة: SubDL, Subsource, OpenSubtitles)
         if (arabicSubs.srt && arabicSubs.srt.length > 0) {
-            const siteCounters = {};
+            const srtSiteCounters = {};
             for (let i = 0; i < arabicSubs.srt.length; i++) {
                 const sub = arabicSubs.srt[i];
                 const srcLabel = getSourceLabel(sub._source);
-                siteCounters[srcLabel] = (siteCounters[srcLabel] || 0) + 1;
-                const siteIdx = siteCounters[srcLabel];
+                srtSiteCounters[srcLabel] = (srtSiteCounters[srcLabel] || 0) + 1;
+                const siteIdx = srtSiteCounters[srcLabel];
 
                 transSubs.push({
-                    id: 'nuvio-ready-ara-srt-' + (i + 1),
+                    id: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx,
                     url: baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'Nuvio-' + srcLabel + '-ara-srt ' + siteIdx
+                    title: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx
                 });
             }
         }
