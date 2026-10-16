@@ -577,9 +577,37 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 function safeDecode(u) { try { return decodeURIComponent(u); } catch (e) { return u; } }
 
 function zipEpisodeOf(name) {
-  const base = String(name).split(/[\\/]/).pop();
-  const m = base.match(/s(\d{1,2})[ ._-]*e(\d{1,4})/i);
-  return m ? Number(m[2]) : null;
+  const base = String(name).split(/[\\/]/).pop().replace(/\.(srt|ass|ssa)$/i, '').trim();
+  if (!base) return null;
+
+  // 1. صيغة S01E127 أو 1x127
+  let m = base.match(/\bs\d{1,2}[ ._-]*e0*(\d{1,4})(?:v\d+)?\b|\b\d{1,2}x0*(\d{1,4})(?:v\d+)?\b/i);
+  if (m) return Number(m[1] || m[2]);
+
+  // 2. صيغة Ep127 أو Episode 127 أو E127
+  m = base.match(/(?:^|[ ._\-\[\(])(?:ep\vert{}episode\vert{}e)[ ._-]*0*(\d{1,4})(?:v\d+)?(?=[ ._\-\]\)]|$)/i);
+  if (m) return Number(m[1]);
+
+  // 3. اسم الملف عبارة عن رقم الحلقة فقط مثل 144.srt أو 127.srt
+  m = base.match(/^0*(\d{1,4})(?:v\d+)?$/i);
+  if (m) return Number(m[1]);
+
+  // تنظيف السنوات والدقات والأكواد ونطاقات الحلقات قبل فحص الفاصل (-)
+  const clean = base
+    .replace(/\[[0-9a-f]{8}\]/gi, ' ')
+    .replace(/\[\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\]/g, ' ')
+    .replace(/\(\s*(?:19\vert{}20)\d{2}\s*\)/g, ' ')
+    .replace(/(?:480|576|720|1080|2160)[pi]|[xh]\.?26[45]|10\s*bit|8\s*bit|yuv\d+p\d+|(?:\b|_)(?:19|20)\d{2}(?:\b|_)/gi, ' ');
+
+  // 4. صيغة الأنمي القياسية بفاصل شرطة مثل: " - 127" أو "_-_135v2"
+  m = clean.match(/[ ._]+-[ ._]*0*(\d{1,4})(?:v\d+)?(?=[ ._\-\[\(]|$)/i);
+  if (m) return Number(m[1]);
+
+  // 5. رقم الحلقة بين قوسين مربعين مثل [127]
+  m = clean.match(/\[0*(\d{1,4})(?:v\d+)?\]/);
+  if (m) return Number(m[1]);
+
+  return null;
 }
 
 function zipNameHasEpisode(name, episode) {
@@ -634,6 +662,9 @@ async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
     const zip = new AdmZip(buffer);
     const cands = zip.getEntries().filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
+    if (cands.length === 0) {
+      throw new Error('ملف الـ ZIP لا يحتوي على أي ملف ترجمة صالح (srt/ass/ssa)');
+    }
     let entry = cands[0];
     if (epInfo && epInfo.episode != null) {
       if (cands.length > 1) {
