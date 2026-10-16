@@ -1,4 +1,3 @@
-
 // corrector.js
 const {
   axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
@@ -8,7 +7,351 @@ const {
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
 const db = require('./db');
-const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks'); 
+const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
+const { buildNameBook, applyNameBook } = require('./name-book');
+
+const CORRECTOR_STRIP_BRACKETS = true;
+const CORRECTOR_WRAP_AT = 42;
+const CORRECTOR_CHUNK = 200;
+const CORRECTOR_MAX_WORKERS = 10;
+
+// true = احذف أسطر الرسم (m ... l ...) من ملف ASS النهائي لأن المشغّل يعرضها كأرقام
+// false = أبقِها حرفيًا كما في الملف الأصلي
+const DROP_DRAWINGS = true;
+
+const TERM_CHARS = '.…!؟?،,؛:';
+const HAS_ARABIC = /[\u0600-\u06FF]/;
+const DASH_RE = /^[-–—]/;
+
+const TAG_RE = /\{[^}]*\}|<[^>]*>/g;      // للـ replace فقط (global)
+const TAG_ONE = /\{[^}]*\}|<[^>]*>/;      // للـ test (بدون g)
+const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
+const DRAWING_RE = /\{[^}]*\\p0*[1-9][^}]*\}/;   // سطر رسم vector في ASS: {\p1} ... {\p0}
+
+// شرطة المتكلم متبوعة بثلاث نقاط في آخر السطر: "كلام -..." (نمط يظهر بعد قلب الملفات القديمة)
+const DASH_BEFORE_ELL_RE = /\s*[-–—]\s*(\.{3,}|…)$/;
+
+function visibleLen(s) { return String(s).replace(/<[^>]*>|\{[^}]*\}/g, '').length; }
+
+// يصحح فقط الأسطر التي فيها حروف عربية فعلًا، ولا يلمس أسطر الرسم
+function needsCorrection(text) {
+  const raw = String(text == null ? '' : text);
+  if (DRAWING_RE.test(raw)) return false;
+  return HAS_ARABIC.test(raw.replace(TAG_RE, ''));
+}
+
+function moveLeadingPunct(line) {
+  let t = line.trim();
+  let hasDash = false;
+
+  if (/^[-–—]\s*/.test(t)) { hasDash = true; t = t.replace(/^[-–—]\s*/, ''); }
+
+  // شرطة قبل الثلاث نقاط بآخر السطر ("كلام -...") -> الشرطة تروح لأول السطر والنقاط تبقى بآخره
+  const dm2 = t.match(/^(.*?)\s*[-–—]\s*(\.{3,}|…)$/);
+  if (dm2) { hasDash = true; t = dm2[1] + dm2[2]; }
+
+  if (/\s*[-–—]$/.test(t)) { hasDash = true; t = t.replace(/\s*[-–—]$/, ''); }
+
+  const m = t.match(/^([.…!؟?،,؛:]+)\s*(.+)$/);
+  if (m) {
+    const lead = m[1], rest = m[2];
+    if (HAS_ARABIC.test(rest) && !(lead === '…' || /^\.{3,}$/.test(lead))) {
+      if (lead.includes(':')) {
+        t = rest.replace(/[.…!؟?،,؛\s]+$/, '') + ':';
+      } else {
+        const core = rest.replace(/["'”“)\]»\s]+$/, '');
+        if (core && !TERM_CHARS.includes(core[core.length - 1])) {
+          t = rest + lead;
+        } else {
+          t = rest;
+        }
+      }
+    }
+  }
+
+  return (hasDash ? '- ' : '') + t.trim();
+}
+
+function splitSpeakers(line) {
+  if (!DASH_RE.test(line)) return [line];
+  const parts = line.split(/\s+(?=[-–—]\s)/).map(p => p.trim()).filter(Boolean);
+  return parts.length > 1 ? parts : [line];
+}
+
+function balancedBreak(line) {
+  const words = line.split(' ');
+  if (words.length < 3) return [line];
+  let best = -1, bestDiff = Infinity;
+  let acc = 0;
+  const total = visibleLen(line);
+  for (let i = 0; i < words.length - 1; i++) {
+    acc += visibleLen(words[i]) + (i ? 1 : 0);
+    const diff = Math.abs(acc - (total - acc - 1));
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  if (best < 0) return [line];
+  const a = words.slice(0, best + 1).join(' '), b = words.slice(best + 1).join(' ');
+  return (visibleLen(a) >= 8 && visibleLen(b) >= 8) ? [a, b] : [line];
+}
+
+function skeleton(s) {
+  return String(s || '')
+    .replace(/<[^>]*>|\{[^}]*\}/g, '')
+    .replace(/\\+[nN]/g, '')
+    .replace(/[\u0640\u064B-\u065F\u0670]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .toLowerCase();
+}
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+function sameWords(orig, out) {
+  const a = skeleton(orig), b = skeleton(out);
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (Math.abs(a.length - b.length) > Math.max(3, a.length * 0.1)) return false;
+  if (a.length > 600) return false;
+  return levenshtein(a, b) <= Math.max(2, Math.floor(a.length * 0.06));
+}
+
+const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
+const LINE_SPLIT = /\\+[nN]|\r?\n/;
+
+// يعيد وسوم السطر الأصلي (في أول كل سطر وآخره) على نص الموديل.
+// إذا كانت هناك وسوم في وسط السطر يرجع null ويبقى السطر الأصلي.
+function restoreTags(orig, out) {
+  const vis = l => l.replace(TAG_RE, '').trim();
+  const o = String(orig == null ? '' : orig).split(LINE_SPLIT).map(l => l.trim()).filter(l => l && vis(l));
+  const n = String(out == null ? '' : out).split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  if (o.length !== n.length) return null;
+  const res = [];
+  for (let i = 0; i < o.length; i++) {
+    const lead = o[i].match(LEAD_TAGS)[0];
+    const rest = o[i].slice(lead.length);
+    const tail = rest.match(TAIL_TAGS)[0];
+    const body = rest.slice(0, rest.length - tail.length);
+    if (TAG_ONE.test(body)) return null;
+    res.push(lead.trim() + n[i].replace(TAG_RE, '').trim() + tail.trim());
+  }
+  return res.join('\n');
+}
+
+function stripPunctPart(s) {
+  return s
+    .replace(/["“”«»()\[\]]/g, '')
+    .replace(/(?<!\d)[.,:]+|[.,:]+(?!\d)/g, ' ')
+    .replace(/[!؟?،؛;]+/g, ' ');
+}
+
+function prepareForModel(rawText) {
+  const out = [];
+  for (const rawLine of String(rawText == null ? '' : rawText).split(LINE_SPLIT)) {
+    let l = rawLine.trim();
+    if (!l) continue;
+    const tagPrefix = l.match(LEAD_TAGS)[0];
+    l = l.slice(tagPrefix.length).trim();
+    // الوسوم لا تُرسل للموديل أبدًا؛ تُعاد لاحقًا بـ restoreTags
+    l = l.replace(TAG_RE, '').trim();
+    if (!l) continue;
+
+    let mark = '', colon = false;
+    let dash0 = '';
+    const dm = l.match(/^[-–—]\s*/);
+    if (dm) { dash0 = '-'; l = l.slice(dm[0].length); }
+    let lm;
+    while ((lm = l.match(/^([!؟?:]+)\s*(?=\S)/))) {
+      if (lm[1].includes(':')) colon = true;
+      mark += lm[1].replace(/:/g, '');
+      l = l.slice(lm[0].length);
+    }
+    const tm = l.match(/(?<!\d)([!؟?:]+)[\s."”)]*$/);
+    if (tm) {
+      if (tm[1].includes(':')) colon = true;
+      mark = tm[1].replace(/:/g, '') + mark;
+      l = l.slice(0, tm.index);
+    }
+    l = (dash0 ? '- ' : '') + l;
+
+    l = l.split(/(\{[^}]*\}|<[^>]*>|\.{3,}|…)/)
+      .map((part, i) => (i % 2 ? part : stripPunctPart(part)))
+      .join('').replace(/[ \t]{2,}/g, ' ').trim();
+
+    let dash = false;
+    if (/^[-–—]\s*/.test(l)) { dash = true; l = l.replace(/^[-–—]\s*/, ''); }
+    // شرطة قبل الثلاث نقاط بآخر السطر ("كلام -...") -> نحذف الشرطة ونبقي النقاط
+    if (DASH_BEFORE_ELL_RE.test(l)) { dash = true; l = l.replace(DASH_BEFORE_ELL_RE, '$1'); }
+    if (/\s*[-–—]$/.test(l)) { dash = true; l = l.replace(/\s*[-–—]$/, ''); }
+    l = l.trim();
+    if (!l) continue;
+    out.push((dash ? '- ' : '') + l + (colon ? ':' : mark));
+  }
+  return out.join('\\N');
+}
+
+function quoteHint(rawText) {
+  const t = String(rawText == null ? '' : rawText).replace(/\{[^}]*\}|<[^>]*>/g, '');
+  const lines = t.split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  if (lines.some(l => /^[-–—]/.test(l) || /[-–—]$/.test(l))) {
+    const per = lines.map(l => {
+      const s = l.replace(/^[-–—]\s*/, '');
+      const st = /^["“”]/.test(s);
+      const en = /["“”][.…!؟?،,؛\s]*$/.test(s);
+      return st && en ? 'whole' : st ? 'open' : en ? 'close' : null;
+    });
+    return per.some(Boolean) ? per : null;
+  }
+  const total = (t.match(/["“”]/g) || []).length;
+  if (!total) return null;
+  let edge = 0, startFirst = false, endLast = false;
+  lines.forEach((l, i) => {
+    const st = /^["“”]/.test(l);
+    const en = /["“”][.…!؟?،,؛\s]*$/.test(l);
+    const onlyQuote = l.replace(/[.…!؟?،,؛\s]/g, '').length === 1;
+    if (st) { edge++; if (i === 0) startFirst = true; }
+    if (en && !(st && onlyQuote)) { edge++; if (i === lines.length - 1) endLast = true; }
+  });
+  if (edge !== total) return null;
+  if (total % 2 === 0) return 'whole';
+  if (total === 1) { if (startFirst) return 'open'; if (endLast) return 'close'; }
+  return null;
+}
+
+function shapeOf(text) {
+  const lines = String(text == null ? '' : text).split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
+  const dashes = lines.filter(l => /^[-–—]/.test(l.replace(LEAD_TAGS, ''))).length;
+  return lines.length + ':' + dashes;
+}
+
+function parenInfo(line) {
+  const stack = [], strayClose = [];
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '(') stack.push(i);
+    else if (line[i] === ')') { if (stack.length) stack.pop(); else strayClose.push(i); }
+  }
+  return { strayOpen: stack, strayClose };
+}
+function appendClosing(line) {
+  const m = line.match(/^(.*?)(\s*[.…!؟?،,؛"”»]*\s*)$/s);
+  return m ? m[1] + ')' + m[2] : line + ')';
+}
+function wordEndAfter(line, p) {
+  let i = p + 1;
+  while (i < line.length && /\s/.test(line[i])) i++;
+  while (i < line.length && !/[\s.…!؟?،,؛()"“”]/.test(line[i])) i++;
+  return i;
+}
+function wordStartBefore(line, p) {
+  let i = p;
+  while (i > 0 && /\s/.test(line[i - 1])) i--;
+  while (i > 0 && !/[\s("“”]/.test(line[i - 1])) i--;
+  return i;
+}
+function fixLineParens(line) {
+  if (!/[()]/.test(line)) return line;
+  let info = parenInfo(line);
+  if (!info.strayOpen.length && !info.strayClose.length) return line;
+  const opens = (line.match(/\(/g) || []).length, closes = (line.match(/\)/g) || []).length;
+  const pairs = opens - info.strayOpen.length;
+  if (pairs === 0 && opens === closes && line.search(/[()]/) === line.indexOf(')') ) {
+    return line.replace(/[()]/g, c => (c === '(' ? ')' : '('));
+  }
+  let out = line;
+  let strays = info.strayOpen.slice();
+  if (strays.length >= 2 && out.slice(0, strays[0]).replace(/[-–—\s"“”]/g, '') === '') {
+    out = out.slice(0, strays[0]) + out.slice(strays[0] + 1);
+    strays = strays.slice(1).map(p => p - 1);
+  }
+  for (const p of strays.slice().reverse()) {
+    const end = wordEndAfter(out, p);
+    if (end > p + 1) out = out.slice(0, end) + ')' + out.slice(end);
+    else out = out.slice(0, p) + out.slice(p + 1);
+  }
+  info = parenInfo(out);
+  for (const p of info.strayClose.slice().reverse()) {
+    const st = wordStartBefore(out, p);
+    if (st < p) out = out.slice(0, st) + '(' + out.slice(st);
+    else out = out.slice(0, p) + out.slice(p + 1);
+  }
+  return out;
+}
+function repairParens(text) {
+  if (!/[()]/.test(text)) return text;
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*[-–—]?\s*)\)\s*/);
+    if (m) {
+      lines[i] = m[1] + lines[i].slice(m[0].length);
+      if (i > 0 && parenInfo(lines[i - 1]).strayOpen.length > 0) lines[i - 1] = appendClosing(lines[i - 1]);
+    }
+  }
+  return lines.map(fixLineParens).join('\n');
+}
+
+function fixSplitQuotes(text) {
+  const lines = text.split('\n');
+  if (lines.length !== 2) return text;
+  const a = lines[0].trim(), b = lines[1].trim();
+  if (DASH_RE.test(a) || DASH_RE.test(b)) return text;
+  const cnt = s => (s.match(/["“”]/g) || []).length;
+  if (cnt(a) !== 1 || cnt(b) !== 1) return text;
+  if (!/["“”]$/.test(a) || !/^["“”]/.test(b)) return text;
+  const aCore = a.replace(/\s*["“”]$/, '');
+  if (!aCore || TERM_CHARS.includes(aCore[aCore.length - 1])) return text;
+  const bCore = b.replace(/^["“”]\s*/, '');
+  return '"' + aCore + '\n' + bCore + '"';
+}
+
+function polishArabicText(txt) {
+  let t = String(txt == null ? '' : txt)
+    .replace(/\\+[nN]/g, '\n')
+    .replace(/["“”]\(([^()"“”\n]+)\)["“”]/g, '($1)')
+    .replace(/\(["“”]([^()"“”\n]+)["“”]\)/g, '"$1"');
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  const out = [];
+  for (const l of lines) out.push(...splitSpeakers(moveLeadingPunct(l)));
+  let res = repairParens(out.map(l => moveLeadingPunct(l)).join('\n')).split('\n').filter(Boolean);
+  // لا نكسر سطرًا فيه وسوم ASS (حتى لا نغيّر تنسيق صاحب الترجمة)
+  if (CORRECTOR_WRAP_AT > 0 && res.length === 1 && !DASH_RE.test(res[0]) && !TAG_ONE.test(res[0]) && visibleLen(res[0]) > CORRECTOR_WRAP_AT) {
+    res = balancedBreak(res[0]);
+  }
+  return fixSplitQuotes(res.join('\n'));
+}
+
+function cleanCorrectorOutput(txt) {
+  let t = String(txt == null ? '' : txt)
+    .replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '');
+  if (CORRECTOR_STRIP_BRACKETS) t = t.replace(/[\[\]]/g, '');
+  t = t.replace(/[ \t]{2,}/g, ' ').trim();
+  return polishArabicText(fixArabicTypos(t));
+}
+
+const TYPO_FIX_RAW = {"لى": "لي", "فى": "في", "الذى": "الذي", "التى": "التي", "لكى": "لكي", "معى": "معي", "بى": "بي", "نفسى": "نفسي", "رأيى": "رأيي", "رأسى": "رأسي", "انتى": "أنتِ", "حتي": "حتى", "باقى": "باقي", "ثوانى": "ثواني", "ماضى": "ماضي", "أصدقائى": "أصدقائي", "أبنائى": "أبنائي", "اخى": "أخي", "رئيسى": "رئيسي", "سيدى": "سيدي", "عزيزى": "عزيزي", "زوجتى": "زوجتي", "عائهذا هو الكود الكامل والنهائي لملف `corrector.js` جاهزاً للنسخ والاعتماد مباشرة، بعد دمج استدعاء `name-book.js` وتمرير القاموس (`book`) إلى كل من `collectNameCandidates` و`propagateNames`، وتحديث نسخة الكاش إلى `'ARB2'`:
+
+```js
+// corrector.js
+const {
+  axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
+  normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
+  MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent, parseIdTranslations, buildChunkContext,
+  needsTranslation, loadLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
+  extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
+} = require('./ai').shared;
+const db = require('./db');
+const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
+const { buildNameBook, applyNameBook } = require('./name-book');
 
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
@@ -426,7 +769,7 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
 
-    const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
+  const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
 Most punctuation of every entry was REMOVED on purpose. What was kept: the speaker dashes "-", the line-break markers \\N, any "...", and any "?", "!", "؟" or ":" that stands at the very end of a line.
 Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
 
@@ -438,7 +781,7 @@ Rules:
 3. Keep every dash "-" exactly at the start of its line. Never add a dash to a line that has none.
 4. Sentence marks: end each sentence with . or ! or ؟ as the meaning requires, and use ، and ؛ where natural. Keep every existing "..." exactly where it is. Use the read-only context to see whether a sentence continues in the next entry or continues from the previous one: do NOT end an entry with a full stop if its sentence continues in the next entry. Any line that already ends with "؟", "!" or ":" keeps it EXACTLY; never remove it, never change it, never add another mark after it.
 5. PERSON NAMES (names of people or characters, even when a prefix such as ل ب و ك ف is attached to the word): wrap the whole name in quotation marks ONLY, like "سالي". NEVER use parentheses () for people.
-6. ENTITIES & PLACES (companies, brands, cities, countries, institutions, organizations, dishes): wrap them in parentheses ONLY, like like (لندن) or (أبل). NEVER use quotation marks "" for them. If you are not sure that a word is a name, leave it with no mark.
+6. ENTITIES & PLACES (companies, brands, cities, countries, institutions, organizations, dishes): wrap them in parentheses ONLY, like (لندن) or (أبل). NEVER use quotation marks "" for them. If you are not sure that a word is a name, leave it with no mark.
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.If "q" is an array, it has one value per line, in order: apply each value to its own line only; null means that line is not quoted.
 8. NEVER output square brackets [ ].
 9. ONLY output the JSON array. No explanations.
@@ -450,8 +793,6 @@ Output: [{"id": 1, "text": "هل أخبرت \\"مصطفى\\" عن شركة (أب
 ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
-
-
 
   for (let attempt = 0; attempt < 4; attempt++) {
     const activeKey = await acquireKey(keysArray);
@@ -560,8 +901,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
 
   const CHUNK = CORRECTOR_CHUNK;
-  // رفعنا النسخة إلى ARB7 حتى لا تُستخدم نتائج الكاش الخاطئة القديمة
-  const cacheVersion = process.env.CACHE_VER || 'ARB1';
+  // رفعنا النسخة إلى ARB2 حتى لا يبقى الكاش القديم بلا تنصيص للأسماء
+  const cacheVersion = process.env.CACHE_VER || 'ARB2';
   const lineCacheKey = cacheVersion + '_' + cacheKey;
   const cache = await loadLineCache(lineCacheKey);
 
@@ -647,20 +988,40 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
 
-  // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف
+  // الأسطر غير المصححة (رسم / غير عربية) تبقى حرفيًا كما في الأصل بدون أي تنظيف، ولا نكرر تنظيف ما نُظف في applyLine
   const finalTexts = cues.map((c, i) =>
-    needsCorrection(c.text) ? cleanCorrectorOutput(results[i] || c.text) : c.text
+    needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
   );
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
-  let kinds = new Map();
-  try {
-    kinds = await classifyNames(collectNameCandidates(finalTexts, eligible), keysArray, modelName, {
+  let outTexts = finalTexts;
+
+  if (toDo.length > 0) {   // الحلقة المكيّشة بالكامل ترجع فورًا بلا أي نداء لـ Gemini
+    const deps = {
       axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
       normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
       MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
+    };
+    const plain = finalTexts.filter((_, i) => needsCorrection(cues[i].text))
+      .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const book = await buildNameBook(plain, keysArray, modelName, deps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
+      .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+    let kinds = new Map();
+    try {
+      kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, deps);
+    } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
+    outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
+    const changed = [];
+    outTexts.forEach((t, i) => {
+      if (t !== finalTexts[i] && cache.has(i)) {
+        cache.set(i, t);
+        changed.push([i, t]);
+      }
     });
-  } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
-  return { texts: propagateNames(finalTexts, eligible, kinds), missing };
+    if (changed.length) db.saveMap('line', lineCacheKey, changed);   // نحفظ النسخة النهائية بعد الأسماء
+  }
+
+  return { texts: outTexts, missing };
 }
 
 const epInfoOf = id => {
