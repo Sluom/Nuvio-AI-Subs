@@ -5,6 +5,7 @@ const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const MONGODB_DB = String(process.env.MONGODB_DB || 'nuvio_ai_subs').trim();
 const CACHE_VERSION = String(process.env.CACHE_VERSION || 'v1').trim();
 const TTL_DAYS = Math.max(1, parseInt(process.env.MONGODB_TTL_DAYS || '45', 10) || 45);
+const READ_TIMEOUT_MS = Math.max(1000, parseInt(process.env.MONGODB_READ_TIMEOUT_MS || '4000', 10) || 4000);
 const RETRY_AFTER_MS = 30000;
 
 let database = null;
@@ -12,6 +13,17 @@ let connecting = null;
 let retryAt = 0;
 
 const docId = (ns, key) => crypto.createHash('sha1').update(`${CACHE_VERSION}|${ns}|${key}`).digest('hex');
+
+function withTimeout(promise, ms, fallback, label) {
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => {
+      console.log(`[MongoDB] ${label} تجاوزت ${ms / 1000} ثانية، أكمل بدونها.`);
+      resolve(fallback);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 async function getDb() {
   if (!MONGODB_URI) return null;
@@ -21,7 +33,13 @@ async function getDb() {
   if (!connecting) {
     connecting = (async () => {
       try {
-        const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000, maxPoolSize: 10 });
+        const client = new MongoClient(MONGODB_URI, {
+          serverSelectionTimeoutMS: 8000,
+          connectTimeoutMS: 8000,
+          socketTimeoutMS: 20000,
+          maxIdleTimeMS: 60000,
+          maxPoolSize: 10
+        });
         await client.connect();
         const d = client.db(MONGODB_DB);
         const ttlSeconds = TTL_DAYS * 24 * 60 * 60;
@@ -56,7 +74,7 @@ async function init() {
   return !!d;
 }
 
-async function loadDoc(ns, key) {
+async function readDoc(ns, key) {
   const d = await getDb();
   if (!d) return null;
   try {
@@ -66,6 +84,10 @@ async function loadDoc(ns, key) {
     console.log(`[MongoDB] فشلت القراءة (${ns}): ${e.message}`);
     return null;
   }
+}
+
+function loadDoc(ns, key) {
+  return withTimeout(readDoc(ns, key), READ_TIMEOUT_MS, null, `قراءة (${ns})`);
 }
 
 async function saveDoc(ns, key, value) {
@@ -84,7 +106,7 @@ async function saveDoc(ns, key, value) {
   }
 }
 
-async function loadMap(ns, key) {
+async function readMap(ns, key) {
   const out = new Map();
   const d = await getDb();
   if (!d) return out;
@@ -100,6 +122,10 @@ async function loadMap(ns, key) {
     console.log(`[MongoDB] فشلت قراءة الخريطة (${ns}): ${e.message}`);
   }
   return out;
+}
+
+function loadMap(ns, key) {
+  return withTimeout(readMap(ns, key), READ_TIMEOUT_MS, new Map(), `قراءة الخريطة (${ns})`);
 }
 
 async function saveMap(ns, key, entries) {
