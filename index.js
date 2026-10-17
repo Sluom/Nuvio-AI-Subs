@@ -5,7 +5,7 @@ const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('
 const { getSubDL } = require('./sources/subdl');
 const { getSubSource } = require('./sources/subsource');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./sources/araFetch');
-const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector/corrector');
+const { handleCorrectionSrt, handleCorrectionAss } = require('./Corrector/corrector');
 const db = require('./db');
 const app = express();
 app.use(cors());
