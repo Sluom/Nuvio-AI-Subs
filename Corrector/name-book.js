@@ -63,12 +63,13 @@ async function callJson(prompt, keysArray, model, d) {
         safetySettings: d.SAFETY_SETTINGS_OFF
       }, {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key, 'x-goog-api-client': d.GEMINI_CLIENT_HEADER },
-        timeout: 90000, httpAgent: d.httpAgent, httpsAgent: d.httpsAgent, maxContentLength: d.MAX_AI_RESPONSE_BYTES
+        timeout: 25000, httpAgent: d.httpAgent, httpsAgent: d.httpsAgent, maxContentLength: d.MAX_AI_RESPONSE_BYTES
       });
       const txt = (r.data?.candidates?.[0]?.content?.parts || []).map(p => p?.text || '').join('');
       return JSON.parse(txt.replace(/```json|```/g, '').trim());
     } catch (e) {
       const status = e.response?.status || 0;
+      console.log(`[أسماء] فشل طلب (${attempt + 1}/3) status:${status} ${e.code || e.message}`);
       if (d.isGeminiAuthFailure(e)) { d.deadKeys.add(activeKey); continue; }
       if (status) d.keyCooldowns.set(activeKey, Date.now() + d.cooldownForStatus(status));
       if (attempt < 2) await d.delay(1500 + Math.random() * 1500);
