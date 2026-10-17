@@ -8,10 +8,10 @@ const {
   extractRuleEvidenceForCue,
   analyzeSubtitlesGender,
   logGenderDebug
-} = require('./genderRules');
-const { getTmdbCast } = require('./tmdb');
-const { getAnilistCast } = require('./anilist');
-const db = require('./db');
+} = require('../gender/genderRules');
+const { getTmdbCast } = require('../gender/tmdb');
+const { getAnilistCast } = require('../gender/anilistCast');
+const db = require('../db');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
 const ASS_DEFAULT_HEADER = [
