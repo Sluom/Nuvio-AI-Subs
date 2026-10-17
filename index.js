@@ -311,7 +311,8 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
 }
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.5',
+    version: '1.9.6',
+    logo: 'https://raw.githubusercontent.com/Sluom/Nuvio-AI-Subs/main/logo.png',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Ready Arabic subtitles, Arabic Corrector, and Auto-translate to Arabic using Gemini.',
     resources: ['subtitles'],
