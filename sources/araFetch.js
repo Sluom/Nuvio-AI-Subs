@@ -281,7 +281,7 @@ async function getRawArabicSubContent(targetUrl, subsourceKey, epInfo = null) {
     const effectiveKey = makeRawKey(targetUrl, effectiveEpInfo);
     const cached = getRawCache(primaryKey) || getRawCache(effectiveKey);
     if (cached) return cached;
-    const { fetchAndExtractSub } = require('./ai').shared;
+    const { fetchAndExtractSub } = require('../ai/ai').shared;
     const text = await fetchAndExtractSub(targetUrl, subsourceKey, effectiveEpInfo);
     if (!text || !String(text).trim()) {
         throw new Error('ملف الترجمة فارغ');
