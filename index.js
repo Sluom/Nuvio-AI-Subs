@@ -55,15 +55,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys, {
-                    onDraft: content => {
-                        const cur = translationCache[cacheKey];
-                        if (!cur || cur.status !== 'done') {
-                            translationCache[cacheKey] = { status: 'done', content, complete: false };
-                            console.log('[' + label + '] Track ' + trackNum + ': المسودة جاهزة للمستخدم، والأسماء تكمل بالخلفية.');
-                        }
-                    }
-                });
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys);
                 if (r.failed) {
                     console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     dropIfNotDone();
