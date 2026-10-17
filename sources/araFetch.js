@@ -239,7 +239,7 @@ function detectAssContent(text, item) {
 async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     let timer;
     try {
-        const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
+        const { fetchAndExtractSub, extractCuesUniversal } = require('../ai/ai')
         const effectiveEpInfo = s._epOverride || resolveEpInfoForUrl(s.url, epInfo);
         const primaryRawKey = makeRawKey(s.url, epInfo);
         const effectiveRawKey = makeRawKey(s.url, effectiveEpInfo);
