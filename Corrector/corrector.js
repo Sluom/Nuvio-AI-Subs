@@ -471,7 +471,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   }
   return done;
 }
-async function correctAllCues(cues, keysArray, modelName, cacheKey) {
+async function correctAllCues(cues, keysArray, modelName, cacheKey, onDraft = null) {
   const tStart = Date.now();
   if (isVisualOrderFile(cues)) {
     console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
@@ -547,6 +547,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
   );
+  if (onDraft) {
+    try { onDraft(finalTexts); }
+    catch (e) { console.log(`[مصحح] خطأ المسودة: ${e && e.message}`); }
+  }
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
   if (toDo.length > 0) {
@@ -558,11 +562,27 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     const plain = finalTexts.filter((_, i) => needsCorrection(cues[i].text))
       .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
       .filter(Boolean);
-    const book = await buildNameBook(plain, keysArray, modelName, deps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
-      .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+    const withCap = (p, ms, label) => {
+      let t;
+      return Promise.race([
+        p,
+        new Promise(res => { t = setTimeout(() => { console.log(`[مصحح] ${label} تجاوز ${ms / 1000} ثانية، أكمل بدونه.`); res(null); }, ms); })
+      ]).finally(() => clearTimeout(t));
+    };
+    const tNames = Date.now();
+    const book = await withCap(
+      buildNameBook(plain, keysArray, modelName, deps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray)))),
+      NAMES_CAP_MS, 'قاموس الأسماء'
+    ).catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+    console.log(`[مصحح] قاموس الأسماء: ${((Date.now() - tNames) / 1000).toFixed(1)} ثانية | ${book ? book.size : 0} اسم`);
     let kinds = new Map();
     try {
-      kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, deps);
+      const tCls = Date.now();
+      kinds = (await withCap(
+        classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, deps),
+        NAMES_CAP_MS, 'تصنيف الأسماء'
+      )) || new Map();
+      console.log(`[مصحح] تصنيف الأسماء: ${((Date.now() - tCls) / 1000).toFixed(1)} ثانية`);
     } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
     outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     const changed = [];
@@ -574,13 +594,14 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
   }
+  console.log(`[مصحح] مرحلة الأسماء خلصت | من البداية=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
   return { texts: outTexts, missing };
 }
 const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
 };
-async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
+async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}, hooks = {}) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, resolveEpInfoForUrl(subUrl, epInfoOf(targetId))); }
   catch (e) {
@@ -591,22 +612,26 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
   console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
-  let srtOutput = '';
-  let counter = 1;
-  cues.forEach((c, idx) => {
-    if (DRAWING_RE.test(c.text)) return;
-    let text = String(finalCorrections[idx] || '').replace(/\\+[nN]/g, '\n');
-    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
-    if (sTime.length === 10) sTime = '0' + sTime;
-    if (eTime.length === 10) eTime = '0' + eTime;
-    if (sTime.split(',')[1].length === 2) sTime += '0';
-    if (eTime.split(',')[1].length === 2) eTime += '0';
-    srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
-    counter++;
-  });
-  return { content: srtOutput, missing, total: cues.length, failed: false };
+  const buildSrt = texts => {
+    let out = '';
+    let counter = 1;
+    cues.forEach((c, idx) => {
+      if (DRAWING_RE.test(c.text)) return;
+      let text = String(texts[idx] || '').replace(/\\+[nN]/g, '\n');
+      if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
+      let sTime = c.start.replace('.', ','), eTime = c.end.replace('.', ',');
+      if (sTime.length === 10) sTime = '0' + sTime;
+      if (eTime.length === 10) eTime = '0' + eTime;
+      if (sTime.split(',')[1].length === 2) sTime += '0';
+      if (eTime.split(',')[1].length === 2) eTime += '0';
+      out += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
+      counter++;
+    });
+    return out;
+  };
+  const onDraft = hooks.onDraft ? t => hooks.onDraft(buildSrt(t)) : null;
+  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, onDraft);
+  return { content: buildSrt(texts), missing, total: cues.length, failed: false };
 }
 const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
 const ASS_RTL_MARKS = true;
@@ -645,7 +670,7 @@ function rebuildAss(parsed, texts) {
   });
   return out.filter((_, i) => !drop.has(i)).join('\n');
 }
-async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
+async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}, hooks = {}) {
   let originalText = "";
   try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, resolveEpInfoForUrl(subUrl, epInfoOf(targetId))); }
   catch (e) {
@@ -657,17 +682,19 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
-  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`);
-  if (isRealAss) {
-    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
-  }
-  const assLines = [];
-  cues.forEach((c, idx) => {
-    const text = texts[idx];
-    if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
-    assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
-  });
-  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
+  const buildAss = texts => {
+    if (isRealAss) return rebuildAss(parsed, texts) + '\n';
+    const assLines = [];
+    cues.forEach((c, idx) => {
+      const text = texts[idx];
+      if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
+      assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
+    });
+    return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+  };
+  const onDraft = hooks.onDraft ? t => hooks.onDraft(buildAss(t)) : null;
+  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, onDraft);
+  return { content: buildAss(texts), missing, total: cues.length, failed: false };
 }
 module.exports = {
   handleCorrectionSrt,
