@@ -175,7 +175,7 @@ ${JSON.stringify(part)}`;
           safetySettings: SAFETY_SETTINGS_OFF
         }, {
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey, 'x-goog-api-client': GEMINI_CLIENT_HEADER },
-          timeout: 60000, httpAgent, httpsAgent, maxContentLength: MAX_AI_RESPONSE_BYTES
+          timeout: 25000, httpAgent, httpsAgent, maxContentLength: MAX_AI_RESPONSE_BYTES
         });
         const txt = (r.data?.candidates?.[0]?.content?.parts || []).map(p => p?.text || '').join('');
         const arr = JSON.parse(txt.replace(/```json|```/g, '').trim());
@@ -185,6 +185,7 @@ ${JSON.stringify(part)}`;
         break;
       } catch (e) {
         const status = e.response?.status || 0;
+        console.log(`[أسماء] فشل طلب (${attempt + 1}/3) status:${status} ${e.code || e.message}`);
         if (isGeminiAuthFailure(e)) { deadKeys.add(activeKey); continue; }
         if (status) keyCooldowns.set(activeKey, Date.now() + cooldownForStatus(status));
         if (attempt < 2) await delay(1500 + Math.random() * 1500);
