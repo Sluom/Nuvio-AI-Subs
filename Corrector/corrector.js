@@ -4,9 +4,9 @@ const {
   MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent, parseIdTranslations, buildChunkContext,
   needsTranslation, loadLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
-} = require('./ai').shared;
-const db = require('./db');
-const { resolveEpInfoForUrl } = require('./araFetch');
+} = require('../ai/ai').shared;
+const db = require('../db');
+const { resolveEpInfoForUrl } = require('../sources/araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
 const { buildNameBook, applyNameBook } = require('./name-book');
 const CORRECTOR_STRIP_BRACKETS = true;
