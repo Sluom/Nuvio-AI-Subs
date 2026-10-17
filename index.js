@@ -1,11 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
-const { getSubDL } = require('./subdl');
-const { getSubSource } = require('./subsource');
-const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
-const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai/ai');
+const { getSubDL } = require('./sources/subdl');
+const { getSubSource } = require('./sources/subsource');
+const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./sources/araFetch');
+const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector/corrector');
 const db = require('./db');
 const app = express();
 app.use(cors());
