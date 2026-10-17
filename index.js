@@ -1,11 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai/ai');
-const { getSubDL } = require('./sources/subdl');
-const { getSubSource } = require('./sources/subsource');
-const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./sources/araFetch');
-const { handleCorrectionSrt, handleCorrectionAss } = require('./Corrector/corrector');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
+const { getSubDL } = require('./subdl');
+const { getSubSource } = require('./subsource');
+const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
+const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
 const db = require('./db');
 const app = express();
 app.use(cors());
@@ -63,9 +63,8 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 }
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
                 if (r.missing === 0) {
-                    db.saveDoc('job', cacheKey, { content: r.content })
-                        .then(saved => { if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.'); })
-                        .catch(() => {});
+                    const saved = await db.saveDoc('job', cacheKey, { content: r.content });
+                    if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.');
                     if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
                     return;
                 }
@@ -312,8 +311,7 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
 }
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-        version: '1.9.6',
-    logo: 'https://raw.githubusercontent.com/Sluom/Nuvio-AI-Subs/main/logo.png',
+    version: '1.9.5',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Ready Arabic subtitles, Arabic Corrector, and Auto-translate to Arabic using Gemini.',
     resources: ['subtitles'],
