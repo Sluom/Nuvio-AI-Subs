@@ -9,6 +9,7 @@ const db = require('../db');
 const { resolveEpInfoForUrl } = require('../sources/araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
 const { buildNameBook, applyNameBook } = require('./name-book');
+const NAMES_CAP_MS = 25000;
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 100;
