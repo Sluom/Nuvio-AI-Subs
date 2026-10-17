@@ -55,7 +55,15 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys);
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys, {
+                    onDraft: content => {
+                        const cur = translationCache[cacheKey];
+                        if (!cur || cur.status !== 'done') {
+                            translationCache[cacheKey] = { status: 'done', content, complete: false };
+                            console.log('[' + label + '] Track ' + trackNum + ': المسودة جاهزة للمستخدم، والأسماء تكمل بالخلفية.');
+                        }
+                    }
+                });
                 if (r.failed) {
                     console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     dropIfNotDone();
@@ -63,8 +71,9 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 }
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
                 if (r.missing === 0) {
-                    const saved = await db.saveDoc('job', cacheKey, { content: r.content });
-                    if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.');
+                    db.saveDoc('job', cacheKey, { content: r.content })
+                        .then(saved => { if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.'); })
+                        .catch(() => {});
                     if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
                     return;
                 }
