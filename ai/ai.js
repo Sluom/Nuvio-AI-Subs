@@ -10,7 +10,23 @@ const {
   logGenderDebug
 } = require('../gender/genderRules');
 const { getTmdbCast } = require('../gender/tmdb');
-const { getAnilistCast } = require('../gender/anilistCast');
+const { getAnimeCastBlock } = require('../gender/anilistCast');
+async function getAnilistCast({ kitsuId } = {}) {
+  if (!kitsuId) return { ok: false, cast: [], promptBlock: '', reason: 'لا يوجد Kitsu ID' };
+  try {
+    const block = await getAnimeCastBlock({ kitsuId, db });
+    const cast = String(block || '').split('\n').filter(Boolean);
+    if (!cast.length) return { ok: false, cast: [], promptBlock: '', reason: 'AniList لم يرجّع شخصيات' };
+    return {
+      ok: true,
+      cast,
+      title: kitsuId,
+      promptBlock: 'CHARACTER GENDERS (from AniList). M = male, F = female. Use them for these named characters:\n' + block
+    };
+  } catch (e) {
+    return { ok: false, cast: [], promptBlock: '', reason: e.message };
+  }
+}
 const db = require('../db');
 let httpAgent, httpsAgent;
 try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
