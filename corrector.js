@@ -470,6 +470,11 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   }
   return done;
 }
+const NAMES_PARALLEL = process.env.NAMES_PARALLEL === '1';
+const secsOf = ms => (ms / 1000).toFixed(1);
+const plainForBook = texts => texts
+  .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
+  .filter(Boolean);
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
   if (isVisualOrderFile(cues)) {
@@ -495,6 +500,22 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     toDo.push(item);
   });
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
+  const namesDeps = {
+    axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
+    normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
+    MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
+  };
+  const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
+    .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+  let bookPromise = null;
+  if (NAMES_PARALLEL && toDo.length > 0) {
+    const tBook = Date.now();
+    const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
+    bookPromise = startBook(plainForBook(sourceTexts)).then(b => {
+      console.log(`\u200F[أسماء ⏱ القاموس بالتوازي] ${b ? b.size : 0} اسم | ${secsOf(Date.now() - tBook)} ثانية`);
+      return b;
+    });
+  }
   let rejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
@@ -550,19 +571,12 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   let outTexts = finalTexts;
   const tNames = Date.now();
   if (toDo.length > 0) {
-    const deps = {
-      axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
-      normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
-      MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
-    };
-    const plain = finalTexts.filter((_, i) => needsCorrection(cues[i].text))
-      .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
-      .filter(Boolean);
-    const book = await buildNameBook(plain, keysArray, modelName, deps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
-      .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+    const book = bookPromise
+      ? await bookPromise
+      : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
     let kinds = new Map();
     try {
-      kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, deps);
+      kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
     } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
     outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     const changed = [];
@@ -573,8 +587,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
-    console.log(`\u200F[مرحلة الأسماء ⏱] ${((Date.now() - tNames) / 1000).toFixed(1)} ثانية`);
+    console.log(`\u200F[مرحلة الأسماء ⏱] ${secsOf(Date.now() - tNames)} ثانية${bookPromise ? ' (قاموس بالتوازي)' : ''}`);
   }
+  console.log(`\u200F[المصحح كامل ⏱] ${secsOf(Date.now() - tStart)} ثانية${NAMES_PARALLEL ? ' (أسماء بالتوازي)' : ''}`);
   return { texts: outTexts, missing };
 }
 const epInfoOf = id => {
@@ -673,4 +688,4 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
 module.exports = {
   handleCorrectionSrt,
   handleCorrectionAss
-}; 
+};
