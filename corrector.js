@@ -548,6 +548,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   );
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
+  const tNames = Date.now();
   if (toDo.length > 0) {
     const deps = {
       axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
@@ -572,6 +573,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
+    console.log(`\u200F[مرحلة الأسماء ⏱] ${((Date.now() - tNames) / 1000).toFixed(1)} ثانية`);
   }
   return { texts: outTexts, missing };
 }
