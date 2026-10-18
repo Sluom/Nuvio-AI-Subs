@@ -5,8 +5,8 @@ const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 const cleanPath = p => String(p || '').split('?')[0];
-const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
-const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500 };
+const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
+const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500 };
 const FAST_VERIFY_WINDOW_MS = 2800;
 const VERIFY_TIMEOUT_MS = 2600;
 const CONCURRENCY_LIMIT = 8;
@@ -147,26 +147,42 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
     const primaryUrl = hasSE
         ? 'https://rest.opensubtitles.org/search/episode-' + episode + '/imdbid-' + numericId + '/season-' + season + '/sublanguageid-ara'
         : 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
-    async function fetchLegacyData(url) {
-        let response;
-        for (let i = 0; i < LEGACY_AGENTS.length; i++) {
-            const ua = LEGACY_AGENTS[i];
-            response = await axios.get(url, {
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    async function requestWithAgent(url, ua) {
+        try {
+            const response = await axios.get(url, {
                 headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' },
-                timeout: 3000,
+                timeout: 2500,
                 validateStatus: () => true
             });
-            if (response.status !== 403) break;
-        }
-        if (!response || response.status < 200 || response.status >= 300) {
-            console.log('[جلب عربي - OS Legacy] HTTP ' + (response ? response.status : 'بدون رد'));
+            if (!response || response.status < 200 || response.status >= 300) {
+                console.log('[جلب عربي - OS Legacy (' + ua + ')] HTTP ' + (response ? response.status : 'بدون رد'));
+                return [];
+            }
+            let json = response.data;
+            if (typeof json === 'string') {
+                try { json = JSON.parse(json); } catch { json = []; }
+            }
+            return Array.isArray(json) ? json : [];
+        } catch (err) {
+            console.log('[جلب عربي - OS Legacy (' + ua + ')] خطأ طلب: ' + err.message);
             return [];
         }
-        let json = response.data;
-        if (typeof json === 'string') {
-            try { json = JSON.parse(json); } catch { json = []; }
+    }
+    async function fetchLegacyData(url) {
+        const firstPromise = requestWithAgent(url, LEGACY_AGENTS[0]);
+        const secondPromise = sleep(1000).then(() => requestWithAgent(url, LEGACY_AGENTS[1]));
+        const [firstResults, secondResults] = await Promise.all([firstPromise, secondPromise]);
+        const combined = [];
+        const seenIds = new Set();
+        for (const item of [...firstResults, ...secondResults]) {
+            if (!item || !item.SubDownloadLink) continue;
+            const key = String(item.IDSubtitleFile || item.SubDownloadLink);
+            if (seenIds.has(key)) continue;
+            seenIds.add(key);
+            combined.push(item);
         }
-        return Array.isArray(json) ? json : [];
+        return combined;
     }
     const legacyFormat = r => {
         const f = String(r.SubFormat || '').toLowerCase();
