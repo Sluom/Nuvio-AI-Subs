@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 7000;
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const translationCache = {};
+const pinnedCorrectorMemCache = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 class RequestQueue {
     constructor(concurrency = 2) {
@@ -76,6 +77,64 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
             dropIfNotDone();
         }
     });
+}
+async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList) {
+    const freshSrt = (freshSrtList || []).slice(0, 4);
+    const freshAss = (freshAssList || []).slice(0, 4);
+    if (!targetId) return { pinnedSrt: freshSrt, pinnedAss: freshAss };
+    const pinKey = 'corr_pins_' + targetId;
+    let saved = pinnedCorrectorMemCache.get(pinKey);
+    if (!saved) {
+        try {
+            saved = await db.loadDoc('job', pinKey);
+            if (saved && (Array.isArray(saved.srt) || Array.isArray(saved.ass))) {
+                pinnedCorrectorMemCache.set(pinKey, saved);
+            }
+        } catch {
+            saved = null;
+        }
+    }
+    let changed = false;
+    const finalSrt = [];
+    const finalAss = [];
+    const savedSrt = (saved && Array.isArray(saved.srt)) ? saved.srt : [];
+    const savedAss = (saved && Array.isArray(saved.ass)) ? saved.ass : [];
+    const usedSrtUrls = new Set();
+    for (let i = 0; i < 4; i++) {
+        if (savedSrt[i] && savedSrt[i].url) {
+            finalSrt.push(savedSrt[i]);
+            usedSrtUrls.add(savedSrt[i].url);
+        }
+    }
+    for (const item of freshSrt) {
+        if (finalSrt.length >= 4) break;
+        if (item && item.url && !usedSrtUrls.has(item.url)) {
+            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl' });
+            usedSrtUrls.add(item.url);
+            changed = true;
+        }
+    }
+    const usedAssUrls = new Set();
+    for (let i = 0; i < 4; i++) {
+        if (savedAss[i] && savedAss[i].url) {
+            finalAss.push(savedAss[i]);
+            usedAssUrls.add(savedAss[i].url);
+        }
+    }
+    for (const item of freshAss) {
+        if (finalAss.length >= 4) break;
+        if (item && item.url && !usedAssUrls.has(item.url)) {
+            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl' });
+            usedAssUrls.add(item.url);
+            changed = true;
+        }
+    }
+    if ((!saved || changed) && (finalSrt.length > 0 || finalAss.length > 0)) {
+        const docToSave = { srt: finalSrt, ass: finalAss };
+        pinnedCorrectorMemCache.set(pinKey, docToSave);
+        db.saveDoc('job', pinKey, docToSave).catch(() => {});
+    }
+    return { pinnedSrt: finalSrt, pinnedAss: finalAss };
 }
 const armCache = new Map();
 async function mapKitsuViaArm(kitsuId, kitsuEp) {
@@ -140,7 +199,7 @@ async function mapKitsuToImdb(targetId) {
 const absCache = new Map();
 async function osCount(id) {
     try {
-        const r = await axios.get('https://opensubtitles-v3.strem.io/subtitles/series/' + id + '.json', { timeout: 5000 });
+        const r = await axios.get('https://opensubtitles-v3.strem.io/subtitles/series/' + id + '.json', { timeout: 3800 });
         return (r.data && Array.isArray(r.data.subtitles)) ? r.data.subtitles.length : 0;
     } catch {
         return 0;
@@ -160,7 +219,7 @@ async function resolveAbsoluteTtId(ttId) {
             return null;
         }
         const meta = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', {
-            timeout: 5000,
+            timeout: 4000,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
         });
         const videos = (meta.data && meta.data.meta && meta.data.meta.videos) || [];
@@ -272,18 +331,23 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
     }
     return results;
 }
-async function fetchMirrorEnglish(imdbId, season, episode, type) {
+async function fetchMirrorEnglish(imdbId, season, episode, type, sharedOsPromise = null) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     try {
-        const isSeries = type === 'series' || type === 'anime' || !!season;
-        const mediaType = isSeries ? 'series' : 'movie';
-        const mTargetId = isSeries && season ? [imdbId, season, episode || 1].join(':') : imdbId;
-        const response = await fetch('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + mTargetId + '.json', {
-            headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' }
-        });
-        if (!response.ok) return [];
-        const data = await response.json();
-        return (data.subtitles || [])
+        let subs = null;
+        if (sharedOsPromise) {
+            subs = await sharedOsPromise;
+        }
+        if (!Array.isArray(subs)) {
+            const isSeries = type === 'series' || type === 'anime' || !!season;
+            const mediaType = isSeries ? 'series' : 'movie';
+            const mTargetId = isSeries && season ? [imdbId, season, episode || 1].join(':') : imdbId;
+            const response = await axios.get('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + mTargetId + '.json', {
+                timeout: 3800
+            });
+            subs = (response.data && response.data.subtitles) || [];
+        }
+        return subs
             .filter(s => (s.lang || '').toLowerCase().startsWith('en') && s.url)
             .map(s => {
                 const rawUrl = (s.url || '').toLowerCase();
@@ -299,10 +363,10 @@ async function fetchMirrorEnglish(imdbId, season, episode, type) {
         return [];
     }
 }
-async function getOpenSubtitlesEnglish({ imdbId, season, episode, type }) {
+async function getOpenSubtitlesEnglish({ imdbId, season, episode, type, sharedOsPromise }) {
     const settled = await Promise.allSettled([
         fetchLegacyApiEnglish(imdbId, season, episode),
-        fetchMirrorEnglish(imdbId, season, episode, type)
+        fetchMirrorEnglish(imdbId, season, episode, type, sharedOsPromise)
     ]);
     return settled
         .filter(r => r.status === 'fulfilled')
@@ -484,7 +548,7 @@ const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
 const assExtRe = /\.(ass|ssa)$/i;
 const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
-function logSiteSummary({ arabicSubs, corrSrtList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched }) {
+function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched }) {
     const ready = {}, corr = {}, foreign = {};
     const add = (stats, site, isAss, n = 1) => {
         const k = getSourceLabel(site);
@@ -494,8 +558,8 @@ function logSiteSummary({ arabicSubs, corrSrtList, osClean, osHi, assOnly, subdl
     const siteOf = s => s._site || s._source;
     (arabicSubs.srt || []).forEach(s => add(ready, siteOf(s), false));
     (arabicSubs.ass || []).forEach(s => add(ready, siteOf(s), true));
-    corrSrtList.slice(0, 4).forEach(s => add(corr, siteOf(s), false));
-    (arabicSubs.ass || []).slice(0, 4).forEach(s => add(corr, siteOf(s), true));
+    (corrSrtList || []).slice(0, 4).forEach(s => add(corr, siteOf(s), false));
+    (corrAssList || arabicSubs.ass || []).slice(0, 4).forEach(s => add(corr, siteOf(s), true));
     add(foreign, 'opensubtitles', false, osClean.length + osHi.length);
     assOnly.forEach(s => add(foreign, s._source === 'os_legacy' ? 'os_legacy' : 'opensubtitles', true));
     subdlSubs.forEach(s => add(foreign, 'subdl', isAssSub(s)));
@@ -554,25 +618,35 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
         const osUrl = 'https://opensubtitles-v3.strem.io/subtitles/' + finalType + '/' + finalTargetId + '.json';
         console.log('[Fetch] بدء الجلب المتوازي الشامل (الجاهز + المصحح + AI) للعمل: ' + finalTargetId);
-        const [arabicSubs, r, assResults] = await Promise.all([
+        const sharedOsPromise = axios.get(osUrl, { timeout: 3800 })
+            .then(res => (res && res.data && Array.isArray(res.data.subtitles)) ? res.data.subtitles : [])
+            .catch(e => {
+                console.log('[Fetch] OpenSubtitles فشل لـ ' + finalTargetId + ': ' + e.message);
+                return [];
+            });
+        const [arabicSubs, osSubsList, assResults] = await Promise.all([
             getArabicSubsForCorrection({
                 imdbId: assImdbId,
                 season: assSeason,
                 episode: assEpisode,
                 type: finalType,
                 subdlKey: addonCfg.subdlKey,
-                subsourceKey: addonCfg.subsourceKey
+                subsourceKey: addonCfg.subsourceKey,
+                sharedOsPromise
             }).catch(err => {
                 console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
                 return { srt: [], ass: [], correctorSrt: [] };
             }),
-            axios.get(osUrl, { timeout: 5000 }).catch(e => {
-                console.log('[Fetch] OpenSubtitles فشل لـ ' + finalTargetId + ': ' + e.message);
-                return null;
-            }),
-            getOpenSubtitlesEnglish({ imdbId: assImdbId, season: assSeason, episode: assEpisode, type: finalType }).catch(() => [])
+            sharedOsPromise,
+            getOpenSubtitlesEnglish({
+                imdbId: assImdbId,
+                season: assSeason,
+                episode: assEpisode,
+                type: finalType,
+                sharedOsPromise
+            }).catch(() => [])
         ]);
-        if (r && r.data && r.data.subtitles) subtitlesData = r.data.subtitles;
+        if (Array.isArray(osSubsList)) subtitlesData = osSubsList;
         const extraAssFromOs = subtitlesData.filter(s => {
             if (!s || !s.url) return false;
             const lang = (s.lang || '').toLowerCase();
@@ -654,9 +728,14 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        const corrSrtList = (arabicSubs.correctorSrt && arabicSubs.correctorSrt.length > 0)
+        const initialCorrSrtList = (arabicSubs.correctorSrt && arabicSubs.correctorSrt.length > 0)
             ? arabicSubs.correctorSrt
             : (arabicSubs.srt || []);
+        const { pinnedSrt: corrSrtList, pinnedAss: corrAssList } = await resolvePinnedCorrectorTracks(
+            finalTargetId,
+            initialCorrSrtList,
+            arabicSubs.ass || []
+        );
         if (corrSrtList.length > 0) {
             const maxAraSrt = Math.min(4, corrSrtList.length);
             for (let i = 0; i < maxAraSrt; i++) {
@@ -668,12 +747,12 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        if (arabicSubs.ass && arabicSubs.ass.length > 0) {
-            const maxAraAss = Math.min(4, arabicSubs.ass.length);
+        if (corrAssList.length > 0) {
+            const maxAraAss = Math.min(4, corrAssList.length);
             for (let i = 0; i < maxAraAss; i++) {
                 transSubs.push({
                     id: 'nuvio-ara-ass-' + (i + 1),
-                    url: baseUrl + streamAraAss + '?url=' + encodeURIComponent(arabicSubs.ass[i].url) + '&track=' + (i + 1) + extraParams,
+                    url: baseUrl + streamAraAss + '?url=' + encodeURIComponent(corrAssList[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
                     title: 'Nuvio AI Arabic ASS ' + (i + 1)
                 });
@@ -701,7 +780,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        logSiteSummary({ arabicSubs, corrSrtList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched });
+        logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched });
         return res.json({ subtitles: transSubs });
     } catch (err) {
         console.error('[Subtitles Error] ' + targetId + ' - ' + err.message);
@@ -750,25 +829,32 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const kitsuId = req.query.kitsu || '';
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
     if (!targetUrl) return res.status(400).send('Missing URL');
-    const cacheKey = [label, targetId, targetUrl].join('_');
-    let cached = translationCache[cacheKey];
+    const isPinnedCorrector = (label === 'ARA-SRT' || label === 'ARA-ASS') && targetId;
+    const primaryCacheKey = isPinnedCorrector
+        ? [label, targetId, 'track' + trackNum].join('_')
+        : [label, targetId, targetUrl].join('_');
+    const legacyUrlCacheKey = [label, targetId, targetUrl].join('_');
+    let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
     if (!cached) {
-        const stored = await db.loadDoc('job', cacheKey);
-        if (!translationCache[cacheKey]) {
+        let stored = await db.loadDoc('job', primaryCacheKey);
+        if ((!stored || !stored.content) && isPinnedCorrector) {
+            stored = await db.loadDoc('job', legacyUrlCacheKey);
+        }
+        if (!translationCache[primaryCacheKey]) {
             if (stored && stored.content) {
-                translationCache[cacheKey] = { status: 'done', content: stored.content, complete: true };
+                translationCache[primaryCacheKey] = { status: 'done', content: stored.content, complete: true };
                 console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': الترجمة جاهزة من التخزين الدائم.');
             } else {
                 const cfg = parseConfig(req.params.config);
                 startTranslationJob({
-                    cacheKey, handler, targetUrl,
+                    cacheKey: primaryCacheKey, handler, targetUrl,
                     userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
                     extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey },
                     trackNum, label, targetId, kitsuId
                 });
             }
         }
-        cached = translationCache[cacheKey];
+        cached = translationCache[primaryCacheKey];
     }
     if (cached && cached.status === 'done') {
         return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, cached.content);
