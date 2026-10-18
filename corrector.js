@@ -600,9 +600,19 @@ function loadArabicSub(url, subsourceKey, targetId) {
   if (/\/oscom\/file\//i.test(url)) return getRawArabicSubContent(url, subsourceKey, epInfoOf(targetId));
   return fetchAndExtractSub(url, subsourceKey, resolveEpInfoForUrl(url, epInfoOf(targetId)));
 }
+async function loadSavedOrFetch(url, subsourceKey, targetId, trackNum) {
+  if (targetId && trackNum) {
+    const saved = await db.loadDoc('rawsrt', targetId + '_track' + trackNum);
+    if (saved && saved.text) {
+      console.log(`[مصحح Nuvio] Track ${trackNum}: المصدر جاهز من التخزين الدائم، ما أحتاج الموقع.`);
+      return saved.text;
+    }
+  }
+  return loadArabicSub(url, subsourceKey, targetId);
+}
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await loadArabicSub(subUrl, extraKeys.subsourceKey, targetId); }
+  try { originalText = await loadSavedOrFetch(subUrl, extraKeys.subsourceKey, targetId, extraKeys.trackNum); }
   catch (e) {
     console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message} <- ${subUrl}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة العربية الأصلي.\n\n", missing: 0, total: 0, failed: true };
