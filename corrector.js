@@ -6,7 +6,7 @@ const {
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
 const db = require('./db');
-const { resolveEpInfoForUrl } = require('./araFetch');
+const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
 const { buildNameBook, applyNameBook } = require('./name-book');
 const CORRECTOR_STRIP_BRACKETS = true;
@@ -596,9 +596,13 @@ const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
 };
+function loadArabicSub(url, subsourceKey, targetId) {
+  if (/\/oscom\/file\//i.test(url)) return getRawArabicSubContent(url, subsourceKey, epInfoOf(targetId));
+  return fetchAndExtractSub(url, subsourceKey, resolveEpInfoForUrl(url, epInfoOf(targetId)));
+}
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, resolveEpInfoForUrl(subUrl, epInfoOf(targetId))); }
+  try { originalText = await loadArabicSub(subUrl, extraKeys.subsourceKey, targetId); }
   catch (e) {
     console.log(`[مصحح Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message} <- ${subUrl}`);
     return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة العربية الأصلي.\n\n", missing: 0, total: 0, failed: true };
@@ -663,7 +667,7 @@ function rebuildAss(parsed, texts) {
 }
 async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, resolveEpInfoForUrl(subUrl, epInfoOf(targetId))); }
+  try { originalText = await loadArabicSub(subUrl, extraKeys.subsourceKey, targetId); }
   catch (e) {
     console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
