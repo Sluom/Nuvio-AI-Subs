@@ -2,7 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
-const { getOsCom, isOsComUrl, isOsComConfigured, downloadOsComText } = require('./oscom');
+const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
@@ -492,7 +492,8 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         { key: 'os_legacy', name: 'OS Legacy', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
         { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) },
         { key: 'subdl', name: 'SubDL', run: () => getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }) },
-        { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) }
+        { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) },
+        { key: 'oscom', name: 'OS.com', run: () => getOsCom({ imdbId, season, episode }) }
     ];
     const settled = await Promise.allSettled(
         sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), SOURCE_TIMEOUTS[d.key], d.name))
@@ -502,25 +503,9 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         osLegacyList: getList(0),
         osMirrorList: getList(1),
         subdlRawList: getList(2),
-        subsourceRawList: getList(3)
+        subsourceRawList: getList(3),
+        oscomRawList: getList(4)
     };
-}
-async function fetchOsComBackup(imdbId, season, episode) {
-    const run = (s, e) => withTimeout(Promise.resolve().then(() => getOsCom({ imdbId, season: s, episode: e })), SOURCE_TIMEOUTS.oscom, 'OS.com');
-    let list = await run(season, episode);
-    if (!list.length && season != null && parseInt(season, 10) > 1) {
-        const absEp = await getAbsoluteEpisodeNumber(imdbId, season, episode);
-        if (absEp) {
-            console.log('[جلب عربي - OS.com] ما لقيت بالرقم العادي، أجرب الرقم المطلق: الموسم 1 الحلقة ' + absEp);
-            const absOverride = { season: '1', episode: String(absEp) };
-            const absList = await run(1, absEp);
-            list = absList.map(item => {
-                if (item && item.url) rememberUrlEpOverride(item.url, absOverride);
-                return { ...item, _epOverride: absOverride };
-            });
-        }
-    }
-    return list;
 }
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
@@ -528,7 +513,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const cacheKey = [imdbId, season, episode, keyHash].join(':');
     const hit = resultCache.get(cacheKey);
     if (hit && Date.now() - hit.time < RESULT_TTL) return hit.value;
-    let { osLegacyList, osMirrorList, subdlRawList, subsourceRawList } = await fetchAllSourcesOnce({
+    let { osLegacyList, osMirrorList, subdlRawList, subsourceRawList, oscomRawList } = await fetchAllSourcesOnce({
         imdbId, season, episode, type, subdlKey, subsourceKey
     });
     const totalInitial = osLegacyList.length + osMirrorList.length + subdlRawList.length + subsourceRawList.length;
@@ -548,26 +533,26 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
             osMirrorList = [...osMirrorList, ...tagAbs(absRes.osMirrorList)];
             subdlRawList = [...subdlRawList, ...tagAbs(absRes.subdlRawList)];
             subsourceRawList = [...subsourceRawList, ...tagAbs(absRes.subsourceRawList)];
+            oscomRawList = [...oscomRawList, ...tagAbs(absRes.oscomRawList)];
         }
     }
     const legacyPre = lightweightPreFilter(osLegacyList, 'os_legacy');
     const osPre = lightweightPreFilter(osMirrorList, 'opensubtitles');
     const subdlPre = lightweightPreFilter(subdlRawList, 'subdl');
     const subsourcePre = lightweightPreFilter(subsourceRawList, 'subsource');
-    let oscomPre = { assList: [], srtList: [] };
+    const oscomPre = lightweightPreFilter(oscomRawList, 'oscom');
     const usableCount = [legacyPre, osPre, subdlPre, subsourcePre]
         .reduce((n, p) => n + p.assList.length + p.srtList.length, 0);
-    if (usableCount === 0) {
-        if (isOsComConfigured()) console.log('[جلب عربي - OS.com] المواقع الأخرى ما رجعت أي نتيجة، أجرب OS.com كاحتياط...');
-        const oscomRawList = await fetchOsComBackup(imdbId, season, episode);
-        oscomPre = lightweightPreFilter(oscomRawList, 'oscom');
+    const oscomIsBackup = usableCount === 0;
+    if (oscomIsBackup && oscomPre.assList.length + oscomPre.srtList.length > 0) {
+        console.log('[جلب عربي - OS.com] المواقع الأخرى ما رجعت أي نتيجة، فـ OS.com يشتغل كاحتياط (أفحص ' + (OSCOM_VERIFY_EACH * 2) + ' ملفات كحد أقصى).');
     }
     const zipCandidates = [];
     const subdlZips = [...subdlPre.assList, ...subdlPre.srtList.filter(x => !String(x.url).includes('strem.top'))].slice(0, 20);
     const subsourceZips = [...subsourcePre.assList, ...subsourcePre.srtList].slice(0, 20);
     const osZips = [...osPre.assList, ...osPre.srtList].slice(0, 20);
     const legacyZips = VERIFY_LEGACY ? [...legacyPre.assList, ...legacyPre.srtList].slice(0, 20) : [];
-    const oscomZips = [...oscomPre.assList.slice(0, OSCOM_VERIFY_EACH), ...oscomPre.srtList.slice(0, OSCOM_VERIFY_EACH)];
+    const oscomZips = oscomIsBackup ? [...oscomPre.assList.slice(0, OSCOM_VERIFY_EACH), ...oscomPre.srtList.slice(0, OSCOM_VERIFY_EACH)] : [];
     const maxZips = Math.max(subdlZips.length, subsourceZips.length, osZips.length, legacyZips.length, oscomZips.length);
     for (let i = 0; i < maxZips; i++) {
         if (subdlZips[i]) zipCandidates.push(subdlZips[i]);
