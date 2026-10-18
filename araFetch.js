@@ -5,7 +5,7 @@ const { getSubSource } = require('./subsource');
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
-const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3200, subdl: 3800, subsource: 3800 };
+const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3800, subdl: 3800, subsource: 3800 };
 const FAST_VERIFY_WINDOW_MS = 2800;
 const VERIFY_TIMEOUT_MS = 2600;
 const CONCURRENCY_LIMIT = 8;
@@ -179,35 +179,53 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
         return [];
     }
 }
-async function fetchOsMirrorArabic(imdbId, season, episode, type) {
+function isArabicOsEntry(s) {
+    if (!s || !s.url) return false;
+    const lang = String(s.lang || s.SubLanguageID || s.language || '').toLowerCase().trim();
+    if (lang === 'ar' || lang === 'ara' || lang === 'arabic' || lang.startsWith('ar')) return true;
+    const idAndUrl = String((s.id || '') + ' ' + (s.url || '')).toLowerCase();
+    return /(?:^|[\/_\-.=])(ara|arabic)(?:$|[\/_\-.&?])/.test(idAndUrl);
+}
+function mapOsArabicSubs(subsList) {
+    return (Array.isArray(subsList) ? subsList : [])
+        .filter(isArabicOsEntry)
+        .map((s, idx) => {
+            const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
+            const rawUrl = (s.url || '').toLowerCase();
+            const fileId = extractOsFileId(s.url) || String(s.id || (idx + 1));
+            const rawName = s.SubFileName || s.subtitleFileName || s.title || s.name || ('OS_Mirror_Ara_' + fileId);
+            const isAss = subFormat === 'ssa' || subFormat === 'ass' || assFileRe.test(rawUrl) || assFileRe.test(rawName);
+            return {
+                url: s.url,
+                format: isAss ? 'ass' : 'srt',
+                fileName: rawName,
+                _source: 'opensubtitles',
+                _site: 'opensubtitles',
+                _osFileId: fileId,
+                _sig: fileId || cleanPath(s.url)
+            };
+        });
+}
+async function fetchOsMirrorArabic(imdbId, season, episode, type, sharedOsPromise = null) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
+    if (sharedOsPromise) {
+        try {
+            const sharedSubs = await sharedOsPromise;
+            if (Array.isArray(sharedSubs) && sharedSubs.length > 0) {
+                return mapOsArabicSubs(sharedSubs);
+            }
+        } catch {
+        }
+    }
     const isSeries = type === 'series' || type === 'anime' || !!season;
     const mediaType = isSeries ? 'series' : 'movie';
     const targetId = isSeries && season ? [imdbId, season, episode || 1].join(':') : imdbId;
     try {
         const response = await axios.get('https://opensubtitles-v3.strem.io/subtitles/' + mediaType + '/' + targetId + '.json', {
-            headers: { 'User-Agent': 'NuvioSubtitles v1.0.0' },
-            timeout: 3200
+            timeout: 3600
         });
         const data = response.data || {};
-        return (data.subtitles || [])
-            .filter(s => (s.lang || '').toLowerCase().startsWith('ar') && s.url)
-            .map((s, idx) => {
-                const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
-                const rawUrl = (s.url || '').toLowerCase();
-                const fileId = extractOsFileId(s.url) || String(s.id || (idx + 1));
-                const rawName = s.SubFileName || s.title || s.name || ('OS_Mirror_Ara_' + fileId);
-                const isAss = subFormat === 'ssa' || subFormat === 'ass' || assFileRe.test(rawUrl) || assFileRe.test(rawName);
-                return {
-                    url: s.url,
-                    format: isAss ? 'ass' : 'srt',
-                    fileName: rawName,
-                    _source: 'opensubtitles',
-                    _site: 'opensubtitles',
-                    _osFileId: fileId,
-                    _sig: fileId || cleanPath(s.url)
-                };
-            });
+        return mapOsArabicSubs(data.subtitles || []);
     } catch (e) {
         console.log('[جلب عربي - OS Mirror] فشل: ' + e.message);
         return [];
@@ -443,10 +461,10 @@ function buildFinalArabicLists({ osLegacyAss, osPre, subdlPre, subsourcePre, ver
         }
     };
 }
-async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
+async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, subsourceKey, sharedOsPromise }) {
     const sourceDefs = [
         { key: 'os_legacy', name: 'OS Legacy', run: () => fetchOsLegacyArabic(imdbId, season, episode) },
-        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type) },
+        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type, sharedOsPromise) },
         { key: 'subdl', name: 'SubDL', run: () => getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }) },
         { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) }
     ];
@@ -461,14 +479,14 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         subsourceRawList: getList(3)
     };
 }
-async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
+async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey, sharedOsPromise }) {
     const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
     const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
     const cacheKey = [imdbId, season, episode, keyHash].join(':');
     const hit = resultCache.get(cacheKey);
     if (hit && Date.now() - hit.time < RESULT_TTL) return hit.value;
     let { osLegacyAss, osMirrorList, subdlRawList, subsourceRawList } = await fetchAllSourcesOnce({
-        imdbId, season, episode, type, subdlKey, subsourceKey
+        imdbId, season, episode, type, subdlKey, subsourceKey, sharedOsPromise
     });
     const totalInitial = osLegacyAss.length + osMirrorList.length + subdlRawList.length + subsourceRawList.length;
     if (season != null && parseInt(season, 10) > 1 && totalInitial < 2) {
@@ -477,7 +495,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
             console.log('[ترقيم مطلق 🔄] الموسم ' + season + ' الحلقة ' + episode + ' لم يرجع ترجمات كافية (' + totalInitial + '). جاري البحث بالرقم المطلق: الموسم 1 الحلقة ' + absEp + '...');
             const absOverride = { season: '1', episode: String(absEp) };
             const absRes = await fetchAllSourcesOnce({
-                imdbId, season: 1, episode: absEp, type, subdlKey, subsourceKey
+                imdbId, season: 1, episode: absEp, type, subdlKey, subsourceKey, sharedOsPromise: null
             });
             const tagAbs = list => list.map(item => {
                 if (item && item.url) rememberUrlEpOverride(item.url, absOverride);
