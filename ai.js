@@ -513,14 +513,14 @@ function zipEpisodeOf(name) {
   if (!base) return null;
   let m = base.match(/\bs\d{1,2}[ ._-]*e0*(\d{1,4})(?:v\d+)?\b|\b\d{1,2}x0*(\d{1,4})(?:v\d+)?\b/i);
   if (m) return Number(m[1] || m[2]);
-  m = base.match(/(?:^|[ ._\-\[\(])(?:ep|episode|e)[ ._-]*0*(\d{1,4})(?:v\d+)?(?=[ ._\-\]\)]|$)/i);
+  m = base.match(/(?:^|[ ._\-\[\(])(?:ep\vert{}episode\vert{}e)[ ._-]*0*(\d{1,4})(?:v\d+)?(?=[ ._\-\]\)]|$)/i);
   if (m) return Number(m[1]);
   m = base.match(/^0*(\d{1,4})(?:v\d+)?$/i);
   if (m) return Number(m[1]);
   const clean = base
     .replace(/\[[0-9a-f]{8}\]/gi, ' ')
     .replace(/\[\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\]/g, ' ')
-    .replace(/\(\s*(?:19|20)\d{2}\s*\)/g, ' ')
+    .replace(/\(\s*(?:19\vert{}20)\d{2}\s*\)/g, ' ')
     .replace(/(?:480|576|720|1080|2160)[pi]|[xh]\.?26[45]|10\s*bit|8\s*bit|yuv\d+p\d+|(?:\b|_)(?:19|20)\d{2}(?:\b|_)/gi, ' ');
   m = clean.match(/[ ._]+-[ ._]*0*(\d{1,4})(?:v\d+)?(?=[ ._\-\[\(]|$)/i);
   if (m) return Number(m[1]);
@@ -539,60 +539,120 @@ const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
 };
+const FETCH_TRACE = process.env.OSCOM_TEST === '1' || process.env.FETCH_TRACE === '1';
+function traceClk() {
+  const d = new Date();
+  const p = (n, w) => String(n).padStart(w, '0');
+  return `${p(d.getUTCHours(), 2)}:${p(d.getUTCMinutes(), 2)}:${p(d.getUTCSeconds(), 2)}.${p(d.getUTCMilliseconds(), 3)}`;
+}
 async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   const decodedUrl = safeDecode(subUrl);
   const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
   const hit = subTextCache.get(memKey);
-  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
+  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) {
+    if (FETCH_TRACE) console.log(`[Trace-Fetch] من كاش الذاكرة | ${decodedUrl.slice(0, 90)}`);
+    return hit.text;
+  }
   const ssKey = String(subsourceKey || '').trim();
   const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
   const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
   const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
-  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
-  let response = null;
-  let lastErr = null;
-  for (let i = 0; i < agents.length; i++) {
-    const ua = agents[i];
-    const headers = isOsOrg
-      ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
-      : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
-    if (isSubdl) headers['Referer'] = 'https://subdl.com/';
-    if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
-    try {
-      response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      const st = e.response?.status || e.code || 'ERR';
-      console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
-      if (!(e.response?.status === 403 && i < agents.length - 1)) break;
-    }
-  }
-  if (!response) throw lastErr;
-  let buffer = Buffer.from(response.data);
-  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
-  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-    const zip = new AdmZip(buffer);
-    const cands = zip.getEntries().filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
-    if (cands.length === 0) {
-      throw new Error('ملف الـ ZIP لا يحتوي على أي ملف ترجمة صالح (srt/ass/ssa)');
-    }
-    let entry = cands[0];
-    if (epInfo && epInfo.episode != null) {
-      if (cands.length > 1) {
-        entry = cands.find(e => zipNameHasEpisode(e.entryName, epInfo.episode));
-        if (!entry) throw new Error(`الـ ZIP فيه ${cands.length} ملف ولا يوجد ملف للحلقة ${epInfo.episode}`);
-      } else if (entry && zipEpisodeOf(entry.entryName) != null && !zipNameHasEpisode(entry.entryName, epInfo.episode)) {
-        throw new Error(`ملف الـ ZIP (${entry.entryName}) ليس للحلقة ${epInfo.episode}`);
+  const site = isOsOrg ? 'opensubtitles.org' : isSubsource ? 'subsource' : isSubdl ? 'subdl' : 'other';
+  const T = {
+    start: Date.now(), startClk: traceClk(), dl: 0, unzip: 0, match: 0, decode: 0,
+    bytes: 0, kind: 'نص', entries: 0, cands: 0, picked: '', status: '-', tries: 0
+  };
+  let outcome = 'نجح';
+  try {
+    const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
+    let response = null;
+    let lastErr = null;
+    const tDl = Date.now();
+    for (let i = 0; i < agents.length; i++) {
+      const ua = agents[i];
+      const headers = isOsOrg
+        ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
+        : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+      if (isSubdl) headers['Referer'] = 'https://subdl.com/';
+      if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
+      T.tries++;
+      try {
+        response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const st = e.response?.status || e.code || 'ERR';
+        T.status = String(st);
+        console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
+        if (!(e.response?.status === 403 && i < agents.length - 1)) break;
       }
     }
-    if (entry) buffer = entry.getData();
+    T.dl = Date.now() - tDl;
+    if (!response) throw lastErr;
+    T.status = String(response.status);
+    let buffer = Buffer.from(response.data);
+    T.bytes = buffer.length;
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      const tU = Date.now();
+      buffer = zlib.gunzipSync(buffer);
+      T.unzip += Date.now() - tU;
+      T.kind = 'gz';
+    }
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      T.kind = T.kind === 'gz' ? 'gz+zip' : 'zip';
+      const tZ = Date.now();
+      const zip = new AdmZip(buffer);
+      const allEntries = zip.getEntries();
+      T.unzip += Date.now() - tZ;
+      T.entries = allEntries.length;
+      const cands = allEntries.filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
+      T.cands = cands.length;
+      if (cands.length === 0) {
+        throw new Error('ملف الـ ZIP لا يحتوي على أي ملف ترجمة صالح (srt/ass/ssa)');
+      }
+      let entry = cands[0];
+      const tM = Date.now();
+      try {
+        if (epInfo && epInfo.episode != null) {
+          if (cands.length > 1) {
+            entry = cands.find(e => zipNameHasEpisode(e.entryName, epInfo.episode));
+            if (!entry) throw new Error(`الـ ZIP فيه ${cands.length} ملف ولا يوجد ملف للحلقة ${epInfo.episode}`);
+          } else if (entry && zipEpisodeOf(entry.entryName) != null && !zipNameHasEpisode(entry.entryName, epInfo.episode)) {
+            throw new Error(`ملف الـ ZIP (${entry.entryName}) ليس للحلقة ${epInfo.episode}`);
+          }
+        }
+      } finally {
+        T.match = Date.now() - tM;
+      }
+      if (entry) {
+        T.picked = entry.entryName;
+        const tG = Date.now();
+        buffer = entry.getData();
+        T.unzip += Date.now() - tG;
+      }
+    }
+    const tDec = Date.now();
+    const text = fixArabicEncoding(buffer).toString('utf-8');
+    T.decode = Date.now() - tDec;
+    subTextCache.set(memKey, { time: Date.now(), text });
+    if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
+    return text;
+  } catch (e) {
+    outcome = 'فشل: ' + (e && e.message ? e.message : e);
+    throw e;
+  } finally {
+    if (FETCH_TRACE) {
+      const s1 = ms => (ms / 1000).toFixed(1) + 'ث';
+      const zipPart = (T.kind === 'zip' || T.kind === 'gz+zip')
+        ? ` | مطابقة الحلقة ${s1(T.match)} (ملفات بالـzip=${T.entries}، مرشحة=${T.cands}${T.picked ? '، المختار=' + String(T.picked).slice(0, 50) : ''})`
+        : '';
+      console.log(`[Trace-Fetch] ${site} | بدأ ${T.startClk} UTC | انتهى ${traceClk()} UTC | المدة ${s1(Date.now() - T.start)}`
+        + ` | تحميل ${s1(T.dl)} (HTTP ${T.status}، ${(T.bytes / 1024).toFixed(1)}KB، محاولات=${T.tries})`
+        + ` | نوع=${T.kind}${T.unzip ? ' فك=' + s1(T.unzip) : ''}${zipPart}`
+        + ` | ترميز ${s1(T.decode)} | ${outcome}`);
+    }
   }
-  const text = fixArabicEncoding(buffer).toString('utf-8');
-  subTextCache.set(memKey, { time: Date.now(), text });
-  if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
-  return text;
 }
 function prepCueText(t) {
   if (/[A-Z]/.test(t) && t === t.toUpperCase() && !t.includes('[')) return `[${t}]`;
@@ -869,4 +929,3 @@ module.exports = {
     extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
   }
 };
- 
