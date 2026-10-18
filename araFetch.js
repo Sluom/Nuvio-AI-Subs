@@ -2,14 +2,17 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
+const { getOsCom, isOsComUrl, isOsComConfigured, downloadOsComText } = require('./oscom');
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['VLSub 0.10.3', 'TemporaryUserAgent'];
-const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3200, subdl: 3800, subsource: 3800 };
+const SOURCE_TIMEOUTS = { os_legacy: 3500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500 };
 const FAST_VERIFY_WINDOW_MS = 2800;
 const VERIFY_TIMEOUT_MS = 2600;
 const CONCURRENCY_LIMIT = 8;
 const MAX_SRT_PER_SITE = 20;
+const OSCOM_VERIFY_EACH = 2;
+const CORRECTOR_MAX = 4;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const VERIFY_LEGACY = process.env.OS_LEGACY_VERIFY !== '0';
@@ -64,6 +67,12 @@ function rememberUrlEpOverride(url, epOverride) {
 function resolveEpInfoForUrl(url, defaultEpInfo) {
     if (!url) return defaultEpInfo;
     return urlEpOverrideMap.get(cleanPath(url)) || defaultEpInfo;
+}
+async function loadSubText(url, subsourceKey, epInfo) {
+    const osComId = isOsComUrl(url);
+    if (osComId) return downloadOsComText(osComId);
+    const { fetchAndExtractSub } = require('./ai').shared;
+    return fetchAndExtractSub(url, subsourceKey, epInfo);
 }
 async function getAbsoluteEpisodeNumber(imdbId, season, episode) {
     const sNum = parseInt(season, 10);
@@ -260,14 +269,14 @@ function detectAssContent(text, item) {
 async function verifyArabicSub(s, subsourceKey, epInfo = null) {
     let timer;
     try {
-        const { fetchAndExtractSub, extractCuesUniversal } = require('./ai').shared;
+        const { extractCuesUniversal } = require('./ai').shared;
         const effectiveEpInfo = s._epOverride || resolveEpInfoForUrl(s.url, epInfo);
         const primaryRawKey = makeRawKey(s.url, epInfo);
         const effectiveRawKey = makeRawKey(s.url, effectiveEpInfo);
         let text = getRawCache(primaryRawKey) || getRawCache(effectiveRawKey);
         if (!text) {
             text = await Promise.race([
-                fetchAndExtractSub(s.url, subsourceKey, effectiveEpInfo),
+                loadSubText(s.url, subsourceKey, effectiveEpInfo),
                 new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), VERIFY_TIMEOUT_MS); })
             ]);
         }
@@ -283,6 +292,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null) {
         const cues = extractCuesUniversal(text);
         const check = isCleanArabicSrtText(text, cues);
         if (!check.ok) {
+            s._bad = true;
             return null;
         }
         const sig = crypto.createHash('md5')
@@ -302,8 +312,7 @@ async function getRawArabicSubContent(targetUrl, subsourceKey, epInfo = null) {
     const effectiveKey = makeRawKey(targetUrl, effectiveEpInfo);
     const cached = getRawCache(primaryKey) || getRawCache(effectiveKey);
     if (cached) return cached;
-    const { fetchAndExtractSub } = require('./ai').shared;
-    const text = await fetchAndExtractSub(targetUrl, subsourceKey, effectiveEpInfo);
+    const text = await loadSubText(targetUrl, subsourceKey, effectiveEpInfo);
     if (!text || !String(text).trim()) {
         throw new Error('ملف الترجمة فارغ');
     }
@@ -385,17 +394,28 @@ function lightweightPreFilter(list, siteKey) {
     }
     return { assList, srtList };
 }
-function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, verifiedZipItems }) {
-    const allAss = [];
+function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, verifiedZipItems }) {
     const verifiedUrls = new Set();
     for (const v of verifiedZipItems) {
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
-        if (v && v.format === 'ass') allAss.push(v);
     }
-    for (const a of [...subdlPre.assList, ...subsourcePre.assList, ...osPre.assList, ...legacyPre.assList]) {
-        if (!verifiedUrls.has(cleanPath(a.url))) {
-            allAss.push(a);
+    function collectSiteAss(siteKey, preAssList) {
+        const out = [];
+        const seen = new Set();
+        for (const v of verifiedZipItems) {
+            if (!v || v._site !== siteKey || v.format !== 'ass') continue;
+            const u = cleanPath(v.url);
+            if (seen.has(u)) continue;
+            seen.add(u);
+            out.push(v);
         }
+        for (const a of preAssList) {
+            const u = cleanPath(a.url);
+            if (seen.has(u) || verifiedUrls.has(u)) continue;
+            seen.add(u);
+            out.push(a);
+        }
+        return out;
     }
     function collectSiteSrt(siteKey, preSrtList) {
         const out = [];
@@ -428,26 +448,30 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, verif
         }
         return out;
     }
+    // الأولوية: SubDL ثم Subsource ثم البقية (OS Mirror ثم OS Legacy ثم OS.com)
+    // داخل كل موقع: المفحوص أولاً ثم الباقي
+    const allAss = [
+        ...collectSiteAss('subdl', subdlPre.assList),
+        ...collectSiteAss('subsource', subsourcePre.assList),
+        ...collectSiteAss('opensubtitles', osPre.assList),
+        ...collectSiteAss('os_legacy', legacyPre.assList),
+        ...collectSiteAss('oscom', oscomPre.assList)
+    ];
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
     const subsourceSrt = collectSiteSrt('subsource', subsourcePre.srtList);
     const osSrt = collectSiteSrt('opensubtitles', osPre.srtList);
     const legacySrt = collectSiteSrt('os_legacy', legacyPre.srtList);
-    const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt];
-    const correctorCandidates = [
-        ...verifiedZipItems.filter(v => v && v.format === 'srt'),
-        ...subdlSrt,
-        ...subsourceSrt,
-        ...osSrt,
-        ...legacySrt
-    ];
+    const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
+    const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt, ...oscomSrt];
+    // المصحح ياخذ أول النتائج بالأولوية (نفسها تظهر أيضاً في الجاهز)، ويتجاوز الملفات التالفة المؤكدة
     const seenCorr = new Set();
     const correctorSrt = [];
-    for (const c of correctorCandidates) {
+    for (const c of readySrt) {
         const u = cleanPath(c.url);
-        if (seenCorr.has(u)) continue;
+        if (c._bad || seenCorr.has(u)) continue;
         seenCorr.add(u);
         correctorSrt.push(c);
-        if (correctorSrt.length >= 4) break;
+        if (correctorSrt.length >= CORRECTOR_MAX) break;
     }
     return {
         ass: allAss,
@@ -458,7 +482,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, verif
             subdlSrt: subdlSrt.length,
             subsourceSrt: subsourceSrt.length,
             osSrt: osSrt.length,
-            legacySrt: legacySrt.length
+            legacySrt: legacySrt.length,
+            oscomSrt: oscomSrt.length
         }
     };
 }
@@ -479,6 +504,23 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         subdlRawList: getList(2),
         subsourceRawList: getList(3)
     };
+}
+async function fetchOsComBackup(imdbId, season, episode) {
+    const run = (s, e) => withTimeout(Promise.resolve().then(() => getOsCom({ imdbId, season: s, episode: e })), SOURCE_TIMEOUTS.oscom, 'OS.com');
+    let list = await run(season, episode);
+    if (!list.length && season != null && parseInt(season, 10) > 1) {
+        const absEp = await getAbsoluteEpisodeNumber(imdbId, season, episode);
+        if (absEp) {
+            console.log('[جلب عربي - OS.com] ما لقيت بالرقم العادي، أجرب الرقم المطلق: الموسم 1 الحلقة ' + absEp);
+            const absOverride = { season: '1', episode: String(absEp) };
+            const absList = await run(1, absEp);
+            list = absList.map(item => {
+                if (item && item.url) rememberUrlEpOverride(item.url, absOverride);
+                return { ...item, _epOverride: absOverride };
+            });
+        }
+    }
+    return list;
 }
 async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey }) {
     const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
@@ -512,29 +554,39 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const osPre = lightweightPreFilter(osMirrorList, 'opensubtitles');
     const subdlPre = lightweightPreFilter(subdlRawList, 'subdl');
     const subsourcePre = lightweightPreFilter(subsourceRawList, 'subsource');
+    let oscomPre = { assList: [], srtList: [] };
+    const usableCount = [legacyPre, osPre, subdlPre, subsourcePre]
+        .reduce((n, p) => n + p.assList.length + p.srtList.length, 0);
+    if (usableCount === 0) {
+        if (isOsComConfigured()) console.log('[جلب عربي - OS.com] المواقع الأخرى ما رجعت أي نتيجة، أجرب OS.com كاحتياط...');
+        const oscomRawList = await fetchOsComBackup(imdbId, season, episode);
+        oscomPre = lightweightPreFilter(oscomRawList, 'oscom');
+    }
     const zipCandidates = [];
     const subdlZips = [...subdlPre.assList, ...subdlPre.srtList.filter(x => !String(x.url).includes('strem.top'))].slice(0, 20);
     const subsourceZips = [...subsourcePre.assList, ...subsourcePre.srtList].slice(0, 20);
     const osZips = [...osPre.assList, ...osPre.srtList].slice(0, 20);
     const legacyZips = VERIFY_LEGACY ? [...legacyPre.assList, ...legacyPre.srtList].slice(0, 20) : [];
-    const maxZips = Math.max(subdlZips.length, subsourceZips.length, osZips.length, legacyZips.length);
+    const oscomZips = [...oscomPre.assList.slice(0, OSCOM_VERIFY_EACH), ...oscomPre.srtList.slice(0, OSCOM_VERIFY_EACH)];
+    const maxZips = Math.max(subdlZips.length, subsourceZips.length, osZips.length, legacyZips.length, oscomZips.length);
     for (let i = 0; i < maxZips; i++) {
         if (subdlZips[i]) zipCandidates.push(subdlZips[i]);
         if (subsourceZips[i]) zipCandidates.push(subsourceZips[i]);
         if (osZips[i]) zipCandidates.push(osZips[i]);
         if (legacyZips[i]) zipCandidates.push(legacyZips[i]);
+        if (oscomZips[i]) zipCandidates.push(oscomZips[i]);
     }
     const epInfo = (season != null && episode != null) ? { season, episode } : null;
     const job = runFastParallelCheck(zipCandidates, subsourceKey, epInfo, FAST_VERIFY_WINDOW_MS);
     await job.windowPromise;
     const snapshot = job.verified.slice();
-    const value = buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, verifiedZipItems: snapshot });
+    const value = buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, verifiedZipItems: snapshot });
     if (value.ass.length > 0 || value.srt.length > 0) {
         setResultCache(cacheKey, value);
     }
     job.allPromise.then(() => {
         if (job.verified.length > snapshot.length) {
-            const updated = buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, verifiedZipItems: job.verified });
+            const updated = buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, verifiedZipItems: job.verified });
             setResultCache(cacheKey, updated);
         }
     }).catch(() => {});
