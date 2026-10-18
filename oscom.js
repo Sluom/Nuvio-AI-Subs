@@ -1,16 +1,5 @@
 const axios = require('axios');
-
-// ============================================================
-//  OpenSubtitles.com (الموقع الجديد) - احتياطي
-//  المفاتيح تُقرأ من Render فقط (Environment) بهذه الأسماء:
-//    OSCOM_API_KEY  = مفتاح API
-//    OSCOM_USER     = اسم المستخدم
-//    OSCOM_PASS     = الباسورد
-//  لازم الثلاثة معاً، وإلا يبقى الموقع متوقف بدون أي خطأ.
-// ============================================================
-
 module.exports = { getOsCom, isOsComUrl, isOsComConfigured, downloadOsComText };
-
 const DEFAULT_HOST = 'api.opensubtitles.com';
 const APP_UA = 'NuvioAISubs v1.0';
 const SEARCH_TIMEOUT = 3000;
@@ -20,12 +9,10 @@ const MAX_TEXT_CACHE = 60;
 const badExtRe = /\.(rar|7z|zip|sub|idx|vtt|smi|txt)$/i;
 const assFileRe = /\.(ass|ssa)$/i;
 const fileUrlRe = /\/oscom\/file\/(\d+)/i;
-
 let session = null;
 let loginPromise = null;
 let blockedUntil = 0;
 const textCache = new Map();
-
 function getCreds() {
     return {
         apiKey: String(process.env.OSCOM_API_KEY || '').trim(),
@@ -33,12 +20,10 @@ function getCreds() {
         password: String(process.env.OSCOM_PASS || '')
     };
 }
-
 function isOsComConfigured() {
     const { apiKey, username, password } = getCreds();
     return !!(apiKey && username && password);
 }
-
 function buildHeaders(extra) {
     return Object.assign({
         'Api-Key': getCreds().apiKey,
@@ -47,18 +32,15 @@ function buildHeaders(extra) {
         'Accept': 'application/json'
     }, extra || {});
 }
-
 function buildQuery(params) {
     return Object.keys(params).sort()
         .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
         .join('&');
 }
-
 function isOsComUrl(url) {
     const m = String(url || '').match(fileUrlRe);
     return m ? m[1] : null;
 }
-
 async function doLogin() {
     const { apiKey, username, password } = getCreds();
     try {
@@ -81,14 +63,12 @@ async function doLogin() {
         return null;
     }
 }
-
 async function login(force) {
     if (!force && session && Date.now() < session.exp) return session;
     if (loginPromise) return loginPromise;
     loginPromise = doLogin().finally(() => { loginPromise = null; });
     return loginPromise;
 }
-
 function rankTuple(a) {
     return [
         a.ai_translated ? 0 : 1,
@@ -97,7 +77,6 @@ function rankTuple(a) {
         Number(a.download_count) || 0
     ];
 }
-
 function compareRank(x, y) {
     const A = rankTuple(x), B = rankTuple(y);
     for (let i = 0; i < A.length; i++) {
@@ -105,7 +84,6 @@ function compareRank(x, y) {
     }
     return 0;
 }
-
 async function getOsCom({ imdbId, season, episode }) {
     const { apiKey, username, password } = getCreds();
     if (!apiKey || !username || !password) {
@@ -163,7 +141,6 @@ async function getOsCom({ imdbId, season, episode }) {
         return [];
     }
 }
-
 function decodeSubBuffer(data) {
     const buf = Buffer.from(data);
     if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf);
@@ -174,7 +151,6 @@ function decodeSubBuffer(data) {
     }
     return text;
 }
-
 function setTextCache(id, text) {
     if (textCache.size >= MAX_TEXT_CACHE && !textCache.has(id)) {
         const oldest = textCache.keys().next().value;
@@ -182,7 +158,6 @@ function setTextCache(id, text) {
     }
     textCache.set(id, { time: Date.now(), text });
 }
-
 async function downloadOsComText(fileId) {
     const id = String(fileId);
     const cached = textCache.get(id);
