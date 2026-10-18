@@ -24,7 +24,6 @@ const fileUrlRe = /\/oscom\/file\/(\d+)/i;
 let session = null;
 let loginPromise = null;
 let blockedUntil = 0;
-let warnedMissing = false;
 const textCache = new Map();
 
 function getCreds() {
@@ -110,10 +109,7 @@ function compareRank(x, y) {
 async function getOsCom({ imdbId, season, episode }) {
     const { apiKey, username, password } = getCreds();
     if (!apiKey || !username || !password) {
-        if (!warnedMissing) {
-            warnedMissing = true;
-            console.log('[جلب عربي - OS.com] غير مفعّل: ناقص OSCOM_API_KEY أو OSCOM_USER أو OSCOM_PASS في Render.');
-        }
+        console.log('[جلب عربي - OS.com] غير مفعّل: ناقص OSCOM_API_KEY أو OSCOM_USER أو OSCOM_PASS في Render.');
         return [];
     }
     if (!imdbId || !imdbId.startsWith('tt')) return [];
