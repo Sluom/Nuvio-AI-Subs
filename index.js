@@ -542,11 +542,12 @@ const SOURCE_LABELS = {
     subsource: 'subsource',
     os_legacy: 'opensubtitles.org',
     os_mirror: 'opensubtitles',
-    opensubtitles: 'opensubtitles'
+    opensubtitles: 'opensubtitles',
+    oscom: 'opensubtitles.com'
 };
 const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
 const assExtRe = /\.(ass|ssa)$/i;
-const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org'];
+const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
 function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched }) {
     const ready = {}, corr = {}, foreign = {};
@@ -566,7 +567,7 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
     subsourceSubs.forEach(s => add(foreign, 'subsource', isAssSub(s)));
     const fmt = (st, k) => 'SRT=' + (st[k] ? st[k].srt : 0) + ' ASS=' + (st[k] ? st[k].ass : 0);
     SITE_ORDER.forEach(k => {
-        const foreignTxt = (!extFetched && (k === 'subdl' || k === 'subsource')) ? '-' : fmt(foreign, k);
+        const foreignTxt = (k === 'opensubtitles.com' || (!extFetched && (k === 'subdl' || k === 'subsource'))) ? '-' : fmt(foreign, k);
         console.log('[جلب] ' + k + ' | جاهز ' + fmt(ready, k) + ' | مصحح ' + fmt(corr, k) + ' | أجنبي ' + foreignTxt);
     });
 }
@@ -816,7 +817,7 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
         return sendSub(res, mime, 'Ready-Track' + trackNum + '.' + ext, content);
     } catch (e) {
         console.error('[Raw Sub Error] Track ' + trackNum + ':', e.message);
-        if (!/\.zip(\?|$)/i.test(targetUrl)) {
+        if (!/\.zip(\?|$)/i.test(targetUrl) && !/\/oscom\/file\//i.test(targetUrl)) {
             return res.redirect(302, targetUrl);
         }
         return res.status(502).send('Failed to load ready subtitle');
@@ -879,4 +880,4 @@ app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
 });
-module.exports = app;
+module.exports = app; 
