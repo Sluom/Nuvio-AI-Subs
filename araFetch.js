@@ -142,16 +142,21 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
         let response;
         for (let i = 0; i < LEGACY_AGENTS.length; i++) {
             const ua = LEGACY_AGENTS[i];
-            response = await fetch(url, {
-                headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' }
+            response = await axios.get(url, {
+                headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' },
+                timeout: 3000,
+                validateStatus: () => true
             });
             if (response.status !== 403) break;
         }
-        if (!response || !response.ok) {
+        if (!response || response.status < 200 || response.status >= 300) {
             console.log('[جلب عربي - OS Legacy] HTTP ' + (response ? response.status : 'بدون رد'));
             return [];
         }
-        const json = await response.json();
+        let json = response.data;
+        if (typeof json === 'string') {
+            try { json = JSON.parse(json); } catch { json = []; }
+        }
         return Array.isArray(json) ? json : [];
     }
     const legacyFormat = r => {
@@ -190,7 +195,8 @@ async function fetchOsLegacyArabic(imdbId, season, episode) {
         console.log('[جلب عربي - OS Legacy] رجع ' + data.length + ' | بعد الفلترة: SRT=' + nSrt + ' ASS=' + (out.length - nSrt) + (LEGACY_DIRECT_LINK ? ' | رابط مباشر' : ''));
         return out;
     } catch (e) {
-        console.log('[جلب عربي - OS Legacy] خطأ: ' + e.message);
+        const why = e.code || (e.cause && (e.cause.code || e.cause.message)) || '';
+        console.log('[جلب عربي - OS Legacy] خطأ: ' + e.message + (why ? ' | السبب: ' + why : ''));
         return [];
     }
 }
