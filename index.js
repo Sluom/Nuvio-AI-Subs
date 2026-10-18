@@ -571,6 +571,36 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
         console.log('[جلب] ' + k + ' | جاهز ' + fmt(ready, k) + ' | مصحح ' + fmt(corr, k) + ' | أجنبي ' + foreignTxt);
     });
 }
+const rawPersistRunning = new Set();
+const RAW_PERSIST_DELAY_MS = 6000;
+async function persistRawTracks(targetId, list, subsourceKey) {
+    if (!targetId || !list || !list.length || rawPersistRunning.has(targetId)) return;
+    rawPersistRunning.add(targetId);
+    try {
+        await sleep(RAW_PERSIST_DELAY_MS);
+        const epInfo = parseEpInfoFromTargetId(targetId);
+        for (let i = 0; i < Math.min(4, list.length); i++) {
+            const n = i + 1;
+            const item = list[i];
+            if (!item || !item.url) continue;
+            try {
+                const done = await db.loadDoc('job', 'ARA-SRT_' + targetId + '_track' + n);
+                if (done && done.content) continue;
+                const had = await db.loadDoc('rawsrt', targetId + '_track' + n);
+                if (had && had.text) continue;
+                const text = await getRawArabicSubContent(item.url, subsourceKey, epInfo);
+                if (text && String(text).trim()) {
+                    const ok = await db.saveDoc('rawsrt', targetId + '_track' + n, { text: String(text) });
+                    if (ok) console.log('[حفظ المصدر] Track ' + n + ' انحفظ بالـ db (' + (item._site || item._source || '?') + ')');
+                }
+            } catch (e) {
+                console.log('[حفظ المصدر] Track ' + n + ' ما انحفظ: ' + e.message);
+            }
+        }
+    } finally {
+        rawPersistRunning.delete(targetId);
+    }
+}
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -737,6 +767,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             initialCorrSrtList,
             arabicSubs.ass || []
         );
+        persistRawTracks(finalTargetId, corrSrtList, addonCfg.subsourceKey).catch(() => {});
         if (corrSrtList.length > 0) {
             const maxAraSrt = Math.min(4, corrSrtList.length);
             for (let i = 0; i < maxAraSrt; i++) {
@@ -850,7 +881,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
                 startTranslationJob({
                     cacheKey: primaryCacheKey, handler, targetUrl,
                     userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
-                    extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey },
+                    extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey, trackNum },
                     trackNum, label, targetId, kitsuId
                 });
             }
@@ -880,4 +911,4 @@ app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
 });
-module.exports = app; 
+module.exports = app;
