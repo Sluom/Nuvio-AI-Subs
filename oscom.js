@@ -38,6 +38,37 @@ let blockedUntil = 0;
 let loggedKeysOnce = false;
 const textCache = new Map();
 
+// ---------- محدد التحميل (يمنع 429): 3 تحميلات متزامنة كحد أقصى وفاصل بين بداياتها ----------
+const DL_CONCURRENCY = 3;
+const DL_GAP_MS = 250;
+const RATE_RETRY_MAX = 2;
+let dlActive = 0;
+let dlNextStart = 0;
+const dlWaiters = [];
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function acquireDlSlot() {
+    await new Promise(resolve => {
+        const go = () => { dlActive++; resolve(); };
+        if (dlActive < DL_CONCURRENCY) go(); else dlWaiters.push(go);
+    });
+    const now = Date.now();
+    const startAt = Math.max(now, dlNextStart);
+    dlNextStart = startAt + DL_GAP_MS;
+    if (startAt > now) await sleep(startAt - now);
+}
+
+function releaseDlSlot() {
+    dlActive--;
+    const next = dlWaiters.shift();
+    if (next) next();
+}
+
+function retryWaitMs(res) {
+    const ra = Number(res && res.headers && res.headers['retry-after']);
+    return (ra > 0 && ra <= 3) ? Math.round(ra * 1000) : 1000;
+}
+
 // ---------- أدوات اللوغ ----------
 const pad = (n, w) => String(n).padStart(w, '0');
 function clk() {
@@ -267,11 +298,18 @@ async function downloadOsComText(fileId) {
     // في وضع الاختبار نتجاوز الكاش حتى نقيس الزمن الحقيقي
     if (!TEST && cached && Date.now() - cached.time < TEXT_TTL) return cached.text;
 
+    const tQueue0 = Date.now();
+    await acquireDlSlot();
+    const queueMs = Date.now() - tQueue0;
     const T0 = Date.now();
     const startClk = clk();
     let stage = 'تسجيل الدخول';
     const t = { login: 0, link: 0, file: 0 };
+    const retries = { link: 0, file: 0 };
     let remaining = null;
+    const extraInfo = () =>
+        (queueMs >= 50 ? ' | انتظار الدور ' + sec(queueMs) : '')
+        + (retries.link || retries.file ? ' | إعادات 429: رابط=' + retries.link + ' ملف=' + retries.file : '');
     try {
         if (Date.now() < blockedUntil) {
             throw new Error('حصة تحميل OS.com خلصت مؤقتاً (باقي ' + Math.ceil((blockedUntil - Date.now()) / 60000) + ' دقيقة)');
@@ -284,16 +322,25 @@ async function downloadOsComText(fileId) {
         stage = 'طلب رابط التحميل';
         const tk = Date.now();
         let res;
-        for (let attempt = 0; attempt < 2; attempt++) {
+        let loginRetried = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
             res = await axios.post('https://' + s.host + '/api/v1/download', { file_id: Number(id) }, {
                 headers: buildHeaders({ Authorization: 'Bearer ' + s.token }),
                 timeout: DOWNLOAD_API_TIMEOUT,
                 validateStatus: () => true
             });
-            if (res.status === 401 && attempt === 0) {
+            if (res.status === 401 && !loginRetried) {
+                loginRetried = true;
                 session = null;
                 s = await login(true);
                 if (!s) throw new Error('OS.com: إعادة تسجيل الدخول فشلت');
+                continue;
+            }
+            if (res.status === 429 && retries.link < RATE_RETRY_MAX) {
+                retries.link++;
+                const w = retryWaitMs(res);
+                console.log(tag + ' | 429 عند طلب الرابط، أعيد بعد ' + w + 'ms (إعادة ' + retries.link + ')');
+                await sleep(w);
                 continue;
             }
             break;
@@ -313,12 +360,23 @@ async function downloadOsComText(fileId) {
 
         stage = 'تحميل الملف';
         const tf = Date.now();
-        const file = await axios.get(d.link, {
-            responseType: 'arraybuffer',
-            timeout: DOWNLOAD_FILE_TIMEOUT,
-            headers: { 'User-Agent': APP_UA },
-            validateStatus: () => true
-        });
+        let file;
+        for (let fa = 0; fa <= RATE_RETRY_MAX; fa++) {
+            file = await axios.get(d.link, {
+                responseType: 'arraybuffer',
+                timeout: DOWNLOAD_FILE_TIMEOUT,
+                headers: { 'User-Agent': APP_UA },
+                validateStatus: () => true
+            });
+            if (file.status === 429 && fa < RATE_RETRY_MAX) {
+                retries.file++;
+                const w = retryWaitMs(file);
+                console.log(tag + ' | 429 عند تحميل الملف، أعيد على نفس الرابط بعد ' + w + 'ms (إعادة ' + retries.file + ')');
+                await sleep(w);
+                continue;
+            }
+            break;
+        }
         t.file = Date.now() - tf;
         if (file.status !== 200) throw new Error('OS.com file HTTP ' + file.status);
 
@@ -336,12 +394,15 @@ async function downloadOsComText(fileId) {
             + ' | ملف ' + sec(t.file) + ' (' + (buf.length / 1024).toFixed(1) + 'KB)'
             + ' | النوع: ' + kind + (kind === 'zip' || kind === 'gz' ? ' ⚠️ ملف مضغوط والكود الحالي ما يفكه' : '')
             + ' | ' + text.length + ' حرف'
-            + (remaining != null ? ' | المتبقي من الحصة ' + remaining : ''));
+            + (remaining != null ? ' | المتبقي من الحصة ' + remaining : '')
+            + extraInfo());
         return text;
     } catch (e) {
         console.log(tag
             + ' | بدأ ' + startClk + ' UTC | انتهى ' + clk() + ' UTC | المدة ' + sec(Date.now() - T0)
-            + ' | فشل عند: ' + stage + ' | ' + e.message);
+            + ' | فشل عند: ' + stage + ' | ' + e.message + extraInfo());
         throw e;
+    } finally {
+        releaseDlSlot();
     }
 }
