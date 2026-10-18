@@ -539,6 +539,22 @@ const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
 };
+const dlCache = new Map();
+const DL_OK_TTL = 10 * 60 * 1000;
+const DL_FAIL_TTL = 30 * 1000;
+function downloadShared(url, run) {
+  const hit = dlCache.get(url);
+  if (hit && Date.now() - hit.time < (hit.failed ? DL_FAIL_TTL : DL_OK_TTL)) return hit.promise;
+  const entry = { time: Date.now(), failed: false };
+  entry.promise = run().then(r => { entry.time = Date.now(); return r; }, e => {
+    if (e?.response?.status === 429) { entry.failed = true; entry.time = Date.now(); }
+    else dlCache.delete(url);
+    throw e;
+  });
+  dlCache.set(url, entry);
+  if (dlCache.size > 30) dlCache.delete(dlCache.keys().next().value);
+  return entry.promise;
+}
 async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   const decodedUrl = safeDecode(subUrl);
   const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
@@ -549,27 +565,30 @@ async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
   const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
   const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
   const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
-  let response = null;
-  let lastErr = null;
-  for (let i = 0; i < agents.length; i++) {
-    const ua = agents[i];
-    const headers = isOsOrg
-      ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
-      : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
-    if (isSubdl) headers['Referer'] = 'https://subdl.com/';
-    if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
-    try {
-      response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      const st = e.response?.status || e.code || 'ERR';
-      console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
-      if (!(e.response?.status === 403 && i < agents.length - 1)) break;
+  const response = await downloadShared(decodedUrl, async () => {
+    let res = null;
+    let lastErr = null;
+    for (let i = 0; i < agents.length; i++) {
+      const ua = agents[i];
+      const headers = isOsOrg
+        ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
+        : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+      if (isSubdl) headers['Referer'] = 'https://subdl.com/';
+      if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
+      try {
+        res = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const st = e.response?.status || e.code || 'ERR';
+        console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
+        if (!(e.response?.status === 403 && i < agents.length - 1)) break;
+      }
     }
-  }
-  if (!response) throw lastErr;
+    if (!res) throw lastErr;
+    return res;
+  });
   let buffer = Buffer.from(response.data);
   if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
@@ -869,4 +888,3 @@ module.exports = {
     extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
   }
 };
- 
