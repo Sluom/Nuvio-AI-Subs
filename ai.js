@@ -36,6 +36,7 @@ const MAX_AI_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_MISSING_RETRIES = 3;
 const MAX_RETRY_PASSES = 4;
 const ENABLE_GENDER_ANALYSIS = true;
+const GENDER_SOURCE_LANGS = new Set(['he', 'hi']);
 const TRANSLATION_WRAP_AT = 42;
 const WRAP_MIN_PART = 8;
 const DROP_DRAWINGS = true;
@@ -142,6 +143,16 @@ function fixArabicEncoding(buffer) {
   try {
     const decodedIso = iconv.decode(buffer, 'iso-8859-6');
     if (/[\u0600-\u06FF]/.test(decodedIso)) return Buffer.from(decodedIso, 'utf-8');
+  } catch (e) {}
+  return buffer;
+}
+function fixHebrewEncoding(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
+  if (buffer.length >= 2 && ((buffer[0] === 0xff && buffer[1] === 0xfe) || (buffer[0] === 0xfe && buffer[1] === 0xff))) return fixArabicEncoding(buffer);
+  if (!buffer.toString('utf-8').includes('\uFFFD')) return buffer;
+  try {
+    const dec = iconv.decode(buffer, 'windows-1255');
+    if (/[\u05D0-\u05EA]/.test(dec)) return Buffer.from(dec, 'utf-8');
   } catch (e) {}
   return buffer;
 }
@@ -377,7 +388,7 @@ async function callGeminiText({ prompt, keysArray, modelName, generationConfig, 
   }
   return { status: 'api_exhausted', text: '' };
 }
-async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '', ctx = null) {
+async function translateChunkStrict(items, keysArray, modelName, castPromptBlock = '', ctx = null, srcLang = '') {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const isGemini3 = isGemini3Model(cleanModel);
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -391,6 +402,10 @@ context_before: ${JSON.stringify(ctx.before)}
 context_after: ${JSON.stringify(ctx.after)}
 `
     : '';
+  const srcName = srcLang === 'he' ? 'Hebrew' : srcLang === 'hi' ? 'Hindi' : '';
+  const rule8b = srcName
+    ? `8b. SOURCE-GRAMMAR GENDER (this takes priority over the hint mechanism above, which is not used for this track): the source language is ${srcName}, and it marks gender in verbs, adjectives and participles (Hebrew: הולך/הולכת, בוא/בואי, עייף/עייפה; Hindi: जा रहे हो/जा रही हो, थका/थकी). Read the gender of the speaker and of the person addressed from these forms and use the matching Arabic gendered verbs, adjectives and pronouns. Write the Arabic with NO diacritics at all (no fatha/kasra on endings: write أنت, بيتك, لك, عندك).`
+    : '';
   const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a hint code.
 "g" = two letters: the first letter is the SPEAKER's gender, the second letter is the gender of the person being ADDRESSED. If the entry holds several speaker turns (lines starting with "-"), "g" has one two-letter code per turn, separated by "/", in the same order as the turns (for example "FM/MF"): apply each code only to its own turn. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
 Translate the "text" of every entry to Arabic while:
@@ -403,7 +418,7 @@ Translate the "text" of every entry to Arabic while:
 5. Wrap place names, city names, country names, food/dish names, brand names, and other foreign proper nouns (non-person) in Arabic parentheses: (الاسم).
 6. Wrap person names (character names) in Arabic quotation marks: "الاسم" — quotation marks are reserved for person names only, never for places/food/brands.
 7. When an entire entry is off-screen narration, a voice-over, a letter being read aloud, or a voice heard through a phone/radio/TV with no visible speaker on screen, wrap the WHOLE entry in ONE single pair of quotation marks (one at the start, one at the end). Do not add internal quotes for names if the whole entry is already quoted.
-8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar (verbs, adjectives, pronouns, vocatives) for I/me/my/you/your and for anyone referred to. When an entry has "g", use it to pick the correct Arabic gender for the speaker (first letter) and the person addressed (second letter). Treat "g" as a strong hint, but if the text itself clearly contradicts it (explicit names, titles, "he said"/"she said"), trust the text. When "g" is missing or a letter is U or N, infer gender from the dialogue context in this chunk; if it is still impossible to determine, formulate the Arabic to be naturally GENDER-NEUTRAL (passive voice or verbal nouns) instead of guessing.
+8. GENDER ENFORCEMENT & NEUTRALITY: Arabic requires gendered grammar (verbs, adjectives, pronouns, vocatives) for I/me/my/you/your and for anyone referred to. When an entry has "g", use it to pick the correct Arabic gender for the speaker (first letter) and the person addressed (second letter). Treat "g" as a strong hint, but if the text itself clearly contradicts it (explicit names, titles, "he said"/"she said"), trust the text. When "g" is missing or a letter is U or N, infer gender from the dialogue context in this chunk; if it is still impossible to determine, formulate the Arabic to be naturally GENDER-NEUTRAL (passive voice or verbal nouns) instead of guessing.${rule8b ? '\n' + rule8b : ''}
 9. Pay close attention to split sentences (sentences that start in one entry and continue into the next, often indicated by "..."). Ensure the Arabic grammar and phrasing flow logically and seamlessly across these sequential entries, while still keeping each entry's translation under its own id.
 10. Act as an expert cinematic subtitler. Translate idioms/slang naturally into Arabic rather than literally.
 === CINEMATIC CONSTITUTION (CRITICAL RULES) ===
@@ -466,12 +481,12 @@ ${JSON.stringify(items)}`;
   }
   return { status: 'api_exhausted', map: new Map() };
 }
-async function translateItemsWithRecovery(items, keysArray, modelName, castPromptBlock = '', ctx = null) {
+async function translateItemsWithRecovery(items, keysArray, modelName, castPromptBlock = '', ctx = null, srcLang = '') {
   const done = new Map();
   if (!items || items.length === 0) return done;
   let pending = items;
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await translateChunkStrict(pending, keysArray, modelName, castPromptBlock, ctx);
+    const result = await translateChunkStrict(pending, keysArray, modelName, castPromptBlock, ctx, srcLang);
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على تزامن الفلم.`);
       break;
@@ -479,8 +494,8 @@ async function translateItemsWithRecovery(items, keysArray, modelName, castPromp
     if ((result.status === 'bad_ids' || result.status === 'bad_format') && pending.length > 60) {
       const mid = Math.ceil(pending.length / 2);
       console.log(`[حارس الأرقام] أقسم الدفعة (${pending.length}) لنصفين وأعيد.`);
-      const left = await translateItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, castPromptBlock, ctx);
-      const right = await translateItemsWithRecovery(pending.slice(mid), keysArray, modelName, castPromptBlock, ctx);
+      const left = await translateItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, castPromptBlock, ctx, srcLang);
+      const right = await translateItemsWithRecovery(pending.slice(mid), keysArray, modelName, castPromptBlock, ctx, srcLang);
       for (const [id, text] of left) done.set(id, text);
       for (const [id, text] of right) done.set(id, text);
       pending = pending.filter(it => !done.has(it.id));
@@ -555,7 +570,7 @@ function downloadShared(url, run) {
   if (dlCache.size > 30) dlCache.delete(dlCache.keys().next().value);
   return entry.promise;
 }
-async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
+async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null, srcLang = '') {
   const decodedUrl = safeDecode(subUrl);
   const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
   const hit = subTextCache.get(memKey);
@@ -608,7 +623,7 @@ async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null) {
     }
     if (entry) buffer = entry.getData();
   }
-  const text = fixArabicEncoding(buffer).toString('utf-8');
+  const text = (srcLang === 'he' ? fixHebrewEncoding(buffer) : fixArabicEncoding(buffer)).toString('utf-8');
   subTextCache.set(memKey, { time: Date.now(), text });
   if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
   return text;
@@ -644,9 +659,9 @@ function needsTranslation(text) {
   const raw = String(text || '');
   if (DRAWING_RE.test(raw)) return false;
   const t = raw.replace(/<[^>]*>|\{[^}]*\}|\\N|\\n/g, '');
-  return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
+  return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/.test(t);
 }
-async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, castPromptBlock = '') {
+async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, castPromptBlock = '', srcLang = '') {
   const tStart = Date.now();
   const CHUNK = getDynamicChunkSize(modelName);
   const cache = await loadLineCache(cacheKey);
@@ -666,7 +681,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     modelName,
     cacheKey,
     castPromptBlock,
-    enableGender: ENABLE_GENDER_ANALYSIS,
+    enableGender: ENABLE_GENDER_ANALYSIS && !GENDER_SOURCE_LANGS.has(srcLang),
     deps: {
       callGeminiText,
       runConcurrentPool,
@@ -693,7 +708,7 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
     }
     const tasks = pendingChunks.map(chunk => async () => {
       const ctx = buildChunkContext(cues, chunk);
-      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx);
+      const map = await translateItemsWithRecovery(chunk, keysArray, modelName, enhancedCastPrompt, ctx, srcLang);
       const fresh = [];
       for (const [id, text] of map) {
         results[id] = text;
@@ -803,7 +818,7 @@ async function resolveCastPromptBlock(targetId, kitsuId, userTmdbKey) {
 async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   const castPromptBlock = await resolveCastPromptBlock(targetId, kitsuId, userTmdbKey);
   let originalText = '';
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId)); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId), extraKeys.srcLang); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n', missing: 0, total: 0, failed: true };
@@ -814,7 +829,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
     return { content: '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n', missing: 0, total: 0, failed: true };
   }
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}|${subUrl}`, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}|${subUrl}`, castPromptBlock, extraKeys.srcLang);
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -835,7 +850,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
 async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   const castPromptBlock = await resolveCastPromptBlock(targetId, kitsuId, userTmdbKey);
   let originalText = '';
-  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId)); }
+  try { originalText = await fetchAndExtractSub(subUrl, extraKeys.subsourceKey, epInfoOf(targetId), extraKeys.srcLang); }
   catch (e) {
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي (ASS): ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + 'Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف.', missing: 0, total: 0, failed: true };
@@ -848,7 +863,7 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
     return { content: ASS_DEFAULT_HEADER + 'Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.', missing: 0, total: 0, failed: true };
   }
   console.log(`[Nuvio-ASS] ${cues.length} cues | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)}) | ملف ASS أصلي=${isRealAss}`);
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, `${targetId}|${subUrl}`, castPromptBlock);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 8, `${targetId}|${subUrl}`, castPromptBlock, extraKeys.srcLang);
   if (isRealAss) {
     const texts = cues.map((c, i) => {
       const t = finalTranslations[i];
