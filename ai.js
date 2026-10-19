@@ -157,7 +157,7 @@ function fixHebrewEncoding(buffer) {
   } catch (e) {}
   return buffer;
 }
-const BIDI_MARKS_RE = /[‎‏‪-‮⁦-⁩]/g;
+const BIDI_MARKS_RE = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 const TAG_PREFIX_RE = /^(?:<[^>]*>|\{[^}]*\}|\s)*/;
 const TAG_SUFFIX_RE = /(?:<\/[^>]*>|\{[^}]*\}|\s)*$/;
 const LINE_SPLIT_RE = /(\\N|\\n|\r?\n)/;
