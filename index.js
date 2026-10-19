@@ -4,6 +4,7 @@ const axios = require('axios');
 const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
+const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
 const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
 const db = require('./db');
@@ -249,6 +250,12 @@ function isHearingImpairedSub(sub) {
 }
 const isEng = s => /^en/i.test((s && s.lang) || '');
 const byEng = (a, b) => isEng(b) - isEng(a);
+const srcOf = s => {
+    const l = String((s && s.lang) || '').toLowerCase();
+    return /^he(b|$|[-_])/.test(l) ? 'he' : /^hi(n|$|[-_])/.test(l) ? 'hi' : '';
+};
+const isHeHi = s => srcOf(s) !== '';
+const srcParam = s => isHeHi(s) ? '&src=' + srcOf(s) : '';
 const isHiFlag = v => ['1', 1, true].includes(v);
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
@@ -536,6 +543,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.json(m);
 });
 const WANTED_TRACKS = 4;
+const SHOW_AI_ALWAYS = process.env.SHOW_AI_ALWAYS === '1';
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 const SOURCE_LABELS = {
     subdl: 'subdl',
@@ -680,6 +688,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         if (Array.isArray(osSubsList)) subtitlesData = osSubsList;
         const extraAssFromOs = subtitlesData.filter(s => {
             if (!s || !s.url) return false;
+            if (isHeHi(s)) return false;
             const lang = (s.lang || '').toLowerCase();
             if (!TARGET_LANGS.some(l => lang.startsWith(l))) return false;
             const fname = s.subtitleFileName || '';
@@ -704,8 +713,16 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             osClean = srtOnly.filter(s => !isHearingImpairedSub(s)).sort(byEng);
             osHi = srtOnly.filter(s => isHearingImpairedSub(s)).sort(byEng);
         }
+        const hasReadyArabic = (arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0;
+        const priSubs = (hasReadyArabic && !SHOW_AI_ALWAYS) ? [] : await getHebHindiSubs({
+            type: finalType, targetId: finalTargetId,
+            imdbId: assImdbId, season: assSeason, episode: assEpisode,
+            osList: subtitlesData,
+            subdlKey: addonCfg.subdlKey, subsourceKey: addonCfg.subsourceKey,
+            want: WANTED_TRACKS
+        }).catch(() => []);
         let extClean = [], extHi = [], subdlSubs = [], subsourceSubs = [], extFetched = false;
-        if (osClean.length < WANTED_TRACKS) {
+        if (priSubs.length < WANTED_TRACKS && osClean.length < WANTED_TRACKS) {
             extFetched = true;
             [subdlSubs, subsourceSubs] = await Promise.all([
                 getSubDL({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey }).catch(() => []),
@@ -719,7 +736,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             extClean = extSubs.filter(s => !s.hearingImpaired).sort(byEng);
             extHi = extSubs.filter(s => s.hearingImpaired).sort(byEng);
         }
-        const srtSubs = [...osClean, ...extClean, ...osHi, ...extHi];
+        const srtSubs = [...priSubs, ...[...osClean, ...extClean, ...osHi, ...extHi].filter(s => !isHeHi(s))];
         const transSubs = [];
         const streamRawSrt = configParam ? '/' + configParam + '/stream-raw.srt' : '/stream-raw.srt';
         const streamRawAss = configParam ? '/' + configParam + '/stream-raw.ass' : '/stream-raw.ass';
@@ -790,14 +807,14 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        const hasArabic = (arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0;
+        const hasArabic = !SHOW_AI_ALWAYS && ((arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0);
         if (hasArabic) console.log('[AI] وُجدت ترجمة عربية للعمل ' + finalTargetId + ' ← تم إخفاء روابط ترجمة AI.');
         if (!hasArabic && srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
                 transSubs.push({
                     id: 'nuvio-ai-srt-' + (i + 1),
-                    url: baseUrl + streamPathSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
+                    url: baseUrl + streamPathSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams + srcParam(sub),
                     lang: 'ara',
                     title: 'Nuvio AI SRT ' + (i + 1) + ' (Sync ' + String.fromCharCode(65 + i) + ')'
                 });
@@ -862,6 +879,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const targetId = req.query.id || '';
     const kitsuId = req.query.kitsu || '';
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
+    const srcLang = /^(he|hi)$/.test(String(req.query.src || '')) ? String(req.query.src) : '';
     if (!targetUrl) return res.status(400).send('Missing URL');
     const isPinnedCorrector = (label === 'ARA-SRT' || label === 'ARA-ASS') && targetId;
     const primaryCacheKey = isPinnedCorrector
@@ -883,7 +901,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
                 startTranslationJob({
                     cacheKey: primaryCacheKey, handler, targetUrl,
                     userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
-                    extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey, trackNum },
+                    extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey, trackNum, srcLang },
                     trackNum, label, targetId, kitsuId
                 });
             }
