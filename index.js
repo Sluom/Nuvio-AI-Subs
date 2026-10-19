@@ -790,7 +790,9 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        if (srtSubs.length > 0) {
+        const hasArabic = (arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0;
+        if (hasArabic) console.log('[AI] وُجدت ترجمة عربية للعمل ' + finalTargetId + ' ← تم إخفاء روابط ترجمة AI.');
+        if (!hasArabic && srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
                 transSubs.push({
@@ -801,7 +803,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        if (assOnly.length > 0) {
+        if (!hasArabic && assOnly.length > 0) {
             const maxAss = Math.min(4, assOnly.length);
             for (let i = 0; i < maxAss; i++) {
                 transSubs.push({
