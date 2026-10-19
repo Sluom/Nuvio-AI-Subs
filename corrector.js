@@ -13,6 +13,8 @@ const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 100;
 const CORRECTOR_MAX_WORKERS = 20;
+const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
+const FALLBACK_WAIT_MS = 10000;
 const DROP_DRAWINGS = true;
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
@@ -421,7 +423,7 @@ ${JSON.stringify(items)}`;
           console.log(`[حارس الأرقام - مصحح] الرد فيه ${extraIds} رقم ما طلبته. أرفضه.`);
           return { status: 'bad_ids', map: new Map() };
         }
-        if (items.length >= 40) console.log(`[مصحح عربي - Success] طلب ${items.length} سطر، رجع ${map.size} عبر ...${cleanKey.slice(-4)}`);
+        if (items.length >= 40) console.log(`[مصحح عربي - Success] (${cleanModel}) طلب ${items.length} سطر، رجع ${map.size} عبر ...${cleanKey.slice(-4)}`);
         return { status: 'ok', map };
       }
       return { status: 'bad_format', map: new Map() };
@@ -434,7 +436,7 @@ ${JSON.stringify(items)}`;
       }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErrLocal(e)}`);
+      console.log(`[تبريد طارئ - مصحح] (${cleanModel}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErrLocal(e)}`);
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
@@ -447,7 +449,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
     const result = await correctChunkStrict(pending, keysArray, modelName, ctx);
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
-      console.log(`[تجاوز طارئ - مصحح] السيرفرات مختنقة. تم تجاوز (${pending.length}) سطر للحفاظ على التزامن.`);
+      console.log(`[تجاوز طارئ - مصحح] (${modelName}) مختنق. تأجيل (${pending.length}) سطر لجولة الإنقاذ.`);
       break;
     }
     if ((result.status === 'bad_ids' || result.status === 'bad_format' || (result.status === 'ok' && result.map.size === 0)) && pending.length > 1) {
@@ -542,29 +544,43 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     if (dirty.length === 0) return;
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
-  let pendingChunks = [];
-  for (let i = 0; i < toDo.length; i += CHUNK) pendingChunks.push(toDo.slice(i, i + CHUNK));
-  async function worker() {
-    while (pendingChunks.length > 0) {
-      if (keysArray.every(k => deadKeys.has(k))) return;
-      const chunk = pendingChunks.shift();
-      if (!chunk) break;
-      try {
-        const ctx0 = buildChunkContext(cues, chunk);
-        const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
-        const map = await correctItemsWithRecovery(chunk, keysArray, modelName, ctx);
-        for (const it of chunk) {
-          const text = map.get(it.id);
-          if (text) applyLine(it.id, text);
+  const runBatchWithModel = async (itemsToRun, activeModel) => {
+    const chunks = [];
+    for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
+    const currentWorkers = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS, chunks.length));
+    async function batchWorker() {
+      while (chunks.length > 0) {
+        if (keysArray.every(k => deadKeys.has(k))) return;
+        const chunk = chunks.shift();
+        if (!chunk) break;
+        try {
+          const ctx0 = buildChunkContext(cues, chunk);
+          const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
+          const map = await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx);
+          for (const it of chunk) {
+            const text = map.get(it.id);
+            if (text) applyLine(it.id, text);
+          }
+          persistDirty();
+        } catch (e) {
+          console.log(`[مصحح] خطأ بمهمة (${activeModel}): ${e && e.message}`);
         }
-        persistDirty();
-      } catch (e) {
-        console.log(`[مصحح] خطأ بمهمة: ${e && e.message}`);
       }
     }
+    await Promise.all(Array.from({ length: currentWorkers }, () => batchWorker()));
+  };
+  if (toDo.length > 0) {
+    await runBatchWithModel(toDo, modelName);
   }
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  const unprocessed = toDo.filter(it => results[it.id] == null);
+  let unprocessed = toDo.filter(it => results[it.id] == null);
+  if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
+    const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
+    const fallbackModel = primaryClean === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL;
+    console.log(`\u200F[إنقاذ تلقائي 🚑] بقى (${unprocessed.length}) سطر بسبب اختناق (${primaryClean}). أنتظر ${FALLBACK_WAIT_MS / 1000} ثواني لتبريد المفاتيح وأحول على (${fallbackModel})...`);
+    await delay(FALLBACK_WAIT_MS);
+    await runBatchWithModel(unprocessed, fallbackModel);
+    unprocessed = toDo.filter(it => results[it.id] == null);
+  }
   const missing = unprocessed.length;
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
