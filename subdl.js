@@ -9,14 +9,14 @@ const SUBDL_LANGS = {
   EN: 'eng', JA: 'jpn', TR: 'tur', FA: 'per', RU: 'rus',
   KO: 'kor', FR: 'fre', ES: 'spa', HI: 'hin', PT: 'por',
   BR_PT: 'pob', ZH: 'chi', DE: 'ger', IT: 'ita', ID: 'ind',
-  AR: 'ara'
+  AR: 'ara', HE: 'heb'
 };
-const FOREIGN_LANGS = Object.keys(SUBDL_LANGS).filter(c => c !== 'AR');
+const FOREIGN_LANGS = Object.keys(SUBDL_LANGS).filter(c => c !== 'AR' && c !== 'HE');
 const NAME_TO_CODE = {
   english: 'EN', japanese: 'JA', turkish: 'TR', farsi_persian: 'FA', persian: 'FA',
   russian: 'RU', korean: 'KO', french: 'FR', spanish: 'ES', hindi: 'HI',
   portuguese: 'PT', brazilian_portuguese: 'BR_PT', chinese: 'ZH',
-  german: 'DE', italian: 'IT', indonesian: 'ID', arabic: 'AR'
+  german: 'DE', italian: 'IT', indonesian: 'ID', arabic: 'AR', hebrew: 'HE'
 };
 const ALIAS_TO_CODE = {
   en: 'EN', eng: 'EN', ja: 'JA', jpn: 'JA', jap: 'JA', tr: 'TR', tur: 'TR',
@@ -25,7 +25,8 @@ const ALIAS_TO_CODE = {
   pt: 'PT', por: 'PT', pt_br: 'BR_PT', br_pt: 'BR_PT', pb: 'BR_PT', pob: 'BR_PT',
   zh: 'ZH', zho: 'ZH', chi: 'ZH', chs: 'ZH', cht: 'ZH',
   de: 'DE', ger: 'DE', deu: 'DE', it: 'IT', ita: 'IT', id: 'ID', ind: 'ID',
-  ar: 'AR', ara: 'AR', ar_sa: 'AR'
+  ar: 'AR', ara: 'AR', ar_sa: 'AR',
+  he: 'HE', heb: 'HE', iw: 'HE'
 };
 function detectLang(raw) {
   const s = String(raw || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
