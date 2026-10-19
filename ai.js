@@ -37,6 +37,7 @@ const MAX_MISSING_RETRIES = 3;
 const MAX_RETRY_PASSES = 4;
 const ENABLE_GENDER_ANALYSIS = true;
 const GENDER_SOURCE_LANGS = new Set(['he', 'hi']);
+const SRC_CACHE_VER = '|v2';
 const TRANSLATION_WRAP_AT = 42;
 const WRAP_MIN_PART = 8;
 const DROP_DRAWINGS = true;
@@ -155,6 +156,73 @@ function fixHebrewEncoding(buffer) {
     if (/[\u05D0-\u05EA]/.test(dec)) return Buffer.from(dec, 'utf-8');
   } catch (e) {}
   return buffer;
+}
+const BIDI_MARKS_RE = /[‎‏‪-‮⁦-⁩]/g;
+const TAG_PREFIX_RE = /^(?:<[^>]*>|\{[^}]*\}|\s)*/;
+const TAG_SUFFIX_RE = /(?:<\/[^>]*>|\{[^}]*\}|\s)*$/;
+const LINE_SPLIT_RE = /(\\N|\\n|\r?\n)/;
+function splitCore(line) {
+  const pre = line.match(TAG_PREFIX_RE)[0];
+  const rest = line.slice(pre.length);
+  const suf = rest.match(TAG_SUFFIX_RE)[0];
+  return { pre, core: rest.slice(0, rest.length - suf.length), suf };
+}
+function fixVisualOrderCues(cues) {
+  let leadMark = 0, trailMark = 0, dashLead = 0, dashTrail = 0;
+  const parsed = cues.map(c => String(c.text == null ? '' : c.text).replace(BIDI_MARKS_RE, '').split(LINE_SPLIT_RE));
+  for (const parts of parsed) {
+    for (let i = 0; i < parts.length; i += 2) {
+      const { core } = splitCore(parts[i]);
+      if (!core) continue;
+      if (/^(?:[?!]+|\.(?!\.))/.test(core)) leadMark++;
+      if (/[?!]$/.test(core)) trailMark++;
+      if (/^-/.test(core)) dashLead++;
+      else if (/\s*-$/.test(core)) dashTrail++;
+    }
+  }
+  const fixMarks = leadMark >= 3 && leadMark > trailMark;
+  const fixDash = dashTrail >= 3 && dashTrail > dashLead * 2;
+  if (fixMarks || fixDash) console.log(`[RTL] مصدر عبري بترتيب بصري: علامات متقدمة=${leadMark} متأخرة=${trailMark} | شرطات في النهاية=${dashTrail} في البداية=${dashLead} -> إصلاح العلامات=${fixMarks} الشرطات=${fixDash}`);
+  return cues.map((c, k) => {
+    const parts = parsed[k].slice();
+    for (let i = 0; i < parts.length; i += 2) {
+      const { pre, core, suf } = splitCore(parts[i]);
+      let t = core;
+      if (fixMarks) {
+        const m = t.match(/^([?!]+|\.(?!\.)|,)\s*(.+)$/s);
+        if (m) t = m[2] + [...m[1]].reverse().join('');
+      }
+      if (fixDash && !/^-/.test(t) && /\s*-+$/.test(t)) t = '- ' + t.replace(/\s*-+$/, '');
+      parts[i] = pre + t + suf;
+    }
+    return { ...c, text: parts.join('') };
+  });
+}
+function fixArabicPunctuation(text) {
+  const parts = String(text == null ? '' : text).split(LINE_SPLIT_RE);
+  const idx = [];
+  for (let i = 0; i < parts.length; i += 2) idx.push(i);
+  for (const i of idx) {
+    const { pre, core, suf } = splitCore(parts[i]);
+    const m = core.match(/^([?؟!]+)\s*(.+)$/s);
+    if (m) parts[i] = pre + m[2] + [...m[1]].reverse().map(ch => ch === '?' ? '؟' : ch).join('') + suf;
+  }
+  if (idx.length >= 2) {
+    const cores = idx.map(i => splitCore(parts[i]).core);
+    if (cores.every(c => c && /\s*-$/.test(c) && !/^-/.test(c))) {
+      for (const i of idx) {
+        const { pre, core, suf } = splitCore(parts[i]);
+        parts[i] = pre + '- ' + core.replace(/\s*-+$/, '') + suf;
+      }
+    }
+  }
+  return parts.join('');
+}
+function stripBrackets(text) {
+  return String(text == null ? '' : text)
+    .split(/(\r?\n)/)
+    .map(l => /^\r?\n$/.test(l) ? l : l.replace(/[\[\]]/g, '').replace(/ {2,}/g, ' ').trim())
+    .join('');
 }
 function srtTimeToAss(t) {
   const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/);
@@ -404,7 +472,9 @@ context_after: ${JSON.stringify(ctx.after)}
     : '';
   const srcName = srcLang === 'he' ? 'Hebrew' : srcLang === 'hi' ? 'Hindi' : '';
   const rule8b = srcName
-    ? `8b. SOURCE-GRAMMAR GENDER (this takes priority over the hint mechanism above, which is not used for this track): the source language is ${srcName}, and it marks gender in verbs, adjectives and participles (Hebrew: הולך/הולכת, בוא/בואי, עייף/עייפה; Hindi: जा रहे हो/जा रही हो, थका/थकी). Read the gender of the speaker and of the person addressed from these forms and use the matching Arabic gendered verbs, adjectives and pronouns. Write the Arabic with NO diacritics at all (no fatha/kasra on endings: write أنت, بيتك, لك, عندك).`
+    ? `8c. PUNCTUATION IN ARABIC ORDER: Hebrew subtitle files often store punctuation in visual order (a leading "?" or "." , a trailing dialogue dash "-"). Ignore where the source puts punctuation. In the Arabic output, a dialogue dash "-" always goes at the START of its line, and "؟" "!" "." always go at the END of the sentence.
+8d. NO SQUARE BRACKETS: Never output the characters [ or ] anywhere (this overrides rule 4). Translate bracketed tags and on-screen text without the brackets.
+8b. SOURCE-GRAMMAR GENDER (this takes priority over the hint mechanism above, which is not used for this track): the source language is ${srcName}, and it marks gender in verbs, adjectives and participles (Hebrew: הולך/הולכת, בוא/בואי, עייף/עייפה; Hindi: जा रहे हो/जा रही हो, थका/थकी). Read the gender of the speaker and of the person addressed from these forms and use the matching Arabic gendered verbs, adjectives and pronouns. Write the Arabic with NO diacritics at all (no fatha/kasra on endings: write أنت, بيتك, لك, عندك).`
     : '';
   const prompt = `You will receive a JSON array of subtitle entries. Each entry is an object: {"id": <number>, "text": "<subtitle text>"} and may also include "g": a hint code.
 "g" = two letters: the first letter is the SPEAKER's gender, the second letter is the gender of the person being ADDRESSED. If the entry holds several speaker turns (lines starting with "-"), "g" has one two-letter code per turn, separated by "/", in the same order as the turns (for example "FM/MF"): apply each code only to its own turn. M = male, F = female, G = group or mixed, U = unknown, N = none. Never output "g".
@@ -664,6 +734,7 @@ function needsTranslation(text) {
 async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKey, castPromptBlock = '', srcLang = '') {
   const tStart = Date.now();
   const CHUNK = getDynamicChunkSize(modelName);
+  if (GENDER_SOURCE_LANGS.has(srcLang)) cacheKey += '|' + srcLang + SRC_CACHE_VER;
   const cache = await loadLineCache(cacheKey);
   const results = new Array(cues.length).fill(null);
   const toDo = [];
@@ -730,7 +801,8 @@ async function translateAllCues(cues, keysArray, modelName, concurrency, cacheKe
   console.log(`[ملخص] أسطر=${cues.length} | للترجمة=${toDo.length} | ناقص=${missing} | تحليل الضمائر: ${annotationSummary} | زمن الترجمة=${secs(Date.now() - tTrans)} | الكلي=${secs(Date.now() - tStart)}`);
   return {
     texts: cues.map((c, i) => {
-      const t = normalizeLineBreakArtifacts(results[i] || c.text);
+      let t = normalizeLineBreakArtifacts(results[i] || c.text);
+      if (GENDER_SOURCE_LANGS.has(srcLang) && results[i] != null && needsTranslation(c.text)) t = stripBrackets(fixArabicPunctuation(t));
       return (results[i] != null && needsTranslation(c.text)) ? wrapLongSubtitleLine(t) : t;
     }),
     missing
@@ -823,7 +895,8 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
     console.log(`[Nuvio] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل تحميل ملف الترجمة الأصلي.\n\n', missing: 0, total: 0, failed: true };
   }
-  const cues = extractCuesUniversal(originalText);
+  let cues = extractCuesUniversal(originalText);
+  if (extraKeys.srcLang === 'he') cues = fixVisualOrderCues(cues);
   if (!cues.length) {
     console.log('[Nuvio] فشل استخراج الأسطر من الملف الأصلي.');
     return { content: '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n', missing: 0, total: 0, failed: true };
@@ -857,7 +930,8 @@ async function handleTranslationAssDetailed(subUrl, keysArray, modelName, userTm
   }
   const parsed = parseAssKeepingStructure(originalText);
   const isRealAss = parsed.cues.length > 0;
-  const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
+  let cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
+  if (extraKeys.srcLang === 'he') cues = fixVisualOrderCues(cues);
   if (!cues.length) {
     console.log('[Nuvio] فشل استخراج الأسطر من الملف الأصلي (ASS).');
     return { content: ASS_DEFAULT_HEADER + 'Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.', missing: 0, total: 0, failed: true };
