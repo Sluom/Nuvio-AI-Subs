@@ -1,5 +1,5 @@
 const axios = require('axios');
-module.exports = { getOsCom, isOsComUrl, isOsComConfigured, downloadOsComText };
+module.exports = { getOsCom, isOsComUrl, isOsComConfigured, downloadOsComText, setOsComCreds };
 const DEFAULT_HOST = 'api.opensubtitles.com';
 const APP_UA = 'NuvioAISubs v1.0';
 const SEARCH_TIMEOUT = 3000;
@@ -13,7 +13,20 @@ let session = null;
 let loginPromise = null;
 let blockedUntil = 0;
 const textCache = new Map();
+let cfgCreds = null;
+function setOsComCreds(c) {
+    const next = {
+        apiKey: String((c && c.apiKey) || '').trim(),
+        username: String((c && c.username) || '').trim(),
+        password: String((c && c.password) || '')
+    };
+    if (!next.apiKey || !next.username || !next.password) return;
+    const changed = !cfgCreds || cfgCreds.apiKey !== next.apiKey || cfgCreds.username !== next.username || cfgCreds.password !== next.password;
+    cfgCreds = next;
+    if (changed) { session = null; blockedUntil = 0; }
+}
 function getCreds() {
+    if (cfgCreds) return cfgCreds;
     return {
         apiKey: String(process.env.OSCOM_API_KEY || '').trim(),
         username: String(process.env.OSCOM_USER || '').trim(),
@@ -87,7 +100,7 @@ function compareRank(x, y) {
 async function getOsCom({ imdbId, season, episode }) {
     const { apiKey, username, password } = getCreds();
     if (!apiKey || !username || !password) {
-        console.log('[جلب عربي - OS.com] غير مفعّل: ناقص OSCOM_API_KEY أو OSCOM_USER أو OSCOM_PASS في Render.');
+        console.log('[جلب عربي - OS.com] غير مفعّل: ناقص مفتاح OS.com أو اسم المستخدم أو كلمة المرور في صفحة الإعداد.');
         return [];
     }
     if (!imdbId || !imdbId.startsWith('tt')) return [];
