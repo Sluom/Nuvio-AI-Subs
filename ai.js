@@ -81,7 +81,7 @@ function getDynamicChunkSize(modelName) {
   const limit = getFallbackOutputTokenLimit(modelName);
   const safetyMargin = Math.floor(limit * 0.05);
   const available = limit - safetyMargin;
-  if (available >= 60000) return 280;
+  if (available >= 60000) return 150;
   if (available >= 30000) return 100;
   return 80;
 }
@@ -902,7 +902,7 @@ async function handleTranslationSrtDetailed(subUrl, keysArray, modelName, userTm
     return { content: '1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n', missing: 0, total: 0, failed: true };
   }
   console.log(`[Nuvio] ${cues.length} cues -> CHUNK=${getDynamicChunkSize(modelName)} | Model=${normalizeGeminiModelId(modelName)} | مفاتيح=${keysArray.length} (حية ${aliveKeyCount(keysArray)})`);
-  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 5, `${targetId}|${subUrl}`, castPromptBlock, extraKeys.srcLang);
+  const { texts: finalTranslations, missing } = await translateAllCues(cues, keysArray, modelName, 12, `${targetId}|${subUrl}`, castPromptBlock, extraKeys.srcLang);
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
