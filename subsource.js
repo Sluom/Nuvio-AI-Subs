@@ -4,7 +4,9 @@ const SUBSOURCE_STREM = 'https://subsource.strem.top';
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const LANGS = {
   arabic: { iso3: 'ara', prefix: 'ar' },
-  english: { iso3: 'eng', prefix: 'en' }
+  english: { iso3: 'eng', prefix: 'en' },
+  hebrew: { iso3: 'heb', prefix: 'he' },
+  hindi: { iso3: 'hin', prefix: 'hi' }
 };
 const MAX_RESULTS = 60;
 const cleanPath = p => String(p).split('?')[0];
