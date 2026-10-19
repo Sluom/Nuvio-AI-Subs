@@ -581,9 +581,12 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
 }
 const rawPersistRunning = new Set();
 const RAW_PERSIST_DELAY_MS = 6000;
-async function persistRawTracks(targetId, list, subsourceKey) {
-    if (!targetId || !list || !list.length || rawPersistRunning.has(targetId)) return;
-    rawPersistRunning.add(targetId);
+async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
+    const isAss = kind === 'ass';
+    const runKey = kind + '_' + targetId;
+    if (!targetId || !list || !list.length || rawPersistRunning.has(runKey)) return;
+    rawPersistRunning.add(runKey);
+    const tag = isAss ? '[حفظ المصدر ASS]' : '[حفظ المصدر]';
     try {
         await sleep(RAW_PERSIST_DELAY_MS);
         const epInfo = parseEpInfoFromTargetId(targetId);
@@ -591,22 +594,27 @@ async function persistRawTracks(targetId, list, subsourceKey) {
             const n = i + 1;
             const item = list[i];
             if (!item || !item.url) continue;
+            const rawKey = (isAss ? 'ass_' : '') + targetId + '_track' + n;
+            const jobKey = (isAss ? 'ARA-ASS_' : 'ARA-SRT_') + targetId + '_track' + n;
             try {
-                const done = await db.loadDoc('job', 'ARA-SRT_' + targetId + '_track' + n);
+                const done = await db.loadDoc('job', jobKey);
                 if (done && done.content) continue;
-                const had = await db.loadDoc('rawsrt', targetId + '_track' + n);
+                const had = await db.loadDoc('rawsrt', rawKey);
                 if (had && had.text) continue;
                 const text = await getRawArabicSubContent(item.url, subsourceKey, epInfo);
-                if (text && String(text).trim()) {
-                    const ok = await db.saveDoc('rawsrt', targetId + '_track' + n, { text: String(text) });
-                    if (ok) console.log('[حفظ المصدر] Track ' + n + ' انحفظ بالـ db (' + (item._site || item._source || '?') + ')');
+                if (!text || !String(text).trim()) continue;
+                if (isAss && !/Dialogue:/i.test(String(text))) {
+                    console.log(tag + ' Track ' + n + ' ما انحفظ: الملف ما هو ASS (' + (item._site || item._source || '?') + ')');
+                    continue;
                 }
+                const ok = await db.saveDoc('rawsrt', rawKey, { text: String(text) });
+                if (ok) console.log(tag + ' Track ' + n + ' انحفظ بالـ db (' + (item._site || item._source || '?') + ')');
             } catch (e) {
-                console.log('[حفظ المصدر] Track ' + n + ' ما انحفظ: ' + e.message);
+                console.log(tag + ' Track ' + n + ' ما انحفظ: ' + e.message);
             }
         }
     } finally {
-        rawPersistRunning.delete(targetId);
+        rawPersistRunning.delete(runKey);
     }
 }
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
@@ -784,7 +792,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             initialCorrSrtList,
             arabicSubs.ass || []
         );
-        persistRawTracks(finalTargetId, corrSrtList, addonCfg.subsourceKey).catch(() => {});
+        persistRawTracks(finalTargetId, corrSrtList, addonCfg.subsourceKey, 'srt').catch(() => {});
+        persistRawTracks(finalTargetId, corrAssList, addonCfg.subsourceKey, 'ass').catch(() => {});
         if (corrSrtList.length > 0) {
             const maxAraSrt = Math.min(4, corrSrtList.length);
             for (let i = 0; i < maxAraSrt; i++) {
