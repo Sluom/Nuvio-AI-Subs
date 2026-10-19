@@ -362,10 +362,6 @@ function flipEllipsisText(text) {
     .map((p, i) => (i % 2 ? p : flipEllipsisLine(p)))
     .join('');
 }
-function shortErrLocal(e) {
-  const m = (e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) || (e && e.message) || '';
-  return String(m).replace(/\s+/g, ' ').slice(0, 140);
-}
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -431,12 +427,12 @@ ${JSON.stringify(items)}`;
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status}) ${shortErrLocal(e)}`);
+        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status})`);
         continue;
       }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد طارئ - مصحح] (${cleanModel}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErrLocal(e)}`);
+      console.log(`[تبريد طارئ - مصحح] (${cleanModel}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
@@ -476,7 +472,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
   }
   return done;
 }
-const NAMES_PARALLEL = process.env.NAMES_PARALLEL === '1';
+const NAMES_PARALLEL = process.env.NAMES_PARALLEL !== '0';
 const secsOf = ms => (ms / 1000).toFixed(1);
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
