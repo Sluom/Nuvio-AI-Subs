@@ -610,6 +610,16 @@ async function loadSavedOrFetch(url, subsourceKey, targetId, trackNum) {
   }
   return loadArabicSub(url, subsourceKey, targetId);
 }
+async function loadSavedAssOrFetch(url, subsourceKey, targetId, trackNum) {
+  if (targetId && trackNum) {
+    const saved = await db.loadDoc('rawsrt', 'ass_' + targetId + '_track' + trackNum);
+    if (saved && saved.text) {
+      console.log(`[مصحح Nuvio ASS] Track ${trackNum}: المصدر جاهز من التخزين الدائم، ما أحتاج الموقع.`);
+      return saved.text;
+    }
+  }
+  return loadArabicSub(url, subsourceKey, targetId);
+}
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
   try { originalText = await loadSavedOrFetch(subUrl, extraKeys.subsourceKey, targetId, extraKeys.trackNum); }
@@ -677,7 +687,7 @@ function rebuildAss(parsed, texts) {
 }
 async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await loadArabicSub(subUrl, extraKeys.subsourceKey, targetId); }
+  try { originalText = await loadSavedAssOrFetch(subUrl, extraKeys.subsourceKey, targetId, extraKeys.trackNum); }
   catch (e) {
     console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
