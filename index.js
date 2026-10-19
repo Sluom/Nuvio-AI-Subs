@@ -6,6 +6,7 @@ const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
+const { setOsComCreds } = require('./oscom');
 const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
 const db = require('./db');
 const app = express();
@@ -398,7 +399,7 @@ function getBaseUrl(req) {
     return proto + '://' + host;
 }
 function parseConfig(raw, onError) {
-    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '' };
+    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '' };
     if (!raw) return cfg;
     try {
         const d = JSON.parse(decodeURIComponent(raw));
@@ -407,9 +408,13 @@ function parseConfig(raw, onError) {
         if (d.tmdbKey) cfg.tmdbKey = d.tmdbKey;
         if (d.subdlKey) cfg.subdlKey = String(d.subdlKey).trim();
         if (d.subsourceKey) cfg.subsourceKey = String(d.subsourceKey).trim();
+        if (d.oscomKey) cfg.oscomKey = String(d.oscomKey).trim();
+        if (d.oscomUser) cfg.oscomUser = String(d.oscomUser).trim();
+        if (d.oscomPass) cfg.oscomPass = String(d.oscomPass);
     } catch (e) {
         if (onError) onError(e);
     }
+    if (cfg.oscomKey && cfg.oscomUser && cfg.oscomPass) setOsComCreds({ apiKey: cfg.oscomKey, username: cfg.oscomUser, password: cfg.oscomPass });
     return cfg;
 }
 const MODELS = [
@@ -425,7 +430,8 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const {
         keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey,
-        subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey
+        subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey,
+        oscomKey: existingOscomKey, oscomUser: existingOscomUser, oscomPass: existingOscomPass
     } = parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
     const keyRowsHtml = existingKeys.length > 0
         ? existingKeys.map((key, i) => {
@@ -452,7 +458,7 @@ h1{color:#38bdf8;text-align:center}
 .container{background:#1e293b;padding:30px;border-radius:12px;width:100%;max-width:500px;box-shadow:0 4px 20px rgba(0,0,0,.5)}
 .input-group{margin-bottom:15px}
 label{display:block;margin-bottom:5px;color:#94a3b8;font-size:14px}
-input[type="text"]{width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
+input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
 .btn{background:#0284c7;color:#fff;padding:12px;border:none;border-radius:8px;font-weight:bold;width:100%;cursor:pointer;margin-top:10px;transition:.3s}
 .btn:hover{background:#0369a1}
 .btn-secondary{background:#475569;margin-bottom:20px}
@@ -482,6 +488,18 @@ input[type="text"]{width:100%;padding:10px;border-radius:6px;border:1px solid #3
 <label>مفتاح Subsource API (اختياري - مصدر ترجمات عربية إضافي)</label>
 <input type="text" id="subsource-key" placeholder="مفتاح Subsource" value="` + attr(existingSubsourceKey) + `">
 </div>
+<div class="input-group">
+<label>OpenSubtitles.com - مفتاح API (اختياري - مصدر عربي احتياطي)</label>
+<input type="text" id="oscom-key" placeholder="مفتاح OS.com API" value="` + attr(existingOscomKey) + `">
+</div>
+<div class="input-group">
+<label>OpenSubtitles.com - اسم المستخدم</label>
+<input type="text" id="oscom-user" placeholder="اسم المستخدم" value="` + attr(existingOscomUser) + `">
+</div>
+<div class="input-group">
+<label>OpenSubtitles.com - كلمة المرور</label>
+<input type="password" id="oscom-pass" placeholder="كلمة المرور" value="` + attr(existingOscomPass) + `">
+</div>
 <div class="input-group" style="margin-top:20px">
 <label>نموذج الترجمة (Translation Model)</label>
 <select id="model-select" style="width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff">` + modelOptions + `</select>
@@ -507,10 +525,16 @@ if(keys.length===0){alert('الرجاء إدخال مفتاح API واحد عل�
 const tmdbKey=document.getElementById('tmdb-key').value.trim();
 const subdlKey=document.getElementById('subdl-key').value.trim();
 const subsourceKey=document.getElementById('subsource-key').value.trim();
+const oscomKey=document.getElementById('oscom-key').value.trim();
+const oscomUser=document.getElementById('oscom-user').value.trim();
+const oscomPass=document.getElementById('oscom-pass').value;
 const config={keys:keys,model:document.getElementById('model-select').value};
 if(tmdbKey)config.tmdbKey=tmdbKey;
 if(subdlKey)config.subdlKey=subdlKey;
 if(subsourceKey)config.subsourceKey=subsourceKey;
+if(oscomKey)config.oscomKey=oscomKey;
+if(oscomUser)config.oscomUser=oscomUser;
+if(oscomPass)config.oscomPass=oscomPass;
 return encodeURIComponent(JSON.stringify(config));
 }
 function generateInstallLink(){
