@@ -360,6 +360,10 @@ function flipEllipsisText(text) {
     .map((p, i) => (i % 2 ? p : flipEllipsisLine(p)))
     .join('');
 }
+function shortErrLocal(e) {
+  const m = (e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) || (e && e.message) || '';
+  return String(m).replace(/\s+/g, ' ').slice(0, 140);
+}
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
@@ -425,12 +429,12 @@ ${JSON.stringify(items)}`;
       const status = e.response?.status || 0;
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status})`);
+        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status}) ${shortErrLocal(e)}`);
         continue;
       }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      console.log(`[تبريد طارئ - مصحح] ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s (status:${status}) ${shortErrLocal(e)}`);
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
@@ -610,16 +614,6 @@ async function loadSavedOrFetch(url, subsourceKey, targetId, trackNum) {
   }
   return loadArabicSub(url, subsourceKey, targetId);
 }
-async function loadSavedAssOrFetch(url, subsourceKey, targetId, trackNum) {
-  if (targetId && trackNum) {
-    const saved = await db.loadDoc('rawsrt', 'ass_' + targetId + '_track' + trackNum);
-    if (saved && saved.text) {
-      console.log(`[مصحح Nuvio ASS] Track ${trackNum}: المصدر جاهز من التخزين الدائم، ما أحتاج الموقع.`);
-      return saved.text;
-    }
-  }
-  return loadArabicSub(url, subsourceKey, targetId);
-}
 async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
   try { originalText = await loadSavedOrFetch(subUrl, extraKeys.subsourceKey, targetId, extraKeys.trackNum); }
@@ -687,7 +681,7 @@ function rebuildAss(parsed, texts) {
 }
 async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, targetId, kitsuId, extraKeys = {}) {
   let originalText = "";
-  try { originalText = await loadSavedAssOrFetch(subUrl, extraKeys.subsourceKey, targetId, extraKeys.trackNum); }
+  try { originalText = await loadArabicSub(subUrl, extraKeys.subsourceKey, targetId); }
   catch (e) {
     console.log(`[مصحح Nuvio ASS] فشل تحميل ملف الترجمة الأصلي: ${e.message}`);
     return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل تحميل الملف العربي.`, missing: 0, total: 0, failed: true };
