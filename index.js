@@ -882,10 +882,11 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const srcLang = /^(he|hi)$/.test(String(req.query.src || '')) ? String(req.query.src) : '';
     if (!targetUrl) return res.status(400).send('Missing URL');
     const isPinnedCorrector = (label === 'ARA-SRT' || label === 'ARA-ASS') && targetId;
+    const srcCacheTag = srcLang ? '_' + srcLang + 'v2' : '';
     const primaryCacheKey = isPinnedCorrector
         ? [label, targetId, 'track' + trackNum].join('_')
-        : [label, targetId, targetUrl].join('_');
-    const legacyUrlCacheKey = [label, targetId, targetUrl].join('_');
+        : [label, targetId, targetUrl].join('_') + srcCacheTag;
+    const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag;
     let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
     if (!cached) {
         let stored = await db.loadDoc('job', primaryCacheKey);
