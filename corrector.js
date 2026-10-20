@@ -346,9 +346,9 @@ function isVisualOrderFile(cues) {
   return total >= OLD_FILE_MIN_LINES && lead / total >= OLD_FILE_MIN_RATIO;
 }
 const ELL_RE = /^([-–—]\s*)?(\.{3,}|…)?\s*([\s\S]*?)\s*(\.{3,}|…)?$/;
-const FLIP_BIDI_RE = /[‎‏؜‪-‮⁦-⁩]/g;
-const VIEW_HIDDEN_RE = /[​‎‏؜‪-‮⁦-⁩﻿]/g;
-const SPACED_DOTS_RE = /\.(?:[ \t ]\.){2,}/g;
+const FLIP_BIDI_RE = /[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g;
+const VIEW_HIDDEN_RE = /[\u200B\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const SPACED_DOTS_RE = /\.(?:[ \t\u00A0]\.){2,}/g;
 function flipEllipsisLine(line) {
   const lead = line.match(LEAD_TAGS)[0];
   const rest = line.slice(lead.length);
@@ -526,22 +526,21 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const oldFile = isVisualOrderFile(cues);
   const ell = analyzeEllipsis(cues);
   const flipNow = oldFile || (ELLIPSIS_AUTO && ell.reversed);
-  console.log(`‏[نقاط 🔎] أسطر عربية=${ell.total} | تبدأ بنقاط=${ell.startN} | تنتهي بنقاط=${ell.endN} | أزواج عادية=${ell.pairOk} | أزواج معكوسة=${ell.pairRev} | التشخيص القديم=${oldFile ? 'ملف قديم' : 'لا'} | الكاشف الجديد=${!ELLIPSIS_AUTO ? 'مطفأ' : (ell.reversed ? 'معكوس' : 'سليم/غير حاسم')} => ${flipNow ? 'أقلب' : 'ما ألمس'}`);
+  console.log(`\u200F[نقاط 🔎] أسطر عربية=${ell.total} | تبدأ بنقاط=${ell.startN} | تنتهي بنقاط=${ell.endN} | أزواج عادية=${ell.pairOk} | أزواج معكوسة=${ell.pairRev} | التشخيص القديم=${oldFile ? 'ملف قديم' : 'لا'} | الكاشف الجديد=${!ELLIPSIS_AUTO ? 'مطفأ' : (ell.reversed ? 'معكوس' : 'سليم/غير حاسم')} => ${flipNow ? 'أقلب' : 'ما ألمس'}`);
   if (flipNow) {
     if (oldFile) console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
     else console.log('[مصحح] كاشف النقاط: النقاط معكوسة (البداية أكثر من النهاية): أقلب مكانها');
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
     const after = analyzeEllipsis(cues);
-    console.log(`‏[نقاط 🔎] بعد القلب: تبدأ بنقاط=${after.startN} | تنتهي بنقاط=${after.endN}`);
+    console.log(`\u200F[نقاط 🔎] بعد القلب: تبدأ بنقاط=${after.startN} | تنتهي بنقاط=${after.endN}`);
   }
   const CHUNK = CORRECTOR_CHUNK;
   const cacheVersion = process.env.CACHE_VER || 'ARB2';
   const lineCacheKey = cacheVersion + '_' + CORRECTOR_REV + '_' + cacheKey;
-  const nameCacheKey = cacheVersion + '_names_' + cacheKey; // مفتاح كاش الأسماء
+  const nameCacheKey = cacheVersion + '_names_' + cacheKey;
 
-  // 1. تحميل كاش الأسطر وكاش الأسماء معاً
   const cache = await loadLineCache(lineCacheKey);
-  const namesCache = await loadLineCache(nameCacheKey); // يعمل بكفاءة لسحب نصوص JSON
+  const namesCache = await loadLineCache(nameCacheKey);
   
   let book = null;
   let kinds = new Map();
@@ -587,7 +586,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
     
   let bookPromise = null;
-  // 2. إذا القاموس ما مسحوب من الـ db، نبنيه بالتوازي
   if (!namesLoadedFromCache && NAMES_PARALLEL && toDo.length > 0) {
     const tBook = Date.now();
     const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
@@ -675,7 +673,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   
   if (toDo.length > 0) {
     const tNames = Date.now();
-    // 3. استخراج الأسماء فقط إذا لم تكن مسحوبة من الكاش
     if (!book) {
       book = bookPromise
         ? await bookPromise
@@ -685,8 +682,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     if (!namesLoadedFromCache && book) {
       try {
         kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
-        
-        // 4. حفظ الأسماء والتصنيفات كنصوص JSON في قاعدة البيانات الدائمة
         const dataToSave = [
           ['bookMap', JSON.stringify(Array.from(book.map.entries()))],
           ['kinds', JSON.stringify(Array.from(kinds.entries()))]
