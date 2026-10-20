@@ -16,6 +16,8 @@ const CORRECTOR_CHUNK = 100;
 const CORRECTOR_MAX_WORKERS = 20;
 const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const FALLBACK_WAIT_MS = 10000;
+const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
+const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
@@ -344,11 +346,14 @@ function isVisualOrderFile(cues) {
   return total >= OLD_FILE_MIN_LINES && lead / total >= OLD_FILE_MIN_RATIO;
 }
 const ELL_RE = /^([-–—]\s*)?(\.{3,}|…)?\s*([\s\S]*?)\s*(\.{3,}|…)?$/;
+const FLIP_BIDI_RE = /[‎‏؜‪-‮⁦-⁩]/g;
+const VIEW_HIDDEN_RE = /[​‎‏؜‪-‮⁦-⁩﻿]/g;
+const SPACED_DOTS_RE = /\.(?:[ \t ]\.){2,}/g;
 function flipEllipsisLine(line) {
   const lead = line.match(LEAD_TAGS)[0];
   const rest = line.slice(lead.length);
   const tail = rest.match(TAIL_TAGS)[0];
-  const body = rest.slice(0, rest.length - tail.length);
+  const body = rest.slice(0, rest.length - tail.length).replace(SPACED_DOTS_RE, '...');
   const m = body.match(ELL_RE);
   if (!m || (!m[2] && !m[4])) return line;
   let dash = m[1] || '';
@@ -360,9 +365,45 @@ function flipEllipsisLine(line) {
 function flipEllipsisText(text) {
   if (!needsCorrection(text)) return text;
   return String(text)
+    .replace(FLIP_BIDI_RE, '')
     .split(/(\\+[nN]|\r?\n)/)
     .map((p, i) => (i % 2 ? p : flipEllipsisLine(p)))
     .join('');
+}
+const ELL_MIN_LINES = 20;
+const ELL_MIN_COUNT = 10;
+const ELL_COUNT_DOMINANCE = 4;
+const ELL_MIN_PAIRS = 3;
+const ELL_PAIR_DOMINANCE = 3;
+const ELL_START_RE = /^(\.{3,}|…)/;
+const ELL_END_RE = /(\.{3,}|…)$/;
+function ellView(raw) {
+  return String(raw).replace(TAG_RE, '').replace(VIEW_HIDDEN_RE, '').replace(SPACED_DOTS_RE, '...').trim().replace(/^[-–—]\s*/, '');
+}
+function analyzeEllipsis(cues) {
+  let total = 0, startN = 0, endN = 0, pairOk = 0, pairRev = 0, prev = null;
+  for (const c of cues) {
+    if (!needsCorrection(c.text)) { prev = null; continue; }
+    const lines = String(c.text).split(LINE_SPLIT).map(ellView).filter(l => l && HAS_ARABIC.test(l));
+    if (!lines.length) { prev = null; continue; }
+    for (const l of lines) {
+      total++;
+      if (ELL_START_RE.test(l)) startN++;
+      if (ELL_END_RE.test(l)) endN++;
+    }
+    const cur = { s: ELL_START_RE.test(lines[0]), e: ELL_END_RE.test(lines[lines.length - 1]) };
+    if (prev) {
+      if (prev.e && cur.s) pairOk++;
+      if (prev.s && cur.e) pairRev++;
+    }
+    prev = cur;
+  }
+  const countRev = startN >= ELL_MIN_COUNT && startN >= ELL_COUNT_DOMINANCE * endN;
+  const countOk = endN >= ELL_MIN_COUNT && endN >= ELL_COUNT_DOMINANCE * startN;
+  const pairsRev = pairRev >= ELL_MIN_PAIRS && pairRev >= ELL_PAIR_DOMINANCE * pairOk;
+  const pairsOk = pairOk >= ELL_MIN_PAIRS && pairOk >= ELL_PAIR_DOMINANCE * pairRev;
+  const reversed = total >= ELL_MIN_LINES && (countRev || pairsRev) && !(countOk || pairsOk);
+  return { total, startN, endN, pairOk, pairRev, reversed };
 }
 async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
@@ -482,13 +523,20 @@ const plainForBook = texts => texts
   
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
-  if (isVisualOrderFile(cues)) {
-    console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
+  const oldFile = isVisualOrderFile(cues);
+  const ell = analyzeEllipsis(cues);
+  const flipNow = oldFile || (ELLIPSIS_AUTO && ell.reversed);
+  console.log(`‏[نقاط 🔎] أسطر عربية=${ell.total} | تبدأ بنقاط=${ell.startN} | تنتهي بنقاط=${ell.endN} | أزواج عادية=${ell.pairOk} | أزواج معكوسة=${ell.pairRev} | التشخيص القديم=${oldFile ? 'ملف قديم' : 'لا'} | الكاشف الجديد=${!ELLIPSIS_AUTO ? 'مطفأ' : (ell.reversed ? 'معكوس' : 'سليم/غير حاسم')} => ${flipNow ? 'أقلب' : 'ما ألمس'}`);
+  if (flipNow) {
+    if (oldFile) console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
+    else console.log('[مصحح] كاشف النقاط: النقاط معكوسة (البداية أكثر من النهاية): أقلب مكانها');
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
+    const after = analyzeEllipsis(cues);
+    console.log(`‏[نقاط 🔎] بعد القلب: تبدأ بنقاط=${after.startN} | تنتهي بنقاط=${after.endN}`);
   }
   const CHUNK = CORRECTOR_CHUNK;
   const cacheVersion = process.env.CACHE_VER || 'ARB2';
-  const lineCacheKey = cacheVersion + '_' + cacheKey;
+  const lineCacheKey = cacheVersion + '_' + CORRECTOR_REV + '_' + cacheKey;
   const nameCacheKey = cacheVersion + '_names_' + cacheKey; // مفتاح كاش الأسماء
 
   // 1. تحميل كاش الأسطر وكاش الأسماء معاً
@@ -777,5 +825,10 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
 }
 module.exports = {
   handleCorrectionSrt,
-  handleCorrectionAss
+  handleCorrectionAss,
+  CORRECTOR_REV,
+  analyzeEllipsis,
+  flipEllipsisText,
+  isVisualOrderFile,
+  correctAllCues
 };
