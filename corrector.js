@@ -8,7 +8,8 @@ const {
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
-const { buildNameBook, applyNameBook } = require('./name-book');
+const { buildNameBook, applyNameBook, makeBook } = require('./name-book');
+
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 200;
@@ -24,6 +25,7 @@ const TAG_ONE = /\{[^}]*\}|<[^>]*>/;
 const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
 const DRAWING_RE = /\{[^}]*\\p0*[1-9][^}]*\}/;
 const DASH_BEFORE_ELL_RE = /\s*[-–—]\s*(\.{3,}|…)$/;
+
 function visibleLen(s) { return String(s).replace(/<[^>]*>|\{[^}]*\}/g, '').length; }
 function needsCorrection(text) {
   const raw = String(text == null ? '' : text);
@@ -477,6 +479,7 @@ const secsOf = ms => (ms / 1000).toFixed(1);
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
   .filter(Boolean);
+  
 async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const tStart = Date.now();
   if (isVisualOrderFile(cues)) {
@@ -486,11 +489,34 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   const CHUNK = CORRECTOR_CHUNK;
   const cacheVersion = process.env.CACHE_VER || 'ARB2';
   const lineCacheKey = cacheVersion + '_' + cacheKey;
+  const nameCacheKey = cacheVersion + '_names_' + cacheKey; // مفتاح كاش الأسماء
+
+  // 1. تحميل كاش الأسطر وكاش الأسماء معاً
   const cache = await loadLineCache(lineCacheKey);
+  const namesCache = await loadLineCache(nameCacheKey); // يعمل بكفاءة لسحب نصوص JSON
+  
+  let book = null;
+  let kinds = new Map();
+  let namesLoadedFromCache = false;
+
+  if (namesCache && namesCache.has('bookMap')) {
+    try {
+      const parsedBookMap = JSON.parse(namesCache.get('bookMap'));
+      const parsedKinds = JSON.parse(namesCache.get('kinds') || '[]');
+      book = makeBook(new Map(parsedBookMap));
+      kinds = new Map(parsedKinds);
+      namesLoadedFromCache = true;
+      console.log(`\u200F[كاش الأسماء 💾] تم استرجاع القاموس (${book.size} اسم) من قاعدة البيانات بثانية وحدة.`);
+    } catch (e) {
+      console.log(`[كاش الأسماء] فشل قراءة الكاش الدائم، سأعيد بناء القاموس من الصفر.`);
+    }
+  }
+
   const results = new Array(cues.length).fill(null);
   const toDo = [];
   const sentText = new Map();
   let fromCache = 0;
+  
   cues.forEach((c, i) => {
     if (!needsCorrection(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
@@ -501,7 +527,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     if (q) item.q = q;
     toDo.push(item);
   });
+  
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
+  
   const namesDeps = {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
@@ -509,8 +537,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   };
   const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
     .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
+    
   let bookPromise = null;
-  if (NAMES_PARALLEL && toDo.length > 0) {
+  // 2. إذا القاموس ما مسحوب من الـ db، نبنيه بالتوازي
+  if (!namesLoadedFromCache && NAMES_PARALLEL && toDo.length > 0) {
     const tBook = Date.now();
     const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
     bookPromise = startBook(plainForBook(sourceTexts)).then(b => {
@@ -518,9 +548,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       return b;
     });
   }
+  
   let rejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
+  
   const applyLine = (id, text) => {
     const orig = cues[id].text;
     text = spell.restoreFinalYa(orig, text);
@@ -536,10 +568,12 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     cache.set(id, clean);
     dirty.push([id, clean]);
   };
+  
   const persistDirty = () => {
     if (dirty.length === 0) return;
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
+  
   const runBatchWithModel = async (itemsToRun, activeModel) => {
     const chunks = [];
     for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
@@ -565,9 +599,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     }
     await Promise.all(Array.from({ length: currentWorkers }, () => batchWorker()));
   };
+  
   if (toDo.length > 0) {
     await runBatchWithModel(toDo, modelName);
   }
+  
   let unprocessed = toDo.filter(it => results[it.id] == null);
   if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
@@ -577,24 +613,43 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     await runBatchWithModel(unprocessed, fallbackModel);
     unprocessed = toDo.filter(it => results[it.id] == null);
   }
+  
   const missing = unprocessed.length;
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
+  
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
   );
+  
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
-  const tNames = Date.now();
+  
   if (toDo.length > 0) {
-    const book = bookPromise
-      ? await bookPromise
-      : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
-    let kinds = new Map();
-    try {
-      kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
-    } catch (e) { console.log(`[مصحح] تعذر تصنيف الأسماء: ${e && e.message}`); }
+    const tNames = Date.now();
+    // 3. استخراج الأسماء فقط إذا لم تكن مسحوبة من الكاش
+    if (!book) {
+      book = bookPromise
+        ? await bookPromise
+        : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
+    }
+
+    if (!namesLoadedFromCache && book) {
+      try {
+        kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
+        
+        // 4. حفظ الأسماء والتصنيفات كنصوص JSON في قاعدة البيانات الدائمة
+        const dataToSave = [
+          ['bookMap', JSON.stringify(Array.from(book.map.entries()))],
+          ['kinds', JSON.stringify(Array.from(kinds.entries()))]
+        ];
+        db.saveMap('names', nameCacheKey, dataToSave);
+        console.log(`\u200F[حفظ الأسماء 💾] تم خزن القاموس دائمياً لتجنب إعادته بالجولات القادمة.`);
+      } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+    }
+    
     outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
+    
     const changed = [];
     outTexts.forEach((t, i) => {
       if (t !== finalTexts[i] && cache.has(i)) {
@@ -603,11 +658,16 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
-    console.log(`\u200F[مرحلة الأسماء ⏱] ${secsOf(Date.now() - tNames)} ثانية${bookPromise ? ' (قاموس بالتوازي)' : ''}`);
+    
+    if (!namesLoadedFromCache) {
+       console.log(`\u200F[مرحلة الأسماء ⏱] ${secsOf(Date.now() - tNames)} ثانية${bookPromise ? ' (قاموس بالتوازي)' : ''}`);
+    }
   }
+  
   console.log(`\u200F[المصحح كامل ⏱] ${secsOf(Date.now() - tStart)} ثانية${NAMES_PARALLEL ? ' (أسماء بالتوازي)' : ''}`);
   return { texts: outTexts, missing };
 }
+
 const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
