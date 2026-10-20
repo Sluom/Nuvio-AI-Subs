@@ -420,9 +420,10 @@ function parseConfig(raw, onError) {
 const MODELS = [
     ['gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite'],
     ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'],
-    ['gemini-3.7-flash', 'Gemini 3.7 Flash (beta)'],
-    ['gemini-3.6-flash', 'Gemini 3.6 Flash (beta)'],
-    ['gemini-3.5-flash', 'Gemini 3.5 Flash (beta)'],
+    ['gemini-3.8-flash', 'Gemini 3.8 Flash'],
+    ['gemini-3.7-flash', 'Gemini 3.7 Flash'],
+    ['gemini-3.6-flash', 'Gemini 3.6 Flash'],
+    ['gemini-3.5-flash', 'Gemini 3.5 Flash'],
     ['gemini-2.5-flash', 'Gemini 2.5 Flash']
 ];
 const attr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
