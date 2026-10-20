@@ -7,7 +7,7 @@ const { getSubSource } = require('./subsource');
 const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
 const { setOsComCreds } = require('./oscom');
-const { handleCorrectionSrt, handleCorrectionAss } = require('./corrector');
+const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV } = require('./corrector');
 const db = require('./db');
 const app = express();
 app.use(cors());
@@ -620,7 +620,7 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
             const item = list[i];
             if (!item || !item.url) continue;
             const rawKey = (isAss ? 'ass_' : '') + targetId + '_track' + n;
-            const jobKey = (isAss ? 'ARA-ASS_' : 'ARA-SRT_') + targetId + '_track' + n;
+            const jobKey = (isAss ? 'ARA-ASS_' : 'ARA-SRT_') + targetId + '_track' + n + '_' + CORRECTOR_REV;
             try {
                 const done = await db.loadDoc('job', jobKey);
                 if (done && done.content) continue;
@@ -917,12 +917,14 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
     const srcLang = /^(he|hi)$/.test(String(req.query.src || '')) ? String(req.query.src) : '';
     if (!targetUrl) return res.status(400).send('Missing URL');
-    const isPinnedCorrector = (label === 'ARA-SRT' || label === 'ARA-ASS') && targetId;
+    const isCorrector = label === 'ARA-SRT' || label === 'ARA-ASS';
+    const isPinnedCorrector = isCorrector && targetId;
     const srcCacheTag = srcLang ? '_' + srcLang + 'v2' : '';
-    const primaryCacheKey = isPinnedCorrector
+    const revTag = isCorrector ? '_' + CORRECTOR_REV : '';
+    const primaryCacheKey = (isPinnedCorrector
         ? [label, targetId, 'track' + trackNum].join('_')
-        : [label, targetId, targetUrl].join('_') + srcCacheTag;
-    const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag;
+        : [label, targetId, targetUrl].join('_') + srcCacheTag) + revTag;
+    const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag + revTag;
     let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
     if (!cached) {
         let stored = await db.loadDoc('job', primaryCacheKey);
