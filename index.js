@@ -821,22 +821,24 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         if (corrSrtList.length > 0) {
             const maxAraSrt = Math.min(4, corrSrtList.length);
             for (let i = 0; i < maxAraSrt; i++) {
+                const corrName = 'trans-' + getSourceLabel(corrSrtList[i]._site || corrSrtList[i]._source) + '-ara-srt-' + (i + 1);
                 transSubs.push({
-                    id: 'nuvio-ara-srt-' + (i + 1),
+                    id: corrName,
                     url: baseUrl + streamAraSrt + '?url=' + encodeURIComponent(corrSrtList[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'Nuvio AI Arabic SRT ' + (i + 1)
+                    title: corrName
                 });
             }
         }
         if (corrAssList.length > 0) {
             const maxAraAss = Math.min(4, corrAssList.length);
             for (let i = 0; i < maxAraAss; i++) {
+                const corrName = 'trans-' + getSourceLabel(corrAssList[i]._site || corrAssList[i]._source) + '-ara-ass-' + (i + 1);
                 transSubs.push({
-                    id: 'nuvio-ara-ass-' + (i + 1),
+                    id: corrName,
                     url: baseUrl + streamAraAss + '?url=' + encodeURIComponent(corrAssList[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'Nuvio AI Arabic ASS ' + (i + 1)
+                    title: corrName
                 });
             }
         }
