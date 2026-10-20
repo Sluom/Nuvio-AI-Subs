@@ -344,11 +344,14 @@ function isVisualOrderFile(cues) {
   return total >= OLD_FILE_MIN_LINES && lead / total >= OLD_FILE_MIN_RATIO;
 }
 const ELL_RE = /^([-–—]\s*)?(\.{3,}|…)?\s*([\s\S]*?)\s*(\.{3,}|…)?$/;
+const FLIP_BIDI_RE = /[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g;
 function flipEllipsisLine(line) {
   const lead = line.match(LEAD_TAGS)[0];
   const rest = line.slice(lead.length);
   const tail = rest.match(TAIL_TAGS)[0];
-  const body = rest.slice(0, rest.length - tail.length);
+  const body = rest.slice(0, rest.length - tail.length)
+    .replace(/^((?:[-–—]\s*)?)(?:\.\s?){3,}(?=\S)/, '$1...')
+    .replace(/(?<=\S)\s?(?:\.\s?){3,}$/, '...');
   const m = body.match(ELL_RE);
   if (!m || (!m[2] && !m[4])) return line;
   let dash = m[1] || '';
@@ -360,6 +363,7 @@ function flipEllipsisLine(line) {
 function flipEllipsisText(text) {
   if (!needsCorrection(text)) return text;
   return String(text)
+    .replace(FLIP_BIDI_RE, '')
     .split(/(\\+[nN]|\r?\n)/)
     .map((p, i) => (i % 2 ? p : flipEllipsisLine(p)))
     .join('');
@@ -485,6 +489,18 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   if (isVisualOrderFile(cues)) {
     console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
+    const stillLead = [];
+    for (const c of cues) {
+      for (const raw of String(c.text).split(LINE_SPLIT)) {
+        const l = raw.replace(TAG_RE, '').trim().replace(/^[-–—]\s*/, '');
+        if (/^(\.{3,}|…)/.test(l) && !/(\.{3,}|…)$/.test(l)) stillLead.push(l);
+      }
+    }
+    if (stillLead.length) {
+      const ex = stillLead[0];
+      const codes = Array.from(ex.slice(0, 4)).map(ch => 'U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ');
+      console.log(`[مصحح] بعد القلب: ${stillLead.length} سطر ما زال يبدأ بثلاث نقاط. مثال: ${JSON.stringify(ex.slice(0, 40))} (${codes})`);
+    }
   }
   const CHUNK = CORRECTOR_CHUNK;
   const cacheVersion = process.env.CACHE_VER || 'ARB2';
