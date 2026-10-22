@@ -146,6 +146,8 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     return unmaskTags(updated, tags);
   });
 }
+const CLASSIFY_BATCH = 80;
+const CLASSIFY_CONC = 3;
 async function classifyNames(cands, keysArray, modelName, deps) {
   const out = new Map();
   if (!cands || !cands.length) return out;
@@ -153,8 +155,10 @@ async function classifyNames(cands, keysArray, modelName, deps) {
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
     MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent } = deps;
   const model = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  for (let i = 0; i < cands.length; i += 80) {
-    const part = cands.slice(i, i + 80);
+  const parts = [];
+  for (let i = 0; i < cands.length; i += CLASSIFY_BATCH) parts.push(cands.slice(i, i + CLASSIFY_BATCH));
+  let nextPart = 0, noKeys = false;
+  const runPart = async part => {
     const prompt = `You will receive a JSON array of Arabic words taken from the subtitles of a film or TV episode: [{"w": "<word>", "ex": "<a line where it appears>"}].
 Each word was marked as a possible proper name. Classify each word by how it is used in its line:
 - "person": the name of a person, a character, an animal character or a nickname.
@@ -166,7 +170,7 @@ Words:
 ${JSON.stringify(part)}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const activeKey = await acquireKey(keysArray);
-      if (!activeKey) return out;
+      if (!activeKey) { noKeys = true; return; }
       const cleanKey = String(activeKey).trim();
       try {
         const r = await axios.post(`${DEFAULT_GEMINI_API_URL}/models/${model}:generateContent`, {
@@ -190,7 +194,10 @@ ${JSON.stringify(part)}`;
         if (attempt < 2) await delay(1500 + Math.random() * 1500);
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CLASSIFY_CONC, parts.length) }, async () => {
+    while (!noKeys && nextPart < parts.length) await runPart(parts[nextPart++]);
+  }));
   return out;
 }
 module.exports = { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, tidyQuotes, tidyParens };
