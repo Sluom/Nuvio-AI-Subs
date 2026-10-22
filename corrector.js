@@ -590,7 +590,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     const tBook = Date.now();
     const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
     bookPromise = startBook(plainForBook(sourceTexts)).then(b => {
-      console.log(`\u200F[أسماء ⏱ القاموس بالتوازي] ${b ? b.size : 0} اسم | ${secsOf(Date.now() - tBook)} ثانية`);
+      console.log(`\u200F[قاموس الأسماء ⏱] ${b ? b.size : 0} اسم | ${secsOf(Date.now() - tBook)} ثانية (بالتوازي مع الأسطر، لا يضيف للزمن الكلي)`);
       return b;
     });
   }
@@ -661,7 +661,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
   }
   
   const missing = unprocessed.length;
-  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | الزمن الكلي=${Math.round((Date.now() - tStart)/1000)} ثانية`);
+  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | زمن مرحلة الأسطر=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
   
   const finalTexts = cues.map((c, i) =>
@@ -703,11 +703,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey) {
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
     
     if (!namesLoadedFromCache) {
-       console.log(`\u200F[مرحلة الأسماء ⏱] ${secsOf(Date.now() - tNames)} ثانية${bookPromise ? ' (قاموس بالتوازي)' : ''}`);
+       console.log(`\u200F[مرحلة الأسماء بعد الأسطر ⏱] ${secsOf(Date.now() - tNames)} ثانية (تصنيف الأسماء + حفظها${bookPromise ? '' : ' + بناء القاموس'})`);
     }
   }
   
-  console.log(`\u200F[المصحح كامل ⏱] ${secsOf(Date.now() - tStart)} ثانية${NAMES_PARALLEL ? ' (أسماء بالتوازي)' : ''}`);
+  console.log(`\u200F[المصحح كامل ⏱ الزمن الكلي الحقيقي] ${secsOf(Date.now() - tStart)} ثانية (الأسطر + مرحلة الأسماء)`);
   return { texts: outTexts, missing };
 }
 
