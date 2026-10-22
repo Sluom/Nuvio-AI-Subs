@@ -81,9 +81,10 @@ const FORCE_VERB_STEMS = `
 توازى توالى ترامى تداعى تواصى تناجى تدارى تجارى تمارى تغابى تغافى تحامى تغالى تدانى تناءى تواسى تصافى توافى تآخى تحاذى تعاوى تضاهى
 `.split(/\s+/).filter(Boolean);
 for (const st of FORCE_VERB_STEMS) {
-  FORCE_RAW.push('ي' + st, 'ن' + st);
+  FORCE_RAW.push('ي' + st, 'ن' + st, 'أيت' + st, 'أت' + st, 'أنت' + st);
   WORDS_KEEP.add(norm(st));
   WORDS_KEEP.add(norm('أ' + st));
+  WORDS_KEEP.add(norm('ت' + st));
 }
 const FORCE_PRESENT_STEMS = 'سعى خشى حظى أبى نأى طغى'.split(' ');
 for (const st of FORCE_PRESENT_STEMS) {
@@ -101,7 +102,7 @@ const FORCE_PREFIX_RE = /^([وف]?(?:س(?=[يان]))?)(ال|لل|[بكل]ال|[�
     WORDS_KEEP.add(norm('ا' + s));
   }
 })();
-const FORM_V = /^[يتن]ت\p{L}{2,}ى$/u;
+const FORM_V = /^ا?[يتن]ت\p{L}{2,}ى$/u;
 const KEEP_YA = new Set([...NAMES_KEEP, ...NAMES_ASIS, ...WORDS_KEEP, ...FORCE_ALIF]);
 const EXACT = new Map([
   ['الى', 'إلى'], ['اى', 'أي'], ['كى', 'كي'],
