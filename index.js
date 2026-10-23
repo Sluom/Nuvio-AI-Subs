@@ -987,6 +987,45 @@ const checkKeyOf = url => {
 const checkTrackOf = url => {
     try { return new URL(url).searchParams.get('track') || ''; } catch (e) { return ''; }
 };
+const titleCache = new Map();
+async function resolveMediaTitle(type, targetId, tmdbKey) {
+    const parts = String(targetId || '').split(':');
+    const imdbId = parts[0];
+    const season = parts.length >= 3 ? parts[1] : null;
+    const episode = parts.length >= 3 ? parts[2] : null;
+    if (!imdbId || !imdbId.startsWith('tt')) return type + ' / ' + targetId;
+    let baseTitle = titleCache.get(imdbId);
+    if (!baseTitle && tmdbKey) {
+        try {
+            const k = String(tmdbKey).trim();
+            const isBearer = k.length > 40 || k.startsWith('eyJ');
+            const url = 'https://api.themoviedb.org/3/find/' + encodeURIComponent(imdbId) + '?external_source=imdb_id' + (isBearer ? '' : '&api_key=' + encodeURIComponent(k));
+            const headers = isBearer ? { Authorization: 'Bearer ' + k } : {};
+            const r = await axios.get(url, { headers, timeout: 3500 });
+            const d = r.data || {};
+            const item = (d.movie_results && d.movie_results[0]) || (d.tv_results && d.tv_results[0]);
+            if (item && (item.title || item.name || item.original_title || item.original_name)) {
+                baseTitle = item.title || item.name || item.original_title || item.original_name;
+                titleCache.set(imdbId, baseTitle);
+            }
+        } catch (e) {}
+    }
+    if (!baseTitle) {
+        try {
+            const mType = (type === 'movie' && !season) ? 'movie' : 'series';
+            const r = await axios.get('https://v3-cinemeta.strem.io/meta/' + mType + '/' + encodeURIComponent(imdbId) + '.json', { timeout: 3500 });
+            if (r.data && r.data.meta && r.data.meta.name) {
+                baseTitle = r.data.meta.name;
+                titleCache.set(imdbId, baseTitle);
+            }
+        } catch (e) {}
+    }
+    if (!baseTitle) return type + ' / ' + targetId;
+    if (season && episode) {
+        return baseTitle + ' — الموسم ' + season + ' الحلقة ' + episode;
+    }
+    return baseTitle;
+}
 function renderCheckPage(o) {
     const groups = CHECK_GROUPS.map(g => ({ ...g, items: [] }));
     const byKey = new Map(groups.map(g => [g.key, g]));
@@ -1014,6 +1053,7 @@ function renderCheckPage(o) {
     const warn = o.hasKeys ? '' : '<div class="box bad">⚠️ هذا الرابط ما فيه إعداداتك (مفاتيح Gemini)، فتعطّلت روابط المصحّح والذكاء الاصطناعي حتى لا تنخرب نتيجتها بذاكرة السيرفر. افتح الصفحة من رابطك الطويل: <code>رابط السيرفر/إعداداتك/check/' + checkEsc(o.type) + '/' + checkEsc(o.id) + '</code></div>';
     const err = o.error ? '<div class="box bad">' + checkEsc(o.error) + '</div>' : '';
     const empty = (!o.error && !total) ? '<div class="box">ما لگيت ترجمات لهذا العمل.</div>' : '';
+    const subHeader = o.displayTitle ? checkEsc(o.displayTitle) : (checkEsc(o.type) + ' / ' + checkEsc(o.id));
     return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
         + '<meta name="viewport" content="width=device-width, initial-scale=1">'
         + '<meta name="robots" content="noindex,nofollow"><title>فحص الترجمات</title>'
@@ -1022,7 +1062,7 @@ function renderCheckPage(o) {
         + '@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1a1f26;--tx:#e8eaed;--mut:#9aa3af;--ln:#2a313a;--ac:#60a5fa;--bad:#fca5a5;--badbg:#3b1d1d}}'
         + '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;padding:16px}'
         + 'main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0 0 4px}h2{font-size:17px;margin:22px 0 2px}h2 small{color:var(--mut);font-weight:400}'
-        + '.sub{color:var(--mut);font-size:14px;direction:ltr;text-align:right;word-break:break-all}.hint{color:var(--mut);font-size:13px;margin:0 0 8px}'
+        + '.sub{color:var(--mut);font-size:14px;direction:auto;text-align:right;word-break:break-word}.hint{color:var(--mut);font-size:13px;margin:0 0 8px}'
         + '.box{background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:12px 14px;margin:14px 0;font-size:14px}.box.bad{background:var(--badbg);color:var(--bad);border-color:var(--bad)}'
         + 'code{direction:ltr;unicode-bidi:embed;word-break:break-all;font-size:12px}ul{list-style:none;margin:0;padding:0}'
         + '.it{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:10px 12px;margin:8px 0}'
@@ -1031,9 +1071,9 @@ function renderCheckPage(o) {
         + '.cp{margin-inline-start:auto;border:1px solid var(--ln);background:transparent;color:var(--tx);border-radius:8px;padding:6px 12px;font:inherit;font-size:14px}'
         + 'a.lnk{color:var(--ac)}'
         + '</style></head><body><main>'
-        + '<h1>فحص الترجمات</h1><div class="sub">' + checkEsc(o.type) + ' / ' + checkEsc(o.id) + '</div>'
+        + '<h1>فحص الترجمات</h1><div class="sub">' + subHeader + '</div>'
         + warn + err
-        + '<div class="box">اضغط على اسم المسار ليفتح بتبويب جديد، مثل ما يطلبه المشغّل بالضبط. المسارات المصحّحة: أول فتحة ترجع ملف انتظار («الترجمة قيد التنفيذ») ويبدأ التصحيح بالخلفية، أعد فتح نفس الرابط بعد 20 إلى 60 ثانية. لا تشارك رابط هذه الصفحة لأن روابطها تحمل مفاتيحك. <a class="lnk" href="' + checkEsc(o.jsonUrl) + '" target="_blank" rel="noopener">عرض JSON الخام</a></div>'
+        + '<div class="box"><a class="lnk" href="' + checkEsc(o.jsonUrl) + '" target="_blank" rel="noopener">عرض JSON الخام</a></div>'
         + empty + sections
         + '<script>document.addEventListener("click",function(e){var b=e.target.closest?e.target.closest("button.cp"):null;if(!b)return;var u=b.getAttribute("data-u");'
         + 'var done=function(){var t=b.textContent;b.textContent="تم النسخ ✓";setTimeout(function(){b.textContent=t},1500)};'
@@ -1055,21 +1095,26 @@ app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req
     const proto = req.headers['x-forwarded-proto'] || 'https';
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '') + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json';
-    let subs = [], error = '';
+    let subs = [], error = '', displayTitle = '';
     try {
-        const r = await axios.get('http://127.0.0.1:' + PORT + subsPath, {
-            headers: { 'x-forwarded-host': host, 'x-forwarded-proto': proto },
-            timeout: 120000, validateStatus: () => true
-        });
+        const [r, resolvedTitle] = await Promise.all([
+            axios.get('http://127.0.0.1:' + PORT + subsPath, {
+                headers: { 'x-forwarded-host': host, 'x-forwarded-proto': proto },
+                timeout: 120000, validateStatus: () => true
+            }),
+            resolveMediaTitle(type, targetId, cfg.tmdbKey)
+        ]);
+        displayTitle = resolvedTitle;
         let data = r.data;
         if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = null; } }
         if (r.status === 200 && data && Array.isArray(data.subtitles)) subs = data.subtitles;
         else error = 'رد السيرفر غير متوقع (' + r.status + ')';
     } catch (e) {
         error = 'تعذر جلب القائمة: ' + e.message;
+        displayTitle = await resolveMediaTitle(type, targetId, cfg.tmdbKey).catch(() => '');
     }
     res.send(renderCheckPage({
-        subs, error, type, id: targetId,
+        subs, error, type, id: targetId, displayTitle,
         hasKeys: Array.isArray(cfg.keys) && cfg.keys.length > 0,
         jsonUrl: proto + '://' + host + subsPath
     }));
