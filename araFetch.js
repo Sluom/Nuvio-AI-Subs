@@ -40,6 +40,30 @@ const assFileRe = /\.(ass|ssa)(\b|$)/i;
 const rarFileRe = /\.(rar|7z)(\?|$)/i;
 const osFileIdRe = /\/file\/(\d+)/i;
 
+// كاشف SDH / HI من البيانات الوصفية أو اسم الملف
+const HI_NAME_RE = /(?:^|[._\s\-\[\(])(sdh|hi|cc|deaf)(?=[._\s\-\]\)]|$)|hearing[\s._-]*impaired|closed[\s._-]*caption|ضعاف[\s._-]*السمع/i;
+// كاشف المؤثرات الصوتية النصية داخل الأسطر مثل [موسيقى] أو (ضحك) أو ♪
+const SDH_CUE_RE = /[♪♫]|^\s*[\[\(][^\]\)\n]{2,45}[\]\)]\s*$/;
+
+function isHearingImpairedMeta(item) {
+    if (!item) return false;
+    if (item._isSdh === true || item.hearingImpaired === true || item.hi === true) return true;
+    if (['1', 1, true].includes(item.SubHearingImpaired)) return true;
+    return [item.fileName, item.title, item.origName, item.name, item.subtitleFileName, cleanPath(item.url)]
+        .filter(Boolean)
+        .some(f => HI_NAME_RE.test(String(f)));
+}
+
+function detectSdhInLines(lines) {
+    if (!Array.isArray(lines) || lines.length < 15) return false;
+    let sdhCount = 0;
+    for (const l of lines) {
+        const clean = String(l || '').replace(/\{[^}]*\}|<[^>]*>/g, '').trim();
+        if (SDH_CUE_RE.test(clean)) sdhCount++;
+    }
+    return sdhCount >= 12 && (sdhCount / lines.length) >= 0.12;
+}
+
 function setRawCache(key, text) {
     if (!key || !text) return;
     if (rawTextCache.size >= MAX_RAW_CACHE && !rawTextCache.has(key)) {
@@ -165,32 +189,32 @@ function normalizeNameSig(name) {
         .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-// توليد بصمة هيكلية ثابتة لاسم الإصدار (تتجاهل رقم الحلقة وهاش CRC) لضمان ثبات ترتيب التراكات عبر الحلقات
+// توليد بصمة هيكلية ثابتة لاسم الإصدار (مع إعطاء الأولوية للترجمات غير الـ SDH أولاً)
 function computeReleaseTemplateInfo(item) {
+    const isSdh = isHearingImpairedMeta(item);
+    const sdhRank = isSdh ? '1' : '0'; // 0 = نظيف بدون SDH (أولوية قصوى)، 1 = SDH (احتياط في النهاية)
+
     const raw = String((item && (item.fileName || item.title || item.origName || item.name)) || '').trim();
     const fallbackUrl = cleanPath((item && item.url) || '').split('/').pop() || '';
     const base = (raw || fallbackUrl)
         .toLowerCase()
         .replace(/\.(srt|ass|ssa|sub|zip|gz|rar|7z)$/gi, '');
 
-    // استخراج التاج بين أقواس مربعة في بداية الملف (شائع في الأنمي مثل [erai-raws] أو [subsplease])
     const bracketMatch = base.match(/^\s*\[([^\]]+)\]/);
     const animeGroup = bracketMatch ? bracketMatch[1].replace(/\s+/g, '') : '';
 
-    // تجريد الاسم من أرقام المواسم والحلقات المتغيرة وهاشات الفيديو
     const stripped = base
-        .replace(/\[[0-9a-f]{8}\]/gi, '') // إزالة هاش CRC32 مثل [A1B2C3D4]
-        .replace(/\bs0*\d+[._\s-]*e0*\d+(?:[._\s-]*e?0*\d+)?\b/gi, '') // إزالة S01E04
-        .replace(/\b\d+x0*\d+\b/gi, '') // إزالة 1x04
-        .replace(/\b(?:season|s)[._\s-]*0*\d+\b/gi, '') // إزالة Season 1
-        .replace(/\b(?:episode|ep|e)[._\s-]*0*\d+(?:v\d+)?\b/gi, '') // إزالة Episode 04 / E04
-        .replace(/(?:^|[._\s-\[\(])0*\d{1,4}(?:v\d+)?(?=[._\s-\]\)]|$)/g, ' '); // إزالة رقم الحلقة المنفرد مثل - 04 - أو .112.
+        .replace(/\[[0-9a-f]{8}\]/gi, '')
+        .replace(/\bs0*\d+[._\s-]*e0*\d+(?:[._\s-]*e?0*\d+)?\b/gi, '')
+        .replace(/\b\d+x0*\d+\b/gi, '')
+        .replace(/\b(?:season|s)[._\s-]*0*\d+\b/gi, '')
+        .replace(/\b(?:episode|ep|e)[._\s-]*0*\d+(?:v\d+)?\b/gi, '')
+        .replace(/(?:^|[._\s-\[\(])(sdh|hi|cc|deaf)(?=[._\s-\]\)]|$)/gi, ' ')
+        .replace(/(?:^|[._\s-\[\(])0*\d{1,4}(?:v\d+)?(?=[._\s-\]\)]|$)/g, ' ');
 
-    // استخراج فريق التكويد في نهاية اسم المسلسل مثل -NTb أو -FLUX
     const sceneMatch = stripped.match(/-([a-z0-9]{2,15})$/i);
     const sceneGroup = sceneMatch ? sceneMatch[1].toLowerCase() : '';
 
-    // إعطاء أولوية ثابتة لنوع المصدر القياسي حتى تتصدر نسخ WEB-DL و BluRay دائماً
     let sourceTier = 4;
     if (/\b(web[._\s-]*dl|webdl|amzn|nf|netflix|dsnp|atvp|hmax|cr|crunchyroll|b-global|hidive)\b/i.test(stripped)) {
         sourceTier = 1;
@@ -203,12 +227,13 @@ function computeReleaseTemplateInfo(item) {
     const cleanTemplate = stripped.replace(/[^\p{L}\p{N}]+/gu, '');
     const groupKey = animeGroup || sceneGroup || '';
     const sortKey = [
+        sdhRank,
         String(sourceTier),
         groupKey,
         cleanTemplate || fallbackUrl.toLowerCase()
     ].join('|');
 
-    return { sortKey, sourceTier, groupKey };
+    return { sortKey, sourceTier, groupKey, isSdh };
 }
 
 function sortByConsistentTemplate(list) {
@@ -294,10 +319,14 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             const format = legacyFormat(e);
             if (!format) continue;
             const link = String(e.SubDownloadLink);
+            const fName = e.SubFileName || e.MovieReleaseName || (format === 'ass' ? 'OS_Legacy_Ara_ASS' : 'OS_Legacy_Ara_SRT');
+            const isHi = ['1', 1, true].includes(e.SubHearingImpaired) || HI_NAME_RE.test(fName);
             out.push({
                 url: LEGACY_DIRECT_LINK ? link.replace(/\.gz$/i, '') + '.' + format : link,
                 format,
-                fileName: e.SubFileName || e.MovieReleaseName || (format === 'ass' ? 'OS_Legacy_Ara_ASS' : 'OS_Legacy_Ara_SRT'),
+                fileName: fName,
+                hearingImpaired: isHi,
+                _isSdh: isHi,
                 _source: 'os_legacy',
                 _site: 'os_legacy',
                 _osFileId: String(e.IDSubtitleFile || extractOsFileId(link) || ''),
@@ -333,10 +362,13 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type, isPrefetch = f
                 const fileId = extractOsFileId(s.url) || String(s.id || (idx + 1));
                 const rawName = s.SubFileName || s.title || s.name || ('OS_Mirror_Ara_' + fileId);
                 const isAss = subFormat === 'ssa' || subFormat === 'ass' || assFileRe.test(rawUrl) || assFileRe.test(rawName);
+                const isHi = ['1', 1, true].includes(s.SubHearingImpaired) || s.hearingImpaired === true || HI_NAME_RE.test(rawName) || HI_NAME_RE.test(rawUrl);
                 return {
                     url: s.url,
                     format: isAss ? 'ass' : 'srt',
                     fileName: rawName,
+                    hearingImpaired: isHi,
+                    _isSdh: isHi,
                     _source: 'opensubtitles',
                     _site: 'opensubtitles',
                     _osFileId: fileId,
@@ -353,7 +385,8 @@ function isCleanArabicSrtText(text, cues) {
     if (!text || !Array.isArray(cues) || cues.length < 10) {
         return { ok: false, reason: 'cues=' + (cues ? cues.length : 0) };
     }
-    const cuesText = cues.map(c => c.text || '').join(' ').replace(/\{[^}]*\}|<[^>]*>/g, '');
+    const rawLines = cues.map(c => c.text || '');
+    const cuesText = rawLines.join(' ').replace(/\{[^}]*\}|<[^>]*>/g, '');
     const arabicCount = (cuesText.match(/[\u0600-\u06FF]/g) || []).length;
     if (arabicCount < 150) {
         return { ok: false, reason: 'arabic=' + arabicCount };
@@ -363,7 +396,8 @@ function isCleanArabicSrtText(text, cues) {
     if (replacementCount > 5 || mojibakeCount > 15 || mojibakeCount > arabicCount * 0.05) {
         return { ok: false, reason: 'ترميز ويندوز معطوب' };
     }
-    return { ok: true, cuesText };
+    const isSdhContent = detectSdhInLines(rawLines);
+    return { ok: true, cuesText, isSdhContent };
 }
 
 function isCleanArabicAssText(text) {
@@ -395,7 +429,8 @@ function isCleanArabicAssText(text) {
     }
     const normalizedForHash = joined.replace(/[^\p{L}\p{N}]+/gu, '');
     const sig = crypto.createHash('md5').update(normalizedForHash).digest('hex');
-    return { ok: true, sig };
+    const isSdhContent = detectSdhInLines(dialogueParts);
+    return { ok: true, sig, isSdhContent };
 }
 
 function detectAssContent(text, item) {
@@ -428,6 +463,8 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
             if (effectiveRawKey !== primaryRawKey) setRawCache(effectiveRawKey, txt);
         };
 
+        const metaSdh = isHearingImpairedMeta(s);
+
         if (detectAssContent(text, s)) {
             const assCheck = isCleanArabicAssText(text);
             if (!assCheck.ok) {
@@ -435,7 +472,8 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
                 return null;
             }
             cacheBoth(text);
-            return { ...s, format: 'ass', _sig: assCheck.sig, _verified: true };
+            const finalSdh = metaSdh || assCheck.isSdhContent;
+            return { ...s, format: 'ass', _sig: assCheck.sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh };
         }
 
         const cues = extractCuesUniversal(text);
@@ -448,7 +486,8 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
             .update(check.cuesText.replace(/[^\p{L}\p{N}]+/gu, ''))
             .digest('hex');
         cacheBoth(text);
-        return { ...s, format: 'srt', _sig: sig, _verified: true };
+        const finalSdh = metaSdh || check.isSdhContent;
+        return { ...s, format: 'srt', _sig: sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh };
     } catch {
         return null;
     } finally {
@@ -519,8 +558,11 @@ function lightweightPreFilter(list, siteKey) {
         if (!raw || !raw.url) continue;
         const urlStr = String(raw.url);
         if (rarFileRe.test(urlStr)) continue;
+        const isHi = isHearingImpairedMeta(raw);
         const item = {
             ...raw,
+            hearingImpaired: isHi,
+            _isSdh: isHi,
             _source: raw._source || siteKey,
             _site: siteKey
         };
@@ -544,7 +586,6 @@ function lightweightPreFilter(list, siteKey) {
         const uniqueSig = item._sig || item._osFileId || cleanU;
         srtList.push({ ...item, format: 'srt', _sig: uniqueSig });
     }
-    // تطبيق الترتيب الموحد بالقالب الثابت منذ البداية لضمان فحص نفس النسخ بنفس الترتيب في كل حلقة
     return {
         assList: sortByConsistentTemplate(assList),
         srtList: sortByConsistentTemplate(srtList)
@@ -593,7 +634,11 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             unverifiedOut.push(a);
         }
 
-        return [...verifiedOut, ...unverifiedOut];
+        const combinedSiteAss = [...verifiedOut, ...unverifiedOut];
+        return [
+            ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x)),
+            ...combinedSiteAss.filter(x => isHearingImpairedMeta(x))
+        ];
     }
 
     function collectSiteSrt(siteKey, preSrtList) {
@@ -634,15 +679,24 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             unverifiedOut.push(p);
         }
 
-        return [...verifiedOut, ...unverifiedOut];
+        const combinedSiteSrt = [...verifiedOut, ...unverifiedOut];
+        return [
+            ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x)),
+            ...combinedSiteSrt.filter(x => isHearingImpairedMeta(x))
+        ];
     }
 
-    const allAss = [
+    // للترجمات العربية، نضع أيضاً كل ملفات الـ ASS غير الـ SDH أولاً عبر المواقع، ثم الـ SDH كاحتياط
+    const rawAllAss = [
         ...collectSiteAss('subdl', subdlPre.assList),
         ...collectSiteAss('subsource', subsourcePre.assList),
         ...collectSiteAss('opensubtitles', osPre.assList),
         ...collectSiteAss('os_legacy', legacyPre.assList),
         ...collectSiteAss('oscom', oscomPre.assList)
+    ];
+    const allAss = [
+        ...rawAllAss.filter(x => !isHearingImpairedMeta(x)),
+        ...rawAllAss.filter(x => isHearingImpairedMeta(x))
     ];
 
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
@@ -652,19 +706,24 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
     const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt, ...oscomSrt];
 
+    // للمصحح: نمر أولاً على الملفات النظيفة (بدون SDH) المفحوصة ثم غير المفحوصة، وبعدها فقط نلجأ لملفات SDH إن لم تكتمل الـ 4 تراكات
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
     const correctorSrt = [];
-    for (const pass of [true, false]) {
-        for (const c of readySrt) {
-            if (correctorSrt.length >= CORRECTOR_MAX) break;
-            const u = cleanPath(c.url);
-            const sig = c._sig || u;
-            if (c._bad || seenCorr.has(u) || (strictDedupe && seenCorrSigs.has(sig))) continue;
-            if (!!c._verified !== pass) continue;
-            seenCorr.add(u);
-            seenCorrSigs.add(sig);
-            correctorSrt.push(c);
+    for (const allowSdh of [false, true]) {
+        for (const pass of [true, false]) {
+            for (const c of readySrt) {
+                if (correctorSrt.length >= CORRECTOR_MAX) break;
+                const isSdh = isHearingImpairedMeta(c);
+                if (isSdh !== allowSdh) continue;
+                const u = cleanPath(c.url);
+                const sig = c._sig || u;
+                if (c._bad || seenCorr.has(u) || (strictDedupe && seenCorrSigs.has(sig))) continue;
+                if (!!c._verified !== pass) continue;
+                seenCorr.add(u);
+                seenCorrSigs.add(sig);
+                correctorSrt.push(c);
+            }
         }
     }
 
