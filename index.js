@@ -8,25 +8,26 @@ const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
 const { setOsComCreds } = require('./oscom');
 const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV } = require('./corrector');
+const {
+    cancelNextEpisodePrefetch,
+    scheduleNextEpisodePrefetch,
+    activatePendingNextEpTimer
+} = require('./prefetch');
 const db = require('./db');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
 const PORT = process.env.PORT || 7000;
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 const DAY_MS = 24 * 60 * 60 * 1000;
-const NEXT_EP_DELAY_MS = 3 * 60 * 1000;
+
 const translationCache = {};
 const pinnedCorrectorMemCache = new Map();
-const nextEpTimers = new Map();
-const prefetchedNextSet = new Set();
-const LABEL_TO_STREAM_PATH = {
-    'ARA-SRT': '/stream-ara.srt',
-    'ARA-ASS': '/stream-ara.ass',
-    'SRT': '/stream-ai.srt',
-    'ASS': '/stream-ai.ass'
-};
+
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 class RequestQueue {
     constructor(concurrency = 2) {
         this.queue = [];
@@ -55,121 +56,11 @@ class RequestQueue {
         }
     }
 }
+
 const globalTranslationQueue = new RequestQueue(1);
 const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 30000;
-function getNextEpisodeTargetId(targetId) {
-    if (!targetId) return null;
-    const parts = String(targetId).split(':');
-    if (parts.length >= 3 && (parts[0].startsWith('tt') || parts[0] === 'kitsu')) {
-        const ep = parseInt(parts[2], 10);
-        if (!isNaN(ep) && ep >= 1) {
-            return parts[0] + ':' + parts[1] + ':' + (ep + 1);
-        }
-    }
-    return null;
-}
-function cancelNextEpisodePrefetch(targetId, reason = '') {
-    if (!targetId) return;
-    const existing = nextEpTimers.get(targetId);
-    if (existing) {
-        if (existing.timer) clearTimeout(existing.timer);
-        nextEpTimers.delete(targetId);
-        if (reason) {
-            console.log('[تجهيز تلقائي] تم إلغاء مؤقت ' + targetId + ' (' + reason + ')');
-        }
-    }
-}
-async function runNextEpisodePrefetch(info) {
-    const { targetId, label, trackNum, rawConfig, kitsuId, proto, host } = info;
-    nextEpTimers.delete(targetId);
-    const nextTargetId = getNextEpisodeTargetId(targetId);
-    if (!nextTargetId) return;
-    const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
-    if (prefetchedNextSet.has(prefetchKey)) {
-        console.log('[تجهيز تلقائي] المسار ' + trackNum + ' (' + label + ') للحلقة القادمة ' + nextTargetId + ' مجهّز مسبقاً.');
-        return;
-    }
-    const expectedStreamPath = LABEL_TO_STREAM_PATH[label];
-    if (!expectedStreamPath) return;
-    const mediaType = nextTargetId.startsWith('kitsu') ? 'anime' : 'series';
-    const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '') + '/subtitles/' + mediaType + '/' + encodeURIComponent(nextTargetId).replace(/%3A/gi, ':') + '.json';
-    console.log('[تجهيز تلقائي] استقرار 3 دقائق على ' + targetId + ' (' + label + ' مسار ' + trackNum + ') ⟵ بدء تجهيز الحلقة القادمة: ' + nextTargetId);
-    try {
-        const r = await axios.get('http://127.0.0.1:' + PORT + subsPath, {
-            headers: { 'x-forwarded-host': host || ('127.0.0.1:' + PORT), 'x-forwarded-proto': proto || 'https' },
-            timeout: 60000,
-            validateStatus: () => true
-        });
-        const subs = (r.data && Array.isArray(r.data.subtitles)) ? r.data.subtitles : [];
-        const matched = subs.find(s => {
-            if (!s || !s.url) return false;
-            try {
-                const u = new URL(s.url);
-                return u.pathname.toLowerCase().endsWith(expectedStreamPath) && u.searchParams.get('track') === String(trackNum);
-            } catch {
-                return false;
-            }
-        });
-        if (!matched) {
-            console.log('[تجهيز تلقائي] لم يتم العثور على ' + label + ' مسار ' + trackNum + ' للحلقة القادمة ' + nextTargetId);
-            return;
-        }
-        const u = new URL(matched.url);
-        u.searchParams.set('prefetch', '1');
-        if (kitsuId && !u.searchParams.get('kitsu')) {
-            u.searchParams.set('kitsu', kitsuId);
-        }
-        prefetchedNextSet.add(prefetchKey);
-        if (prefetchedNextSet.size > 1000) {
-            const firstKey = prefetchedNextSet.values().next().value;
-            if (firstKey) prefetchedNextSet.delete(firstKey);
-        }
-        await axios.get('http://127.0.0.1:' + PORT + u.pathname + u.search, {
-            headers: { 'x-forwarded-host': host || ('127.0.0.1:' + PORT), 'x-forwarded-proto': proto || 'https' },
-            timeout: 15000,
-            validateStatus: () => true
-        });
-        console.log('[تجهيز تلقائي] ✅ تم إرسال ' + label + ' مسار ' + trackNum + ' للحلقة ' + nextTargetId + ' إلى طابور التجهيز بالخلفية.');
-    } catch (e) {
-        console.error('[تجهيز تلقائي] خطأ أثناء تجهيز الحلقة القادمة ' + nextTargetId + ':', e.message);
-    }
-}
-function scheduleNextEpisodePrefetch(info) {
-    const { targetId, label, trackNum, isReady } = info;
-    const nextTargetId = getNextEpisodeTargetId(targetId);
-    if (!nextTargetId) return;
-    const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
-    if (prefetchedNextSet.has(prefetchKey)) return;
-    const existing = nextEpTimers.get(targetId);
-    if (existing) {
-        if (existing.timer) clearTimeout(existing.timer);
-        if (existing.label !== label || String(existing.trackNum) !== String(trackNum)) {
-            console.log('[تجهيز تلقائي] تغيير المسار في ' + targetId + ' من (' + existing.label + ' مسار ' + existing.trackNum + ') إلى (' + label + ' مسار ' + trackNum + ') ⟵ إعادة ضبط المؤقت.');
-        }
-    }
-    const entry = { ...info, timer: null };
-    if (isReady) {
-        entry.timer = setTimeout(() => {
-            runNextEpisodePrefetch(entry).catch(() => {});
-        }, NEXT_EP_DELAY_MS);
-        console.log('[تجهيز تلقائي] بدء مؤقت 3 دقائق لـ ' + targetId + ' (' + label + ' مسار ' + trackNum + ') لتجهيز ' + nextTargetId);
-    }
-    nextEpTimers.set(targetId, entry);
-}
-function activatePendingNextEpTimer(targetId, label, trackNum) {
-    if (!targetId) return;
-    const existing = nextEpTimers.get(targetId);
-    if (!existing || existing.timer) return;
-    if (existing.label === label && String(existing.trackNum) === String(trackNum)) {
-        const nextTargetId = getNextEpisodeTargetId(targetId);
-        if (!nextTargetId) return;
-        existing.timer = setTimeout(() => {
-            runNextEpisodePrefetch(existing).catch(() => {});
-        }, NEXT_EP_DELAY_MS);
-        console.log('[تجهيز تلقائي] اكتمل تجهيز ' + targetId + ' (' + label + ' مسار ' + trackNum + ') ⟵ بدء مؤقت 3 دقائق لتجهيز ' + nextTargetId);
-    }
-}
+
 function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, extraKeys, trackNum, label, targetId, kitsuId }) {
     translationCache[cacheKey] = { status: 'pending' };
     const dropIfNotDone = () => {
@@ -202,7 +93,8 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         }
     });
 }
-async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList) {
+
+async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList, isPrefetch = false) {
     const freshSrt = (freshSrtList || []).slice(0, 4);
     const freshAss = (freshAssList || []).slice(0, 4);
     if (!targetId) return { pinnedSrt: freshSrt, pinnedAss: freshAss };
@@ -218,11 +110,14 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
             saved = null;
         }
     }
+
+    // في حال كان الطلب Prefetch بالخلفية ولم يكن هناك تثبيت كامل سابق، نعتمد القائمة العميقة المصفاة مباشرة
     let changed = false;
     const finalSrt = [];
     const finalAss = [];
-    const savedSrt = (saved && Array.isArray(saved.srt)) ? saved.srt : [];
-    const savedAss = (saved && Array.isArray(saved.ass)) ? saved.ass : [];
+    const savedSrt = (!isPrefetch && saved && Array.isArray(saved.srt)) ? saved.srt : [];
+    const savedAss = (!isPrefetch && saved && Array.isArray(saved.ass)) ? saved.ass : [];
+
     const usedSrtUrls = new Set();
     for (let i = 0; i < 4; i++) {
         if (savedSrt[i] && savedSrt[i].url) {
@@ -238,6 +133,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
             changed = true;
         }
     }
+
     const usedAssUrls = new Set();
     for (let i = 0; i < 4; i++) {
         if (savedAss[i] && savedAss[i].url) {
@@ -253,13 +149,15 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
             changed = true;
         }
     }
-    if ((!saved || changed) && (finalSrt.length > 0 || finalAss.length > 0)) {
+
+    if ((!saved || changed || isPrefetch) && (finalSrt.length > 0 || finalAss.length > 0)) {
         const docToSave = { srt: finalSrt, ass: finalAss };
         pinnedCorrectorMemCache.set(pinKey, docToSave);
         db.saveDoc('job', pinKey, docToSave).catch(() => {});
     }
     return { pinnedSrt: finalSrt, pinnedAss: finalAss };
 }
+
 const armCache = new Map();
 async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const cached = armCache.get(kitsuId);
@@ -280,6 +178,7 @@ async function mapKitsuViaArm(kitsuId, kitsuEp) {
     const season = data['thetvdb-season'] ?? data['themoviedb-season'] ?? 1;
     return [imdbId, season, kitsuEp].join(':');
 }
+
 async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     const metaRes = await axios.get('https://anime-kitsu.strem.fun/meta/anime/kitsu:' + kitsuId + '.json', {
         timeout: 6000,
@@ -295,6 +194,7 @@ async function mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp) {
     }
     return null;
 }
+
 async function mapKitsuToImdb(targetId) {
     const parts = targetId.split(':');
     if (parts.length !== 3) return null;
@@ -320,6 +220,7 @@ async function mapKitsuToImdb(targetId) {
     }
     return null;
 }
+
 const absCache = new Map();
 async function osCount(id) {
     try {
@@ -329,6 +230,7 @@ async function osCount(id) {
         return 0;
     }
 }
+
 async function resolveAbsoluteTtId(ttId) {
     const cached = absCache.get(ttId);
     if (cached && (Date.now() - cached.time) < DAY_MS) return cached.value;
@@ -363,6 +265,7 @@ async function resolveAbsoluteTtId(ttId) {
     absCache.set(ttId, { time: Date.now(), value: result });
     return result;
 }
+
 const HI_REGEX = /\b(sdh|hi|cc|deaf)\b|hearing[\s_-]*impaired|closed[\s_-]*caption/;
 function isHearingImpairedSub(sub) {
     if (!sub) return false;
@@ -380,6 +283,7 @@ const srcOf = s => {
 const isHeHi = s => srcOf(s) !== '';
 const srcParam = s => isHeHi(s) ? '&src=' + srcOf(s) : '';
 const isHiFlag = v => ['1', 1, true].includes(v);
+
 function matchEpisode(fileName, targetEpisode) {
     if (!targetEpisode) return true;
     const name = (fileName || '').toLowerCase();
@@ -393,6 +297,7 @@ function matchEpisode(fileName, targetEpisode) {
         new RegExp('\\b0*' + ep + '\\b', 'i')
     ].some(p => p.test(name));
 }
+
 function mkOsSub(url, name, isAss, isHi, site = 'opensubtitles') {
     const f = isAss ? 'ass' : 'srt';
     return {
@@ -408,10 +313,12 @@ function mkOsSub(url, name, isAss, isHi, site = 'opensubtitles') {
         _priority: isAss ? 0 : 2
     };
 }
+
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
 const LEGACY_AGENT_GAP_MS = 1000;
 const assLegacyFormatRe = /^(ass|ssa)$/i;
 const assLegacyFileRe = /\.(ass|ssa)/i;
+
 async function fetchLegacyData(url) {
     const combinedData = [];
     for (let i = 0; i < LEGACY_AGENTS.length; i++) {
@@ -446,6 +353,7 @@ async function fetchLegacyData(url) {
     });
     return results;
 }
+
 async function fetchLegacyApiEnglish(imdbId, season, episode) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -461,6 +369,7 @@ async function fetchLegacyApiEnglish(imdbId, season, episode) {
     }
     return results;
 }
+
 async function fetchMirrorEnglish(imdbId, season, episode, type, sharedOsPromise = null) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     try {
@@ -493,6 +402,7 @@ async function fetchMirrorEnglish(imdbId, season, episode, type, sharedOsPromise
         return [];
     }
 }
+
 async function getOpenSubtitlesEnglish({ imdbId, season, episode, type, sharedOsPromise }) {
     const settled = await Promise.allSettled([
         fetchLegacyApiEnglish(imdbId, season, episode),
@@ -503,6 +413,7 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type, sharedOs
         .flatMap(r => r.value)
         .filter(s => s && s.url);
 }
+
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
     version: '1.9.6',
@@ -515,11 +426,13 @@ const MANIFEST = {
     catalogs: [],
     behaviorHints: { configurable: true, configurationRequired: true }
 };
+
 function getBaseUrl(req) {
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = req.headers['x-forwarded-proto'] || 'https';
     return proto + '://' + host;
 }
+
 function parseConfig(raw, onError) {
     const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '' };
     if (!raw) return cfg;
@@ -539,6 +452,7 @@ function parseConfig(raw, onError) {
     if (cfg.oscomKey && cfg.oscomUser && cfg.oscomPass) setOsComCreds({ apiKey: cfg.oscomKey, username: cfg.oscomUser, password: cfg.oscomPass });
     return cfg;
 }
+
 const MODELS = [
     ['gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite'],
     ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'],
@@ -549,12 +463,13 @@ const MODELS = [
     ['gemini-2.5-flash', 'Gemini 2.5 Flash']
 ];
 const attr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
+
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const {
         keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey,
         subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey,
-        oscomKey: existingOscomKey, oscomUser: existingOscomUser, oscomPass: existingOscomPass
+        oscomKey: existingOsComKey, oscomUser: existingOsComUser, oscomPass: existingOsComPass
     } = parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
     const keyRowsHtml = existingKeys.length > 0
         ? existingKeys.map((key, i) => {
@@ -613,15 +528,15 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 </div>
 <div class="input-group">
 <label>OpenSubtitles.com - مفتاح API (اختياري - مصدر عربي احتياطي)</label>
-<input type="text" id="oscom-key" placeholder="مفتاح OS.com API" value="` + attr(existingOscomKey) + `">
+<input type="text" id="oscom-key" placeholder="مفتاح OS.com API" value="` + attr(existingOsComKey) + `">
 </div>
 <div class="input-group">
 <label>OpenSubtitles.com - اسم المستخدم</label>
-<input type="text" id="oscom-user" placeholder="اسم المستخدم" value="` + attr(existingOscomUser) + `">
+<input type="text" id="oscom-user" placeholder="اسم المستخدم" value="` + attr(existingOsComUser) + `">
 </div>
 <div class="input-group">
 <label>OpenSubtitles.com - كلمة المرور</label>
-<input type="password" id="oscom-pass" placeholder="كلمة المرور" value="` + attr(existingOscomPass) + `">
+<input type="password" id="oscom-pass" placeholder="كلمة المرور" value="` + attr(existingOsComPass) + `">
 </div>
 <div class="input-group" style="margin-top:20px">
 <label>نموذج الترجمة (Translation Model)</label>
@@ -678,6 +593,7 @@ try{navigator.clipboard.writeText(i.value);}catch(e){document.execCommand('copy'
 </body>
 </html>`);
 });
+
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -689,6 +605,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
     }
     res.json(m);
 });
+
 const WANTED_TRACKS = 4;
 const SHOW_AI_ALWAYS = process.env.SHOW_AI_ALWAYS === '1';
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
@@ -704,6 +621,7 @@ const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
 const assExtRe = /\.(ass|ssa)$/i;
 const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
+
 function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched }) {
     const ready = {}, corr = {}, foreign = {};
     const add = (stats, site, isAss, n = 1) => {
@@ -726,6 +644,7 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
         console.log('[جلب] ' + k + ' | جاهز ' + fmt(ready, k) + ' | مصحح ' + fmt(corr, k) + ' | أجنبي ' + foreignTxt);
     });
 }
+
 const rawPersistRunning = new Set();
 const RAW_PERSIST_DELAY_MS = 6000;
 async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
@@ -764,12 +683,15 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
         rawPersistRunning.delete(runKey);
     }
 }
+
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
     const configParam = req.params.config ? encodeURIComponent(req.params.config) : '';
     const addonCfg = parseConfig(req.params.config);
+    const isPrefetch = String(req.query.prefetch || '') === '1';
+
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
     targetId = targetId.replace(/[.\s]+$/, '');
@@ -811,8 +733,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
         const osUrl = 'https://opensubtitles-v3.strem.io/subtitles/' + finalType + '/' + finalTargetId + '.json';
-        console.log('[Fetch] بدء الجلب المتوازي الشامل (الجاهز + المصحح + AI) للعمل: ' + finalTargetId);
-        const sharedOsPromise = axios.get(osUrl, { timeout: 3800 })
+        console.log('[Fetch] بدء الجلب المتوازي الشامل (الجاهز + المصحح + AI)' + (isPrefetch ? ' [وضع الخلفية العميق]' : '') + ' للعمل: ' + finalTargetId);
+        const sharedOsPromise = axios.get(osUrl, { timeout: isPrefetch ? 6500 : 3800 })
             .then(res => (res && res.data && Array.isArray(res.data.subtitles)) ? res.data.subtitles : [])
             .catch(e => {
                 console.log('[Fetch] OpenSubtitles فشل لـ ' + finalTargetId + ': ' + e.message);
@@ -826,7 +748,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 type: finalType,
                 subdlKey: addonCfg.subdlKey,
                 subsourceKey: addonCfg.subsourceKey,
-                sharedOsPromise
+                sharedOsPromise,
+                isPrefetch
             }).catch(err => {
                 console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
                 return { srt: [], ass: [], correctorSrt: [] };
@@ -937,7 +860,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const { pinnedSrt: corrSrtList, pinnedAss: corrAssList } = await resolvePinnedCorrectorTracks(
             finalTargetId,
             initialCorrSrtList,
-            arabicSubs.ass || []
+            arabicSubs.ass || [],
+            isPrefetch
         );
         persistRawTracks(finalTargetId, corrSrtList, addonCfg.subsourceKey, 'srt').catch(() => {});
         persistRawTracks(finalTargetId, corrAssList, addonCfg.subsourceKey, 'ass').catch(() => {});
@@ -996,12 +920,14 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         return res.json({ subtitles: [] });
     }
 });
+
 const sendSub = (res, mime, name, body) => {
     res.setHeader('Content-Type', mime);
     res.setHeader('Content-Disposition', 'inline; filename="' + name + '"');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(body);
 };
+
 function parseEpInfoFromTargetId(targetId) {
     if (!targetId) return null;
     const parts = String(targetId).split(':');
@@ -1010,6 +936,7 @@ function parseEpInfoFromTargetId(targetId) {
     }
     return null;
 }
+
 const rawStreamRoute = (ext, mime) => async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     const targetUrl = req.query.url;
@@ -1034,6 +961,7 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
         return res.status(502).send('Failed to load ready subtitle');
     }
 };
+
 const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     const targetUrl = req.query.url;
@@ -1086,6 +1014,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
             kitsuId,
             proto,
             host,
+            port: PORT,
             isReady
         });
     }
@@ -1094,8 +1023,10 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     }
     sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, waitBody);
 };
+
 const SRT_WAIT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
 const ASS_WAIT = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.';
+
 app.all(['/stream-raw.srt', '/:config/stream-raw.srt'],
     rawStreamRoute('srt', 'text/plain; charset=utf-8'));
 app.all(['/stream-raw.ass', '/:config/stream-raw.ass'],
@@ -1108,6 +1039,7 @@ app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
     streamRoute('srt', 'ARA-SRT', 'text/plain; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+
 const CHECK_GROUPS = [
     { key: 'ara-srt', title: 'مصحّح SRT', hint: '', needKeys: true },
     { key: 'ara-ass', title: 'مصحّح ASS', hint: '', needKeys: true },
@@ -1129,6 +1061,7 @@ const checkKeyOf = url => {
 const checkTrackOf = url => {
     try { return new URL(url).searchParams.get('track') || ''; } catch (e) { return ''; }
 };
+
 const titleCache = new Map();
 async function resolveMediaTitle(type, targetId, tmdbKey) {
     const parts = String(targetId || '').split(':');
@@ -1168,6 +1101,7 @@ async function resolveMediaTitle(type, targetId, tmdbKey) {
     }
     return baseTitle;
 }
+
 function renderCheckPage(o) {
     const groups = CHECK_GROUPS.map(g => ({ ...g, items: [] }));
     const byKey = new Map(groups.map(g => [g.key, g]));
@@ -1223,6 +1157,7 @@ function renderCheckPage(o) {
         + 'if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(u).then(done,fb)}else{fb()}});</script>'
         + '</main></body></html>';
 }
+
 app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -1261,8 +1196,10 @@ app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req
         jsonUrl: proto + '://' + host + subsPath
     }));
 });
+
 app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
 });
+
 module.exports = app;
