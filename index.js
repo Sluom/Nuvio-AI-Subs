@@ -955,20 +955,20 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
 const SRT_WAIT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
 const ASS_WAIT = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.';
 app.all(['/stream-raw.srt', '/:config/stream-raw.srt'],
-    rawStreamRoute('srt', 'application/x-subrip; charset=utf-8'));
+    rawStreamRoute('srt', 'text/plain; charset=utf-8'));
 app.all(['/stream-raw.ass', '/:config/stream-raw.ass'],
     rawStreamRoute('ass', 'text/x-ssa; charset=utf-8'));
 app.all(['/stream-ai.srt', '/:config/stream-ai.srt'],
-    streamRoute('srt', 'SRT', 'application/x-subrip; charset=utf-8', handleTranslationSrtDetailed, SRT_WAIT));
+    streamRoute('srt', 'SRT', 'text/plain; charset=utf-8', handleTranslationSrtDetailed, SRT_WAIT));
 app.all(['/stream-ai.ass', '/:config/stream-ai.ass'],
     streamRoute('ass', 'ASS', 'text/x-ssa; charset=utf-8', handleTranslationAssDetailed, ASS_WAIT));
 app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
-    streamRoute('srt', 'ARA-SRT', 'application/x-subrip; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
+    streamRoute('srt', 'ARA-SRT', 'text/plain; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
 const CHECK_GROUPS = [
-    { key: 'ara-srt', title: 'مصحّح SRT', hint: 'تصحيح الترقيم بالذكاء الاصطناعي (يحتاج مفاتيحك)', needKeys: true },
-    { key: 'ara-ass', title: 'مصحّح ASS', hint: 'تصحيح الترقيم بالذكاء الاصطناعي (يحتاج مفاتيحك)', needKeys: true },
+    { key: 'ara-srt', title: 'مصحّح SRT', hint: '', needKeys: true },
+    { key: 'ara-ass', title: 'مصحّح ASS', hint: '', needKeys: true },
     { key: 'raw-srt', title: 'جاهزة SRT (بدون تصحيح)', hint: 'تنزل كما هي من الموقع', needKeys: false },
     { key: 'raw-ass', title: 'جاهزة ASS (بدون تصحيح)', hint: 'تنزل كما هي من الموقع', needKeys: false },
     { key: 'ai-srt', title: 'ترجمة ذكاء اصطناعي SRT', hint: 'ترجمة من لغة المصدر (يحتاج مفاتيحك)', needKeys: true },
