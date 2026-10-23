@@ -58,8 +58,9 @@ class RequestQueue {
 }
 
 const globalTranslationQueue = new RequestQueue(1);
-const MAX_BACKGROUND_ROUNDS = 3;
-const ROUND_PAUSE_MS = 30000;
+const MAX_BACKGROUND_ROUNDS = 5;
+const ROUND_PAUSE_MS = 45000;
+
 
 function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, extraKeys, trackNum, label, targetId, kitsuId }) {
     translationCache[cacheKey] = { status: 'pending' };
