@@ -966,6 +966,114 @@ app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
     streamRoute('srt', 'ARA-SRT', 'application/x-subrip; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
     streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+const CHECK_GROUPS = [
+    { key: 'ara-srt', title: 'مصحّح SRT', hint: 'تصحيح الترقيم بالذكاء الاصطناعي (يحتاج مفاتيحك)', needKeys: true },
+    { key: 'ara-ass', title: 'مصحّح ASS', hint: 'تصحيح الترقيم بالذكاء الاصطناعي (يحتاج مفاتيحك)', needKeys: true },
+    { key: 'raw-srt', title: 'جاهزة SRT (بدون تصحيح)', hint: 'تنزل كما هي من الموقع', needKeys: false },
+    { key: 'raw-ass', title: 'جاهزة ASS (بدون تصحيح)', hint: 'تنزل كما هي من الموقع', needKeys: false },
+    { key: 'ai-srt', title: 'ترجمة ذكاء اصطناعي SRT', hint: 'ترجمة من لغة المصدر (يحتاج مفاتيحك)', needKeys: true },
+    { key: 'ai-ass', title: 'ترجمة ذكاء اصطناعي ASS', hint: 'ترجمة من لغة المصدر (يحتاج مفاتيحك)', needKeys: true },
+    { key: 'other', title: 'روابط أخرى', hint: '', needKeys: false }
+];
+const checkEsc = s => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const checkKeyOf = url => {
+    try {
+        const m = new URL(url).pathname.match(/\/stream-(ara|raw|ai)\.(srt|ass)$/i);
+        return m ? m[1].toLowerCase() + '-' + m[2].toLowerCase() : 'other';
+    } catch (e) { return 'other'; }
+};
+const checkTrackOf = url => {
+    try { return new URL(url).searchParams.get('track') || ''; } catch (e) { return ''; }
+};
+function renderCheckPage(o) {
+    const groups = CHECK_GROUPS.map(g => ({ ...g, items: [] }));
+    const byKey = new Map(groups.map(g => [g.key, g]));
+    let total = 0;
+    for (const s of o.subs) {
+        if (!s || !/^https?:\/\//i.test(String(s.url || ''))) continue;
+        byKey.get(checkKeyOf(s.url)).items.push(s);
+        total++;
+    }
+    const sections = groups.filter(g => g.items.length).map(g => {
+        const rows = g.items.map(s => {
+            const t = checkEsc(s.title || s.id || 'بدون اسم');
+            const u = checkEsc(s.url);
+            const tr = checkTrackOf(s.url);
+            const meta = tr ? '<span class="meta">مسار ' + checkEsc(tr) + '</span>' : '';
+            if (g.needKeys && !o.hasKeys) {
+                return '<li class="it off"><span class="open">' + t + '</span>' + meta + '<span class="why">معطّل: افتح الصفحة من رابطك الطويل</span></li>';
+            }
+            return '<li class="it"><a class="open" href="' + u + '" target="_blank" rel="noopener">' + t + '</a>' + meta
+                + '<button type="button" class="cp" data-u="' + u + '">نسخ</button></li>';
+        }).join('');
+        return '<section><h2>' + checkEsc(g.title) + ' <small>(' + g.items.length + ')</small></h2>'
+            + (g.hint ? '<p class="hint">' + checkEsc(g.hint) + '</p>' : '') + '<ul>' + rows + '</ul></section>';
+    }).join('');
+    const warn = o.hasKeys ? '' : '<div class="box bad">⚠️ هذا الرابط ما فيه إعداداتك (مفاتيح Gemini)، فتعطّلت روابط المصحّح والذكاء الاصطناعي حتى لا تنخرب نتيجتها بذاكرة السيرفر. افتح الصفحة من رابطك الطويل: <code>رابط السيرفر/إعداداتك/check/' + checkEsc(o.type) + '/' + checkEsc(o.id) + '</code></div>';
+    const err = o.error ? '<div class="box bad">' + checkEsc(o.error) + '</div>' : '';
+    const empty = (!o.error && !total) ? '<div class="box">ما لگيت ترجمات لهذا العمل.</div>' : '';
+    return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
+        + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        + '<meta name="robots" content="noindex,nofollow"><title>فحص الترجمات</title>'
+        + '<style>'
+        + ':root{--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mut:#6b7280;--ln:#e3e6ea;--ac:#2563eb;--bad:#b91c1c;--badbg:#fee2e2}'
+        + '@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1a1f26;--tx:#e8eaed;--mut:#9aa3af;--ln:#2a313a;--ac:#60a5fa;--bad:#fca5a5;--badbg:#3b1d1d}}'
+        + '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;padding:16px}'
+        + 'main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0 0 4px}h2{font-size:17px;margin:22px 0 2px}h2 small{color:var(--mut);font-weight:400}'
+        + '.sub{color:var(--mut);font-size:14px;direction:ltr;text-align:right;word-break:break-all}.hint{color:var(--mut);font-size:13px;margin:0 0 8px}'
+        + '.box{background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:12px 14px;margin:14px 0;font-size:14px}.box.bad{background:var(--badbg);color:var(--bad);border-color:var(--bad)}'
+        + 'code{direction:ltr;unicode-bidi:embed;word-break:break-all;font-size:12px}ul{list-style:none;margin:0;padding:0}'
+        + '.it{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:10px 12px;margin:8px 0}'
+        + '.open{flex:1 1 100%;font-weight:600;direction:ltr;text-align:right;word-break:break-all;color:var(--ac);text-decoration:none}.it.off .open{color:var(--mut)}'
+        + '.meta{color:var(--mut);font-size:13px}.why{color:var(--bad);font-size:13px}'
+        + '.cp{margin-inline-start:auto;border:1px solid var(--ln);background:transparent;color:var(--tx);border-radius:8px;padding:6px 12px;font:inherit;font-size:14px}'
+        + 'a.lnk{color:var(--ac)}'
+        + '</style></head><body><main>'
+        + '<h1>فحص الترجمات</h1><div class="sub">' + checkEsc(o.type) + ' / ' + checkEsc(o.id) + '</div>'
+        + warn + err
+        + '<div class="box">اضغط على اسم المسار ليفتح بتبويب جديد، مثل ما يطلبه المشغّل بالضبط. المسارات المصحّحة: أول فتحة ترجع ملف انتظار («الترجمة قيد التنفيذ») ويبدأ التصحيح بالخلفية، أعد فتح نفس الرابط بعد 20 إلى 60 ثانية. لا تشارك رابط هذه الصفحة لأن روابطها تحمل مفاتيحك. <a class="lnk" href="' + checkEsc(o.jsonUrl) + '" target="_blank" rel="noopener">عرض JSON الخام</a></div>'
+        + empty + sections
+        + '<script>document.addEventListener("click",function(e){var b=e.target.closest?e.target.closest("button.cp"):null;if(!b)return;var u=b.getAttribute("data-u");'
+        + 'var done=function(){var t=b.textContent;b.textContent="تم النسخ ✓";setTimeout(function(){b.textContent=t},1500)};'
+        + 'var fb=function(){var a=document.createElement("textarea");a.value=u;document.body.appendChild(a);a.select();try{document.execCommand("copy");done()}catch(x){}document.body.removeChild(a)};'
+        + 'if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(u).then(done,fb)}else{fb()}});</script>'
+        + '</main></body></html>';
+}
+app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    const rawConfig = req.params.config || '';
+    const cfg = parseConfig(rawConfig);
+    const type = String(req.params.type || '').replace(/[^a-zA-Z]/g, '') || 'series';
+    let targetId = String(req.params.reqId || '').split('/')[0];
+    if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
+    targetId = targetId.replace(/[.\s]+$/, '');
+    if (!targetId) return res.status(400).send('<!DOCTYPE html><meta charset="utf-8"><p dir="rtl">اكتب معرّف العمل بعد check/' + checkEsc(type) + '/ مثل tt21097264:1:2</p>');
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '') + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json';
+    let subs = [], error = '';
+    try {
+        const r = await axios.get('http://127.0.0.1:' + PORT + subsPath, {
+            headers: { 'x-forwarded-host': host, 'x-forwarded-proto': proto },
+            timeout: 120000, validateStatus: () => true
+        });
+        let data = r.data;
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = null; } }
+        if (r.status === 200 && data && Array.isArray(data.subtitles)) subs = data.subtitles;
+        else error = 'رد السيرفر غير متوقع (' + r.status + ')';
+    } catch (e) {
+        error = 'تعذر جلب القائمة: ' + e.message;
+    }
+    res.send(renderCheckPage({
+        subs, error, type, id: targetId,
+        hasKeys: Array.isArray(cfg.keys) && cfg.keys.length > 0,
+        jsonUrl: proto + '://' + host + subsPath
+    }));
+});
 app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
