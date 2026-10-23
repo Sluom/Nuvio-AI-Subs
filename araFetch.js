@@ -165,6 +165,64 @@ function normalizeNameSig(name) {
         .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
+// توليد بصمة هيكلية ثابتة لاسم الإصدار (تتجاهل رقم الحلقة وهاش CRC) لضمان ثبات ترتيب التراكات عبر الحلقات
+function computeReleaseTemplateInfo(item) {
+    const raw = String((item && (item.fileName || item.title || item.origName || item.name)) || '').trim();
+    const fallbackUrl = cleanPath((item && item.url) || '').split('/').pop() || '';
+    const base = (raw || fallbackUrl)
+        .toLowerCase()
+        .replace(/\.(srt|ass|ssa|sub|zip|gz|rar|7z)$/gi, '');
+
+    // استخراج التاج بين أقواس مربعة في بداية الملف (شائع في الأنمي مثل [erai-raws] أو [subsplease])
+    const bracketMatch = base.match(/^\s*\[([^\]]+)\]/);
+    const animeGroup = bracketMatch ? bracketMatch[1].replace(/\s+/g, '') : '';
+
+    // تجريد الاسم من أرقام المواسم والحلقات المتغيرة وهاشات الفيديو
+    const stripped = base
+        .replace(/\[[0-9a-f]{8}\]/gi, '') // إزالة هاش CRC32 مثل [A1B2C3D4]
+        .replace(/\bs0*\d+[._\s-]*e0*\d+(?:[._\s-]*e?0*\d+)?\b/gi, '') // إزالة S01E04
+        .replace(/\b\d+x0*\d+\b/gi, '') // إزالة 1x04
+        .replace(/\b(?:season|s)[._\s-]*0*\d+\b/gi, '') // إزالة Season 1
+        .replace(/\b(?:episode|ep|e)[._\s-]*0*\d+(?:v\d+)?\b/gi, '') // إزالة Episode 04 / E04
+        .replace(/(?:^|[._\s-\[\(])0*\d{1,4}(?:v\d+)?(?=[._\s-\]\)]|$)/g, ' '); // إزالة رقم الحلقة المنفرد مثل - 04 - أو .112.
+
+    // استخراج فريق التكويد في نهاية اسم المسلسل مثل -NTb أو -FLUX
+    const sceneMatch = stripped.match(/-([a-z0-9]{2,15})$/i);
+    const sceneGroup = sceneMatch ? sceneMatch[1].toLowerCase() : '';
+
+    // إعطاء أولوية ثابتة لنوع المصدر القياسي حتى تتصدر نسخ WEB-DL و BluRay دائماً
+    let sourceTier = 4;
+    if (/\b(web[._\s-]*dl|webdl|amzn|nf|netflix|dsnp|atvp|hmax|cr|crunchyroll|b-global|hidive)\b/i.test(stripped)) {
+        sourceTier = 1;
+    } else if (/\b(web[._\s-]*rip|webrip|web)\b/i.test(stripped)) {
+        sourceTier = 2;
+    } else if (/\b(blu[._\s-]*ray|bdrip|brrip|remux)\b/i.test(stripped)) {
+        sourceTier = 3;
+    }
+
+    const cleanTemplate = stripped.replace(/[^\p{L}\p{N}]+/gu, '');
+    const groupKey = animeGroup || sceneGroup || '';
+    const sortKey = [
+        String(sourceTier),
+        groupKey,
+        cleanTemplate || fallbackUrl.toLowerCase()
+    ].join('|');
+
+    return { sortKey, sourceTier, groupKey };
+}
+
+function sortByConsistentTemplate(list) {
+    if (!Array.isArray(list) || list.length <= 1) return list;
+    return list
+        .map((item, idx) => ({ item, idx, tpl: computeReleaseTemplateInfo(item) }))
+        .sort((a, b) => {
+            if (a.tpl.sortKey < b.tpl.sortKey) return -1;
+            if (a.tpl.sortKey > b.tpl.sortKey) return 1;
+            return a.idx - b.idx;
+        })
+        .map(x => x.item);
+}
+
 async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) {
     if (!imdbId || !imdbId.startsWith('tt')) return [];
     const numericId = imdbId.replace(/^tt0*/, '');
@@ -314,7 +372,6 @@ function isCleanArabicAssText(text) {
     const dialogueParts = [];
     for (const line of lines) {
         if (!/^\s*Dialogue:/i.test(line)) continue;
-        // صيغة ASS تحتوي 9 فواصل قبل النص الفعلي للحوار
         const parts = line.split(',');
         const rawDiag = parts.length >= 10 ? parts.slice(9).join(',') : line;
         const cleaned = rawDiag
@@ -487,7 +544,11 @@ function lightweightPreFilter(list, siteKey) {
         const uniqueSig = item._sig || item._osFileId || cleanU;
         srtList.push({ ...item, format: 'srt', _sig: uniqueSig });
     }
-    return { assList, srtList };
+    // تطبيق الترتيب الموحد بالقالب الثابت منذ البداية لضمان فحص نفس النسخ بنفس الترتيب في كل حلقة
+    return {
+        assList: sortByConsistentTemplate(assList),
+        srtList: sortByConsistentTemplate(srtList)
+    };
 }
 
 function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, verifiedZipItems, strictDedupe = false }) {
@@ -496,16 +557,19 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
     }
 
-    // مجموعة بصمات عالمية لمنع تكرار نفس ملف الـ ASS بين المواقع أو داخل الموقع الواحد
     const globalSeenAssSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
-        const out = [];
+        const verifiedOut = [];
+        const unverifiedOut = [];
         const seenUrls = new Set();
         const seenSiteSigs = new Set();
 
-        for (const v of verifiedZipItems) {
-            if (!v || v._site !== siteKey || v.format !== 'ass' || v._bad) continue;
+        const siteVerifiedAss = sortByConsistentTemplate(
+            verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'ass' && !v._bad)
+        );
+
+        for (const v of siteVerifiedAss) {
             const u = cleanPath(v.url);
             const sig = v._sig || u;
             if (seenUrls.has(u) || seenSiteSigs.has(sig)) continue;
@@ -513,33 +577,38 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             seenUrls.add(u);
             seenSiteSigs.add(sig);
             if (v._sig) globalSeenAssSigs.add(v._sig);
-            out.push(v);
+            verifiedOut.push(v);
         }
 
-        for (const a of preAssList) {
+        const sortedPreAss = sortByConsistentTemplate(preAssList);
+        for (const a of sortedPreAss) {
             if (a._bad) continue;
             const u = cleanPath(a.url);
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
-            // في الوضع الصارم بالخلفية، نتجنب الملفات غير المفحوصة إذا اكتفينا بملفات مفحوصة ومؤكدة
             if (strictDedupe && globalSeenAssSigs.size >= CORRECTOR_MAX) continue;
             const sig = a._sig || normalizeNameSig(a.fileName || u);
             if (sig && seenSiteSigs.has(sig)) continue;
             seenUrls.add(u);
             if (sig) seenSiteSigs.add(sig);
-            out.push(a);
+            unverifiedOut.push(a);
         }
-        return out;
+
+        return [...verifiedOut, ...unverifiedOut];
     }
 
     function collectSiteSrt(siteKey, preSrtList) {
-        const out = [];
+        const verifiedOut = [];
+        const unverifiedOut = [];
         const seenSigs = new Set();
         const seenCleanUrls = new Set();
         const seenOsIds = new Set();
-        const siteVerifiedSrt = verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'srt' && !v._bad);
+
+        const siteVerifiedSrt = sortByConsistentTemplate(
+            verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'srt' && !v._bad)
+        );
 
         for (const v of siteVerifiedSrt) {
-            if (out.length >= MAX_SRT_PER_SITE) break;
+            if (verifiedOut.length >= MAX_SRT_PER_SITE) break;
             const uKey = cleanPath(v.url);
             const sKey = v._sig || uKey;
             const osId = v._osFileId || '';
@@ -547,10 +616,12 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             seenCleanUrls.add(uKey);
             seenSigs.add(sKey);
             if (osId) seenOsIds.add(osId);
-            out.push(v);
+            verifiedOut.push(v);
         }
-        for (const p of preSrtList) {
-            if (out.length >= MAX_SRT_PER_SITE) break;
+
+        const sortedPreSrt = sortByConsistentTemplate(preSrtList);
+        for (const p of sortedPreSrt) {
+            if (verifiedOut.length + unverifiedOut.length >= MAX_SRT_PER_SITE) break;
             if (p._bad) continue;
             const uKey = cleanPath(p.url);
             if (verifiedUrls.has(uKey)) continue;
@@ -560,9 +631,10 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             seenCleanUrls.add(uKey);
             seenSigs.add(sKey);
             if (osId) seenOsIds.add(osId);
-            out.push(p);
+            unverifiedOut.push(p);
         }
-        return out;
+
+        return [...verifiedOut, ...unverifiedOut];
     }
 
     const allAss = [
@@ -639,7 +711,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const cacheKey = [imdbId, season, episode, keyHash].join(':');
     const hit = resultCache.get(cacheKey);
 
-    // إذا كان الطلب عادياً، نرجع الكاش فوراً؛ أما إذا كان Prefetch ولم يكن الكاش مفحوصاً بالكامل، نعيد الجلب العميق
     if (hit && Date.now() - hit.time < RESULT_TTL) {
         if (!isPrefetch || hit.isComplete) return hit.value;
     }
