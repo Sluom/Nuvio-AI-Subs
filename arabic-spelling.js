@@ -11,11 +11,11 @@ const NAMES_KEEP = mk(`
 فلوى جحى ندوى عزوى عشوى طهوى عزى حوى جعدى جمحى ثروى حزوى رهوى سليمى لبينى
 `);
 const NAMES_ASIS = mk(`
-هدى بشرى منى يسرى ندى ليلى تقى جنى ذكرى يحيى رضى مقتدى نهى غنى على
-يسمى يدعى يعفى يرجى يخفى يلقى ينهى يسقى يرمى يبلى يطوى يجلى يهدى يرضى يفنى يروى يشوى يكوى يطلى يعمى
+هدى بشرى منى يسرى ندى ليلى تقى جنى ذكرى يحيى رضى مقتدى نهى غنى على عمى ضنى
+يسمى يدعى يعفى يرجى يخفى يلقى ينهى يسقى يرمى يبلى يطوى يجلى يهدى يرضى يفنى يروى يشوى يكوى يطلى يعمى يضحى تضحى نضحى مضحى
 محتوى مستدعى معطى مفتى متبنى مبنى مرمى مسعى مغشى مشتكى معافى مرتجى يمنى منتهى معنى مبتغى
 كبرى صغرى فضلى مسمى يلغى يعطى يبنى ينفى يجرى يبدى يولى يثنى يجنى يصلى مدعى ملتقى منفى مغنى مستثنى 
-مقتنى ملقى مبقى معلى مغطى مزكى مصلى أعلى أغلى أدنى أقوى يقوى نقوى تقوى أقصى أحلى أوفى أبقى ألقى أخفى أمضى أرضى أنهى
+مقتنى ملقى مبقى معلى مغطى مزكى مصلى أعلى أغلى أدنى أقوى يقوى نقوى تقوى أقصى أحلى أوفى أبقى ألقى أخفى أمضى أرضى أنهى أبلى
 مرضى قتلى أسرى جرحى موتى صرعى سمى أوحى أدى تشترى يشترى تعطى أعطى بصرى ماعدى عدى نعطى يرثى ترثى نرثى أرثى مستوى
 أغمى يغمى تغمى نغمى مغمى دعى ندعى تدعى أسمى علفى المستوى أفشى يفشى تفشى نفشى ارتدى محلى المحلى تمحى مغزى بنى
 أدرى أتنامى توفى نتوفى أتوفى تتوفى يتوفى يحلى تقلى وسطى مثلى المثلى يستدعى تنهى عذارى غيارى شكاوى فتاوى دعاوى أسارى أيامى
@@ -63,7 +63,7 @@ const FORCE_RAW = `
 أذى صدى شذى لظى أنثى قصوى وثقى حبلى
 كسالى يتامى حيارى سكارى نصارى نشاوى ثكالى ندامى عطاشى غضابى
 مستشفى مقهى ملهى مشفى مأوى مثوى مغزى مرأى منأى منتدى
-إحدى أخرى أولى أغلى أدنى أقصى كمثرى أفعى أبلى الأعلى الأخرى
+إحدى أخرى أولى أغلى أدنى أقصى كمثرى أفعى الأعلى الأخرى
 مصطفى عيسى موسى كسرى
 وغى سدى دجى زلفى ملأى ظمأى حسرى حيرى خزامى ممشى
 أغبى أحرى أدهى أوهى أسخى أعتى أقسى أجدى أجفى أسنى أحجى
@@ -89,11 +89,10 @@ for (const st of FORCE_VERB_STEMS) {
 const FORCE_PRESENT_STEMS = 'سعى خشى حظى أبى نأى طغى'.split(' ');
 for (const st of FORCE_PRESENT_STEMS) {
   FORCE_RAW.push('ي' + st, 'ن' + st);
-  if (st !== 'أبى') FORCE_RAW.push('أ' + st);
 }
 const FORCE_ALIF = new Set(FORCE_RAW.map(norm));
 const FORCE_MAP = new Map(FORCE_RAW.map(w => [norm(w.slice(0, -1) + 'ي'), w]));
-const FORCE_PREFIX_RE = /^([وف]?(?:س(?=[يان]))?)(ال|لل|[بكل]ال|[بكل])?(.+)$/;
+const FORCE_PREFIX_RE = /^([وف]?(?:س(?=[ين]))?)(ال|لل|[بكل]ال|[بكل])?(.+)$/;
 (function expandVerbs() {
   const stems = 'بقى سعى نسى خشى لقى شفى رضى هوى رعى شقى أبى نأى حظى حضى طغى تعدى تلوى وصى'.split(' ');
   for (const s of stems) for (const p of ['ي', 'ت', 'أ', 'ن', 'أت']) WORDS_KEEP.add(norm(p + s));
@@ -108,6 +107,10 @@ const EXACT = new Map([
   ['الى', 'إلى'], ['اى', 'أي'], ['كى', 'كي'],
   ['لاننى', 'لأنني'], ['لانني', 'لأنني'], ['اننى', 'أنني'], ['انني', 'أنني']
 ]);
+const BAD_YA_STRICT = new Set([
+  'فى', 'وفى', 'ففى', 'الذى', 'والذى', 'فالذى', 'كالذى', 'بالذى', 'للذى',
+  'التى', 'والتى', 'فالتى', 'كالتى', 'بالتى', 'للتى', 'اننى', 'واننى', 'فاننى', 'لاننى', 'ولاننى'
+]);
 function forceAlif(tok) {
   const n = norm(tok);
   if (n.length < 3 || n[n.length - 1] !== 'ي') return null;
@@ -120,7 +123,28 @@ function forceAlif(tok) {
   w = FORCE_MAP.get(stem);
   return w ? n.slice(0, n.length - stem.length) + w : null;
 }
-module.exports = function createSpellFixer(fixTypoToken) {
+function hasEgyptianSpelling(text, threshold = 4) {
+  if (!text) return false;
+  const matches = String(text).match(TOKEN_RE);
+  if (!matches) return false;
+  let count = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const t = matches[i];
+    if (!WORD_START.test(t) || !HAS_ARABIC.test(t)) continue;
+    const last = t[t.length - 1];
+    if (last === 'ي') {
+      if (forceAlif(t)) {
+        if (++count >= threshold) return true;
+      }
+    } else if (last === 'ى') {
+      if (BAD_YA_STRICT.has(norm(t))) {
+        if (++count >= threshold) return true;
+      }
+    }
+  }
+  return false;
+}
+function createSpellFixer(fixTypoToken) {
   const LOG = new Map();
   const bump = (a, b) => { const k = a + ' → ' + b; LOG.set(k, (LOG.get(k) || 0) + 1); };
   function candidates(n) {
@@ -185,4 +209,6 @@ module.exports = function createSpellFixer(fixTypoToken) {
     LOG.clear();
   }
   return { fix, restoreFinalYa, flushLog };
-};
+}
+createSpellFixer.hasEgyptianSpelling = hasEgyptianSpelling;
+module.exports = createSpellFixer;
