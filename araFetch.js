@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
+const { hasEgyptianSpelling } = require('./arabic-spelling');
 
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
 
@@ -192,7 +193,7 @@ function normalizeNameSig(name) {
 // توليد بصمة هيكلية ثابتة لاسم الإصدار (مع إعطاء الأولوية للترجمات غير الـ SDH أولاً)
 function computeReleaseTemplateInfo(item) {
     const isSdh = isHearingImpairedMeta(item);
-    const sdhRank = isSdh ? '1' : '0'; // 0 = نظيف بدون SDH (أولوية قصوى)، 1 = SDH (احتياط في النهاية)
+    const sdhRank = isSdh ? '1' : '0';
 
     const raw = String((item && (item.fileName || item.title || item.origName || item.name)) || '').trim();
     const fallbackUrl = cleanPath((item && item.url) || '').split('/').pop() || '';
@@ -397,7 +398,8 @@ function isCleanArabicSrtText(text, cues) {
         return { ok: false, reason: 'ترميز ويندوز معطوب' };
     }
     const isSdhContent = detectSdhInLines(rawLines);
-    return { ok: true, cuesText, isSdhContent };
+    const isBadSpelling = hasEgyptianSpelling(cuesText, 4);
+    return { ok: true, cuesText, isSdhContent, isBadSpelling };
 }
 
 function isCleanArabicAssText(text) {
@@ -430,7 +432,8 @@ function isCleanArabicAssText(text) {
     const normalizedForHash = joined.replace(/[^\p{L}\p{N}]+/gu, '');
     const sig = crypto.createHash('md5').update(normalizedForHash).digest('hex');
     const isSdhContent = detectSdhInLines(dialogueParts);
-    return { ok: true, sig, isSdhContent };
+    const isBadSpelling = hasEgyptianSpelling(joined, 4);
+    return { ok: true, sig, isSdhContent, isBadSpelling };
 }
 
 function detectAssContent(text, item) {
@@ -473,7 +476,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
             }
             cacheBoth(text);
             const finalSdh = metaSdh || assCheck.isSdhContent;
-            return { ...s, format: 'ass', _sig: assCheck.sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh };
+            return { ...s, format: 'ass', _sig: assCheck.sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh, _badSpelling: assCheck.isBadSpelling };
         }
 
         const cues = extractCuesUniversal(text);
@@ -487,7 +490,7 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
             .digest('hex');
         cacheBoth(text);
         const finalSdh = metaSdh || check.isSdhContent;
-        return { ...s, format: 'srt', _sig: sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh };
+        return { ...s, format: 'srt', _sig: sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh, _badSpelling: check.isBadSpelling };
     } catch {
         return null;
     } finally {
@@ -598,7 +601,9 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
     }
 
+    // سجلات عالمية عابرة للمواقع لمنع تكرار نفس البصمة النصية (MD5) منذ الضغطة الأولى (للأفلام والمسلسلات)
     const globalSeenAssSigs = new Set();
+    const globalSeenSrtSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
         const verifiedOut = [];
@@ -614,7 +619,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             const u = cleanPath(v.url);
             const sig = v._sig || u;
             if (seenUrls.has(u) || seenSiteSigs.has(sig)) continue;
-            if (strictDedupe && v._sig && globalSeenAssSigs.has(v._sig)) continue;
+            // منع تكرار البصمة النصية عبر جميع المواقع دائماً (سواء في أول ضغطة أو بالخلفية)
+            if (v._sig && globalSeenAssSigs.has(v._sig)) continue;
             seenUrls.add(u);
             seenSiteSigs.add(sig);
             if (v._sig) globalSeenAssSigs.add(v._sig);
@@ -628,7 +634,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
             if (strictDedupe && globalSeenAssSigs.size >= CORRECTOR_MAX) continue;
             const sig = a._sig || normalizeNameSig(a.fileName || u);
-            if (sig && seenSiteSigs.has(sig)) continue;
+            if (sig && (seenSiteSigs.has(sig) || globalSeenAssSigs.has(sig))) continue;
             seenUrls.add(u);
             if (sig) seenSiteSigs.add(sig);
             unverifiedOut.push(a);
@@ -636,8 +642,10 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
 
         const combinedSiteAss = [...verifiedOut, ...unverifiedOut];
         return [
-            ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x)),
-            ...combinedSiteAss.filter(x => isHearingImpairedMeta(x))
+            ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
+            ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
+            ...combinedSiteAss.filter(x => isHearingImpairedMeta(x) && !x._badSpelling),
+            ...combinedSiteAss.filter(x => isHearingImpairedMeta(x) && x._badSpelling)
         ];
     }
 
@@ -658,8 +666,11 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             const sKey = v._sig || uKey;
             const osId = v._osFileId || '';
             if (seenCleanUrls.has(uKey) || seenSigs.has(sKey) || (osId && seenOsIds.has(osId))) continue;
+            // منع تكرار البصمة النصية (MD5) عبر جميع المواقع منذ الضغطة الأولى
+            if (v._sig && globalSeenSrtSigs.has(v._sig)) continue;
             seenCleanUrls.add(uKey);
             seenSigs.add(sKey);
+            if (v._sig) globalSeenSrtSigs.add(v._sig);
             if (osId) seenOsIds.add(osId);
             verifiedOut.push(v);
         }
@@ -672,7 +683,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (verifiedUrls.has(uKey)) continue;
             const sKey = p._sig || uKey;
             const osId = p._osFileId || '';
-            if (seenCleanUrls.has(uKey) || seenSigs.has(sKey) || (osId && seenOsIds.has(osId))) continue;
+            if (seenCleanUrls.has(uKey) || seenSigs.has(sKey) || globalSeenSrtSigs.has(sKey) || (osId && seenOsIds.has(osId))) continue;
             seenCleanUrls.add(uKey);
             seenSigs.add(sKey);
             if (osId) seenOsIds.add(osId);
@@ -681,12 +692,13 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
 
         const combinedSiteSrt = [...verifiedOut, ...unverifiedOut];
         return [
-            ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x)),
-            ...combinedSiteSrt.filter(x => isHearingImpairedMeta(x))
+            ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
+            ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
+            ...combinedSiteSrt.filter(x => isHearingImpairedMeta(x) && !x._badSpelling),
+            ...combinedSiteSrt.filter(x => isHearingImpairedMeta(x) && x._badSpelling)
         ];
     }
 
-    // للترجمات العربية، نضع أيضاً كل ملفات الـ ASS غير الـ SDH أولاً عبر المواقع، ثم الـ SDH كاحتياط
     const rawAllAss = [
         ...collectSiteAss('subdl', subdlPre.assList),
         ...collectSiteAss('subsource', subsourcePre.assList),
@@ -695,8 +707,10 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         ...collectSiteAss('oscom', oscomPre.assList)
     ];
     const allAss = [
-        ...rawAllAss.filter(x => !isHearingImpairedMeta(x)),
-        ...rawAllAss.filter(x => isHearingImpairedMeta(x))
+        ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
+        ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
+        ...rawAllAss.filter(x => isHearingImpairedMeta(x) && !x._badSpelling),
+        ...rawAllAss.filter(x => isHearingImpairedMeta(x) && x._badSpelling)
     ];
 
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
@@ -706,23 +720,32 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
     const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt, ...oscomSrt];
 
-    // للمصحح: نمر أولاً على الملفات النظيفة (بدون SDH) المفحوصة ثم غير المفحوصة، وبعدها فقط نلجأ لملفات SDH إن لم تكتمل الـ 4 تراكات
+    // للمصحح: منع التكرار بالبصمة النصية (MD5) أو بتطابق اسم الإصدار عبر المواقع دائماً (في أول ضغطة وبالخلفية)
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
+    const seenCorrNames = new Set();
     const correctorSrt = [];
     for (const allowSdh of [false, true]) {
-        for (const pass of [true, false]) {
-            for (const c of readySrt) {
-                if (correctorSrt.length >= CORRECTOR_MAX) break;
-                const isSdh = isHearingImpairedMeta(c);
-                if (isSdh !== allowSdh) continue;
-                const u = cleanPath(c.url);
-                const sig = c._sig || u;
-                if (c._bad || seenCorr.has(u) || (strictDedupe && seenCorrSigs.has(sig))) continue;
-                if (!!c._verified !== pass) continue;
-                seenCorr.add(u);
-                seenCorrSigs.add(sig);
-                correctorSrt.push(c);
+        for (const allowBad of [false, true]) {
+            for (const pass of [true, false]) {
+                for (const c of readySrt) {
+                    if (correctorSrt.length >= CORRECTOR_MAX) break;
+                    const isSdh = isHearingImpairedMeta(c);
+                    if (isSdh !== allowSdh) continue;
+                    const isBad = !!c._badSpelling;
+                    if (isBad !== allowBad) continue;
+                    const u = cleanPath(c.url);
+                    const sig = c._sig || u;
+                    const nameSig = normalizeNameSig(c.fileName || c.title || '');
+                    if (c._bad || seenCorr.has(u) || seenCorrSigs.has(sig)) continue;
+                    // إذا كان الملف غير مفحوص بعد، نمنع تكراره إذا تطابق اسم ملفه تماماً مع ملف آخر تم اختياره من موقع سابق
+                    if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameSig)) continue;
+                    if (!!c._verified !== pass) continue;
+                    seenCorr.add(u);
+                    seenCorrSigs.add(sig);
+                    if (nameSig && nameSig.length > 8) seenCorrNames.add(nameSig);
+                    correctorSrt.push(c);
+                }
             }
         }
     }
