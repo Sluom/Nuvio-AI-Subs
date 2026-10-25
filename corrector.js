@@ -10,6 +10,33 @@ const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
 const { buildNameBook, applyNameBook, makeBook } = require('./name-book');
 
+function describeGeminiError(e) {
+  try {
+    const status = (e && e.response && e.response.status) || 0;
+    let data = e && e.response && e.response.data;
+    if (Buffer.isBuffer(data)) data = data.toString('utf8');
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (_) { data = { error: { message: data } }; } }
+    if (Array.isArray(data)) data = data[0];
+    const err = (data && data.error) || {};
+    const parts = [];
+    parts.push(status ? 'HTTP ' + status + (err.status ? ' ' + err.status : '') : 'بدون رد: ' + ((e && (e.code || e.name)) || 'خطأ شبكة'));
+    const details = Array.isArray(err.details) ? err.details : [];
+    for (const d of details) {
+      if (!d) continue;
+      if (Array.isArray(d.violations)) {
+        for (const v of d.violations.slice(0, 2)) {
+          const q = v && (v.quotaId || v.quotaMetric);
+          if (q) parts.push('الحد: ' + q + (v.quotaValue ? ' (' + v.quotaValue + ')' : ''));
+        }
+      }
+      if (d.retryDelay) parts.push('Google تقول انتظر ' + d.retryDelay);
+    }
+    const msg = String(err.message || (e && e.message) || '').replace(/\s+/g, ' ').slice(0, 160);
+    if (msg) parts.push(msg);
+    return parts.join(' | ');
+  } catch (_) { return 'تعذر قراءة تفاصيل الخطأ'; }
+}
+
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 100;
@@ -475,7 +502,7 @@ ${JSON.stringify(items)}`;
       }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد طارئ - مصحح] (${cleanModel}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      console.log(`[تبريد طارئ - مصحح] (${cleanModel}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s | ${describeGeminiError(e)}`);
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
