@@ -398,7 +398,7 @@ function isCleanArabicSrtText(text, cues) {
         return { ok: false, reason: 'ترميز ويندوز معطوب' };
     }
     const isSdhContent = detectSdhInLines(rawLines);
-    const isBadSpelling = hasEgyptianSpelling(cuesText, 4);
+    const isBadSpelling = hasEgyptianSpelling(cuesText, 7);
     return { ok: true, cuesText, isSdhContent, isBadSpelling };
 }
 
@@ -432,7 +432,7 @@ function isCleanArabicAssText(text) {
     const normalizedForHash = joined.replace(/[^\p{L}\p{N}]+/gu, '');
     const sig = crypto.createHash('md5').update(normalizedForHash).digest('hex');
     const isSdhContent = detectSdhInLines(dialogueParts);
-    const isBadSpelling = hasEgyptianSpelling(joined, 4);
+    const isBadSpelling = hasEgyptianSpelling(joined, 7);
     return { ok: true, sig, isSdhContent, isBadSpelling };
 }
 
