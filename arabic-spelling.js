@@ -123,23 +123,22 @@ function forceAlif(tok) {
   w = FORCE_MAP.get(stem);
   return w ? n.slice(0, n.length - stem.length) + w : null;
 }
-function hasEgyptianSpelling(text, threshold = 4) {
+function hasEgyptianSpelling(text, threshold = 7) {
   if (!text) return false;
   const matches = String(text).match(TOKEN_RE);
   if (!matches) return false;
-  let count = 0;
+  const seen = new Set();
   for (let i = 0; i < matches.length; i++) {
     const t = matches[i];
     if (!WORD_START.test(t) || !HAS_ARABIC.test(t)) continue;
     const last = t[t.length - 1];
-    if (last === 'ي') {
-      if (forceAlif(t)) {
-        if (++count >= threshold) return true;
-      }
-    } else if (last === 'ى') {
-      if (BAD_YA_STRICT.has(norm(t))) {
-        if (++count >= threshold) return true;
-      }
+    if (last !== 'ي' && last !== 'ى') continue;
+    const key = norm(t);
+    if (seen.has(key)) continue;
+    const bad = last === 'ي' ? !!forceAlif(t) : BAD_YA_STRICT.has(key);
+    if (bad) {
+      seen.add(key);
+      if (seen.size >= threshold) return true;
     }
   }
   return false;
