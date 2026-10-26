@@ -259,7 +259,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const reqTimeout = isPrefetch ? 5500 : 2500;
 
-    async function requestWithAgent(url, ua) {
+    async function requestWithAgent(url, ua, phase = '') {
         try {
             const response = await axios.get(url, {
                 headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' },
@@ -267,23 +267,25 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
                 validateStatus: () => true
             });
             if (!response || response.status < 200 || response.status >= 300) {
-                console.log('[جلب عربي - OS Legacy (' + ua + ')] HTTP ' + (response ? response.status : 'بدون رد'));
+                console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] HTTP ' + (response ? response.status : 'بدون رد'));
                 return [];
             }
             let json = response.data;
             if (typeof json === 'string') {
                 try { json = JSON.parse(json); } catch { json = []; }
             }
-            return Array.isArray(json) ? json : [];
+            const arr = Array.isArray(json) ? json : [];
+            console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] رجع ' + arr.length);
+            return arr;
         } catch (err) {
-            console.log('[جلب عربي - OS Legacy (' + ua + ')] خطأ طلب: ' + err.message);
+            console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] خطأ طلب: ' + err.message);
             return [];
         }
     }
 
-    async function fetchLegacyData(url) {
-        const firstPromise = requestWithAgent(url, LEGACY_AGENTS[0]);
-        const secondPromise = sleep(1000).then(() => requestWithAgent(url, LEGACY_AGENTS[1]));
+    async function fetchLegacyData(url, phase = '') {
+        const firstPromise = requestWithAgent(url, LEGACY_AGENTS[0], phase);
+        const secondPromise = sleep(1000).then(() => requestWithAgent(url, LEGACY_AGENTS[1], phase));
         const [firstResults, secondResults] = await Promise.all([firstPromise, secondPromise]);
         const combined = [];
         const seenIds = new Set();
@@ -309,7 +311,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
         let data = await fetchLegacyData(primaryUrl);
         if (hasSE && !data.some(r => legacyFormat(r) === 'ass')) {
             const fallbackUrl = 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
-            const fallbackData = await fetchLegacyData(fallbackUrl);
+            const fallbackData = await fetchLegacyData(fallbackUrl, ' - بحث ثاني');
             const epNum = parseInt(episode, 10);
             const epRe = new RegExp('(?:e|ep|episode)[._ -]*0*' + epNum + '(?:[^0-9]|$)', 'i');
             data = [...data, ...fallbackData.filter(r => legacyFormat(r) === 'ass' && epRe.test(r.SubFileName || ''))];
@@ -335,11 +337,11 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             });
         }
         const nSrt = out.filter(x => x.format === 'srt').length;
-        console.log('[جلب عربي - OS Legacy] رجع ' + data.length + ' | بعد الفلترة: SRT=' + nSrt + ' ASS=' + (out.length - nSrt) + (LEGACY_DIRECT_LINK ? ' | رابط مباشر' : ''));
+        console.log('[جلب عربي - opensubtitles.org] رجع ' + data.length + ' | بعد الفلترة: SRT=' + nSrt + ' ASS=' + (out.length - nSrt) + (LEGACY_DIRECT_LINK ? ' | رابط مباشر' : ''));
         return out;
     } catch (e) {
         const why = e.code || (e.cause && (e.cause.code || e.cause.message)) || '';
-        console.log('[جلب عربي - OS Legacy] خطأ: ' + e.message + (why ? ' | السبب: ' + why : ''));
+        console.log('[جلب عربي - opensubtitles.org] خطأ: ' + e.message + (why ? ' | السبب: ' + why : ''));
         return [];
     }
 }
@@ -355,7 +357,7 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type, isPrefetch = f
             timeout: isPrefetch ? 6500 : 3200
         });
         const data = response.data || {};
-        return (data.subtitles || [])
+        const mirrorOut = (data.subtitles || [])
             .filter(s => (s.lang || '').toLowerCase().startsWith('ar') && s.url)
             .map((s, idx) => {
                 const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
@@ -376,8 +378,11 @@ async function fetchOsMirrorArabic(imdbId, season, episode, type, isPrefetch = f
                     _sig: fileId || cleanPath(s.url)
                 };
             });
+        const mirrorAss = mirrorOut.filter(x => x.format === 'ass').length;
+        console.log('[جلب عربي - opensubtitles] رجع ' + mirrorOut.length + ' | SRT=' + (mirrorOut.length - mirrorAss) + ' ASS=' + mirrorAss);
+        return mirrorOut;
     } catch (e) {
-        console.log('[جلب عربي - OS Mirror] فشل: ' + e.message);
+        console.log('[جلب عربي - opensubtitles] فشل: ' + e.message);
         return [];
     }
 }
@@ -768,11 +773,11 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
 async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, subsourceKey, isPrefetch = false }) {
     const timeouts = isPrefetch ? BG_SOURCE_TIMEOUTS : SOURCE_TIMEOUTS;
     const sourceDefs = [
-        { key: 'os_legacy', name: 'OS Legacy', run: () => fetchOsLegacyArabic(imdbId, season, episode, isPrefetch) },
-        { key: 'os_mirror', name: 'OS Mirror', run: () => fetchOsMirrorArabic(imdbId, season, episode, type, isPrefetch) },
+        { key: 'os_legacy', name: 'opensubtitles.org', run: () => fetchOsLegacyArabic(imdbId, season, episode, isPrefetch) },
+        { key: 'os_mirror', name: 'opensubtitles', run: () => fetchOsMirrorArabic(imdbId, season, episode, type, isPrefetch) },
         { key: 'subdl', name: 'SubDL', run: () => getSubDL({ imdbId, season, episode, apiKey: subdlKey, languages: ['AR'], includePacks: true }) },
         { key: 'subsource', name: 'Subsource', run: () => getSubSource({ imdbId, season, episode, apiKey: subsourceKey, language: 'arabic' }) },
-        { key: 'oscom', name: 'OS.com', run: () => getOsCom({ imdbId, season, episode }) }
+        { key: 'oscom', name: 'opensubtitles.com', run: () => getOsCom({ imdbId, season, episode }) }
     ];
     const settled = await Promise.allSettled(
         sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), timeouts[d.key], d.name))
@@ -832,7 +837,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         .reduce((n, p) => n + p.assList.length + p.srtList.length, 0);
     const oscomIsBackup = usableCount === 0;
     if (oscomIsBackup && oscomPre.assList.length + oscomPre.srtList.length > 0) {
-        console.log('[جلب عربي - OS.com] المواقع الأخرى ما رجعت أي نتيجة، فـ OS.com يشتغل كاحتياط (أفحص ' + (OSCOM_VERIFY_EACH * 2) + ' ملفات كحد أقصى).');
+        console.log('[جلب عربي - opensubtitles.com] المواقع الأخرى ما رجعت أي نتيجة، فـ opensubtitles.com يشتغل كاحتياط (أفحص ' + (OSCOM_VERIFY_EACH * 2) + ' ملفات كحد أقصى).');
     }
 
     const maxPerSite = isPrefetch ? BG_MAX_ZIPS_PER_SITE : 20;
