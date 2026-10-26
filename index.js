@@ -58,7 +58,7 @@ class RequestQueue {
 }
 
 const globalTranslationQueue = new RequestQueue(1);
-const MAX_BACKGROUND_ROUNDS = 5;
+const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 45000;
 
 
@@ -71,7 +71,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     globalTranslationQueue.add(async () => {
         try {
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, extraKeys);
+                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...(extraKeys || {}), round });
                 if (r.failed) {
                     console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     dropIfNotDone();
@@ -671,11 +671,11 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
                 const text = await getRawArabicSubContent(item.url, subsourceKey, epInfo);
                 if (!text || !String(text).trim()) continue;
                 if (isAss && !/Dialogue:/i.test(String(text))) {
-                    console.log(tag + ' Track ' + n + ' ما انحفظ: الملف ما هو ASS (' + (item._site || item._source || '?') + ')');
+                    console.log(tag + ' Track ' + n + ' ما انحفظ: الملف ما هو ASS (' + getSourceLabel(item._site || item._source) + ')');
                     continue;
                 }
                 const ok = await db.saveDoc('rawsrt', rawKey, { text: String(text) });
-                if (ok) console.log(tag + ' Track ' + n + ' انحفظ بالـ db (' + (item._site || item._source || '?') + ')');
+                if (ok) console.log(tag + ' Track ' + n + ' انحفظ بالـ db (' + getSourceLabel(item._site || item._source) + ')');
             } catch (e) {
                 console.log(tag + ' Track ' + n + ' ما انحفظ: ' + e.message);
             }
