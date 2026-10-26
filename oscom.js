@@ -64,15 +64,15 @@ async function doLogin() {
         });
         if (res.status !== 200 || !res.data || !res.data.token) {
             const msg = res.data && (res.data.message || res.data.error);
-            console.log('[جلب عربي - OS.com] فشل تسجيل الدخول HTTP ' + res.status + (msg ? ' - ' + msg : ''));
+            console.log('[جلب عربي - opensubtitles.com] فشل تسجيل الدخول HTTP ' + res.status + (msg ? ' - ' + msg : ''));
             return null;
         }
         const host = String(res.data.base_url || DEFAULT_HOST).replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
         session = { token: res.data.token, host, exp: Date.now() + LOGIN_TTL };
-        console.log('[جلب عربي - OS.com] تم تسجيل الدخول');
+        console.log('[جلب عربي - opensubtitles.com] تم تسجيل الدخول');
         return session;
     } catch (e) {
-        console.log('[جلب عربي - OS.com] خطأ تسجيل الدخول: ' + e.message);
+        console.log('[جلب عربي - opensubtitles.com] خطأ تسجيل الدخول: ' + e.message);
         return null;
     }
 }
@@ -100,7 +100,7 @@ function compareRank(x, y) {
 async function getOsCom({ imdbId, season, episode }) {
     const { apiKey, username, password } = getCreds();
     if (!apiKey || !username || !password) {
-        console.log('[جلب عربي - OS.com] غير مفعّل: ناقص مفتاح OS.com أو اسم المستخدم أو كلمة المرور في صفحة الإعداد.');
+        console.log('[جلب عربي - opensubtitles.com] غير مفعّل: ناقص مفتاح OS.com أو اسم المستخدم أو كلمة المرور في صفحة الإعداد.');
         return [];
     }
     if (!imdbId || !imdbId.startsWith('tt')) return [];
@@ -118,7 +118,7 @@ async function getOsCom({ imdbId, season, episode }) {
         });
         if (res.status !== 200) {
             const msg = res.data && (res.data.message || res.data.error);
-            console.log('[جلب عربي - OS.com] بحث HTTP ' + res.status + (msg ? ' - ' + msg : ''));
+            console.log('[جلب عربي - opensubtitles.com] بحث HTTP ' + res.status + (msg ? ' - ' + msg : ''));
             return [];
         }
         const rows = Array.isArray(res.data && res.data.data) ? res.data.data : [];
@@ -147,10 +147,10 @@ async function getOsCom({ imdbId, season, episode }) {
             }
         }
         const nAss = out.filter(x => x.format === 'ass').length;
-        console.log('[جلب عربي - OS.com] رجع ' + rows.length + ' | بعد الفلترة: SRT=' + (out.length - nAss) + ' ASS=' + nAss);
+        console.log('[جلب عربي - opensubtitles.com] رجع ' + rows.length + ' | بعد الفلترة: SRT=' + (out.length - nAss) + ' ASS=' + nAss);
         return out;
     } catch (e) {
-        console.log('[جلب عربي - OS.com] خطأ: ' + e.message);
+        console.log('[جلب عربي - opensubtitles.com] خطأ: ' + e.message);
         return [];
     }
 }
@@ -198,11 +198,10 @@ async function downloadOsComText(fileId) {
         if (res.status === 406 || d.remaining === 0) {
             const until = Date.parse(d.reset_time_utc || '');
             blockedUntil = (!isNaN(until) && until > Date.now()) ? until : Date.now() + 30 * 60 * 1000;
-            console.log('[جلب عربي - OS.com] حصة التحميل خلصت: ' + (d.message || ''));
+            console.log('[جلب عربي - opensubtitles.com] حصة التحميل خلصت: ' + (d.message || ''));
         }
         throw new Error('OS.com download HTTP ' + res.status + (d.message ? ' - ' + d.message : ''));
     }
-    if (d.remaining != null) console.log('[جلب عربي - OS.com] المتبقي من حصة التحميل: ' + d.remaining);
     const file = await axios.get(d.link, {
         responseType: 'arraybuffer',
         timeout: 5000,
