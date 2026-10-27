@@ -14,6 +14,7 @@ const {
     activatePendingNextEpTimer
 } = require('./prefetch');
 const db = require('./db');
+const { resolveCeeId } = require('./ceeMap');
 
 const app = express();
 app.use(cors());
@@ -58,7 +59,7 @@ class RequestQueue {
 }
 
 const globalTranslationQueue = new RequestQueue(1);
-const MAX_BACKGROUND_ROUNDS = 5;
+const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 45000;
 
 
@@ -417,13 +418,13 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type, sharedOs
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.6',
+    version: '1.9.7',
     logo: 'https://raw.githubusercontent.com/Sluom/Nuvio-AI-Subs/main/logo.png',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Ready Arabic subtitles, Arabic Corrector, and Auto-translate to Arabic using Gemini.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
-    idPrefixes: ['tt', 'kitsu'],
+    idPrefixes: ['tt', 'kitsu', 'cee:'],
     catalogs: [],
     behaviorHints: { configurable: true, configurationRequired: true }
 };
@@ -698,10 +699,24 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     targetId = targetId.replace(/[.\s]+$/, '');
     const baseUrl = getBaseUrl(req);
     try {
+        console.log('[Request] subtitles type=' + req.params.type + ' id=' + targetId + (isPrefetch ? ' (prefetch)' : ''));
         let subtitlesData = [];
         let finalTargetId = targetId;
         let finalType = req.params.type;
         let originalKitsuId = null;
+        if (targetId.startsWith('cee:')) {
+            const ceeInfo = await resolveCeeId(targetId);
+            if (ceeInfo.ok && ceeInfo.imdbId) {
+                finalTargetId = ceeInfo.type === 'series'
+                    ? [ceeInfo.imdbId, ceeInfo.season, ceeInfo.episode].join(':')
+                    : ceeInfo.imdbId;
+                finalType = ceeInfo.type;
+                console.log('[CEE] ' + targetId + ' -> ' + finalTargetId + (ceeInfo.title ? ' (' + ceeInfo.title + ')' : ''));
+            } else {
+                console.log('[CEE] ' + targetId + ': ما انحل لرقم IMDb (' + (ceeInfo.reason || 'no-imdb') + ')' + (ceeInfo.title ? ' | ' + ceeInfo.title + ' ' + (ceeInfo.year || '') : ''));
+                return res.json({ subtitles: [] });
+            }
+        }
         if (targetId.startsWith('kitsu')) {
             originalKitsuId = targetId.split(':')[1];
             const mapped = await mapKitsuToImdb(targetId);
