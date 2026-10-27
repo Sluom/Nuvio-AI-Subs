@@ -157,7 +157,7 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
   }
 
   if (!names.size) return texts;
-  const wrap = (w, kind) => (kind === 'person' ? '"' + w + '"' : '(' + w + ')');
+  const wrap = (w, kind) => (kind === 'q' ? '"' + w + '"' : '(' + w + ')');
   return texts.map((t, i) => {
     if (!eligible[i]) return t;
     const { masked, tags } = maskTags(t);
