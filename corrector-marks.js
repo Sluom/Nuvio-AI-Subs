@@ -1,14 +1,11 @@
+
 'use strict';
-const { isStop, isAmbigCommon } = require('./name-book');
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
 const LETTER = /[\p{L}\p{N}]/u;
 const NAME_MIN_WRAPS = 2;
 const NAME_MIN_RATIO = 0.6;
 const NAME_MIN_LEN = 3;
-const FREQ_WRAPPED_SKIP = 6;
-const KEEP_MIN_MARKED = 6;
-const KEEP_MIN_RATIO = 0.6;
 const KNOWN_ENTITIES_RAW = `لندن باريس نيويورك شيكاغو بوسطن ميامي هوليوود طوكيو بكين موسكو روما برلين مدريد فيينا
 القاهرة بغداد دمشق بيروت الرياض دبي أبوظبي الدوحة القدس إسطنبول سيدني تورنتو أمستردام برشلونة ميلانو البندقية
 أمريكا بريطانيا إنجلترا اسكتلندا أيرلندا فرنسا ألمانيا إيطاليا إسبانيا روسيا الصين اليابان كندا مصر العراق سوريا
@@ -87,57 +84,23 @@ const KNOWN_ENTITIES = new Set(KNOWN_ENTITIES_RAW.split(/\s+/).filter(Boolean).m
 const FALLBACK_NO_BARE = new Set(
   'الله الرب على إلى الى حتى متى لدى سوى عدا سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
     .split(/\s+/).map(nameKey));
-const exampleLine = masked => masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 140);
-// يجمع الكلمات الملفوفة بتنصيص/أقواس (وكلها مشتبه فيها) مع أمثلة من الحلقة ليحكم عليها المصنّف
 function collectNameCandidates(texts, eligible, max = 300, book = null) {
-  const info = new Map();
-  const items = [];
+  const seen = new Map();
   texts.forEach((t, i) => {
     if (!eligible[i]) return;
     const { masked } = maskTags(t);
-    const toks = [];
     for (const m of masked.matchAll(AR_TOKEN)) {
-      let w = null, wrapped = false;
-      if (m[3]) w = m[3];
-      else if (m[1] != null && ONE_WORD.test(m[1])) { w = m[1]; wrapped = true; }
-      else if (m[2] != null && ONE_WORD.test(m[2])) { w = m[2]; wrapped = true; }
+      const w = (m[1] != null && ONE_WORD.test(m[1])) ? m[1] : (m[2] != null && ONE_WORD.test(m[2])) ? m[2] : null;
       if (!w) continue;
       const k = nameKey(w);
-      let o = info.get(k);
-      if (!o) info.set(k, o = { w, wrapped: 0, bare: 0 });
-      if (wrapped) o.wrapped++; else o.bare++;
-      toks.push([k, wrapped]);
+      if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || seen.has(k)) continue;
+      if (book && book.lookup(w)) continue;
+      const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      seen.set(k, { w, ex });
     }
-    items.push({ line: exampleLine(masked), toks });
   });
-  const cands = new Map();
-  for (const [k, o] of info) {
-    if (!o.wrapped) continue;
-    if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || isStop(k)) continue;
-    const risky = k.length <= NAME_MIN_LEN || isAmbigCommon(o.w) || !!(book && book.isRisky(o.w));
-    if (!risky && o.wrapped >= FREQ_WRAPPED_SKIP) continue;
-    cands.set(k, { w: o.w, wrapped: o.wrapped, bare: o.bare, risky, ex: [], exB: [] });
-  }
-  if (!cands.size) return [];
-  for (const it of items) {
-    const seen = new Set();
-    for (const [k, wrapped] of it.toks) {
-      const c = cands.get(k);
-      if (!c || seen.has(k)) continue;
-      seen.add(k);
-      if (wrapped) { if (c.ex.length < 2 && !c.ex.includes(it.line)) c.ex.push(it.line); }
-      else if (c.exB.length < 2 && !c.exB.includes(it.line)) c.exB.push(it.line);
-    }
-  }
-  return [...cands.values()]
-    .sort((a, b) => (b.risky - a.risky) || (a.wrapped - b.wrapped))
-    .slice(0, max)
-    .map(c => {
-      const ex = [...c.exB, ...c.ex].slice(0, 4);
-      return { w: c.w, wrapped: c.wrapped, bare: c.bare, ex };
-    });
+  return [...seen.values()].slice(0, max);
 }
-// يطبق حكم المصنّف: يمسح التنصيص عن الكلمات العادية، ويعمّم الأسماء الحقيقية فقط
 function propagateNames(texts, eligible, kinds = new Map(), book = null) {
   const st = new Map();
   const get = k => { let o = st.get(k); if (!o) st.set(k, o = { q: 0, p: 0, b: 0 }); return o; };
@@ -150,35 +113,23 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
       else if (m[2] && ONE_WORD.test(m[2])) get(nameKey(m[2])).p++;
     }
   });
-  // كلمة لفّها موديل الأسطر بثبات (6 مرات فأكثر وبنسبة 60%+) لا يُلغى لفّها بحكم "none" وحده
-  const keepByEvidence = k => {
-    const o = st.get(k);
-    if (!o) return false;
-    const m = o.q + o.p;
-    return m >= KEEP_MIN_MARKED && m / (m + o.b) >= KEEP_MIN_RATIO;
-  };
-  if (book && kinds) for (const [k, v] of kinds) if (v === 'none' && !keepByEvidence(k)) book.veto(k);
-  const names = new Map(), wrapBare = new Set(), drop = new Set();
+  const names = new Map(), wrapBare = new Set();
   if (!book) {
     for (const k of KNOWN_ENTITIES) { if (st.has(k)) { names.set(k, 'p'); wrapBare.add(k); } }
   }
   for (const [k, o] of st) {
+    if (names.has(k) || k.length < NAME_MIN_LEN) continue;
+    if (book && book.lookup(k)) continue;
     const marked = o.q + o.p;
     if (!marked) continue;
-    if (isStop(k)) { drop.add(k); continue; }
-    if (names.has(k) || k.length < NAME_MIN_LEN) continue;
+    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k);
     const kind = kinds.get(k);
-    if (kind === 'none' && !keepByEvidence(k)) {
-      if (!(book && book.lookup(k))) drop.add(k);
-      continue;
-    }
-    if (book && book.lookup(k)) continue;
-    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k) && !isAmbigCommon(k);
     if (kind === 'person') { names.set(k, 'q'); if (passes) wrapBare.add(k); }
     else if (kind === 'entity') { names.set(k, 'p'); if (passes) wrapBare.add(k); }
+    else if (kind === 'none') { }
     else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }
   }
-  if (!names.size && !drop.size) return texts;
+  if (!names.size) return texts;
   const wrap = (w, kind) => (kind === 'q' ? '"' + w + '"' : '(' + w + ')');
   return texts.map((t, i) => {
     if (!eligible[i]) return t;
@@ -188,7 +139,6 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
       const word = bare || marked;
       if (!word) return all;
       const k = nameKey(word);
-      if (marked && drop.has(k)) return marked;
       const kind = names.get(k);
       if (!kind) return all;
       if (bare && !wrapBare.has(k)) return all;
@@ -197,7 +147,7 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     return unmaskTags(updated, tags);
   });
 }
-const CLASSIFY_BATCH = 60;
+const CLASSIFY_BATCH = 80;
 const CLASSIFY_CONC = 3;
 async function classifyNames(cands, keysArray, modelName, deps) {
   const out = new Map();
@@ -210,14 +160,11 @@ async function classifyNames(cands, keysArray, modelName, deps) {
   for (let i = 0; i < cands.length; i += CLASSIFY_BATCH) parts.push(cands.slice(i, i + CLASSIFY_BATCH));
   let nextPart = 0, noKeys = false;
   const runPart = async part => {
-    const prompt = `You will receive a JSON array of Arabic words taken from the subtitles of ONE film or TV episode:
-[{"w": "<word>", "wrapped": <times a program marked it as a name>, "bare": <times it appears unmarked>, "ex": ["<line where it appears>", ...]}]
-A program marked each of these words as a possible proper name, and MANY OF THOSE MARKS ARE MISTAKES. Ordinary Arabic words are often marked by mistake, for example: إليّ / الي (to me), أليس كذلك (isn't it so), بات (became), ليس، حتى، متى، نور، أمل، جميل، سعيد.
-Decide what each word is in THESE lines:
-- "person": the name of a person, a character, an animal character or a nickname. Choose it only if at least one line clearly uses the word as a name (addressed with يا, introduced with اسمه / اسمها / يدعى, followed by a surname, or clearly a character who acts or is spoken to or about).
+    const prompt = `You will receive a JSON array of Arabic words taken from the subtitles of a film or TV episode: [{"w": "<word>", "ex": "<a line where it appears>"}].
+Each word was marked as a possible proper name. Classify each word by how it is used in its line:
+- "person": the name of a person, a character, an animal character or a nickname.
 - "entity": a city, country, region, place, building, company, brand, institution, organization, school, team, dish, food product or product name.
-- "none": an ordinary Arabic word, or any case where the ordinary meaning fits the lines, or you are not sure.
-Test: replace the word by its ordinary Arabic meaning. If every line still makes sense, answer "none". If the word is a real name in some lines and ordinary in others, answer "person" or "entity".
+- "none": not a proper name at all (a common word, a sound cue, an adjective, etc.).
 Return ONLY a JSON array: [{"w": "<same word>", "k": "person" | "entity" | "none"}] with one object per input word. No explanations.
 
 Words:
