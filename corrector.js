@@ -21,7 +21,7 @@ function shortModel(m) {
 
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
-const CORRECTOR_CHUNK = 100;
+const CORRECTOR_CHUNK = 250;
 const CORRECTOR_MAX_WORKERS = 8;
 const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const FALLBACK_WAIT_MS = 10000;
