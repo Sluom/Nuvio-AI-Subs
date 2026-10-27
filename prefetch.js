@@ -25,6 +25,51 @@ function getNextEpisodeTargetId(targetId) {
     return null;
 }
 
+const SEASON_COUNTS_TTL_MS = 6 * 3600 * 1000;
+const MAX_SEASON_COUNTS = 200;
+const seasonCountsCache = new Map();
+
+async function getSeasonCounts(imdbId) {
+    const hit = seasonCountsCache.get(imdbId);
+    if (hit && Date.now() - hit.at < SEASON_COUNTS_TTL_MS) return hit.counts;
+    try {
+        const res = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', { timeout: 5000 });
+        const videos = (res.data && res.data.meta && Array.isArray(res.data.meta.videos)) ? res.data.meta.videos : [];
+        const counts = new Map();
+        for (const v of videos) {
+            const vs = parseInt(v.season, 10);
+            const ve = parseInt(v.episode != null ? v.episode : v.number, 10);
+            if (!isNaN(vs) && vs > 0 && !isNaN(ve) && ve > 0 && ve > (counts.get(vs) || 0)) counts.set(vs, ve);
+        }
+        if (!counts.size) return null;
+        if (seasonCountsCache.size >= MAX_SEASON_COUNTS) {
+            const oldest = seasonCountsCache.keys().next().value;
+            if (oldest) seasonCountsCache.delete(oldest);
+        }
+        seasonCountsCache.set(imdbId, { counts, at: Date.now() });
+        return counts;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function resolveNextEpisodeTargetId(targetId) {
+    const simple = getNextEpisodeTargetId(targetId);
+    if (!simple) return null;
+    const parts = String(targetId).split(':');
+    if (!parts[0].startsWith('tt')) return simple;
+    const season = parseInt(parts[1], 10);
+    const ep = parseInt(parts[2], 10);
+    if (isNaN(season) || isNaN(ep) || season < 1) return simple;
+    const counts = await getSeasonCounts(parts[0]);
+    if (!counts) return simple;
+    if (ep === counts.get(season) && counts.has(season + 1)) {
+        console.log('[تجهيز تلقائي] ' + targetId + ' هي آخر حلقة بالموسم ' + season + ' ⟵ أجهز بداية الموسم ' + (season + 1));
+        return parts[0] + ':' + (season + 1) + ':1';
+    }
+    return simple;
+}
+
 function cancelNextEpisodePrefetch(targetId, reason = '') {
     if (!targetId) return;
     const existing = nextEpTimers.get(targetId);
@@ -40,7 +85,7 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 async function runNextEpisodePrefetch(info) {
     const { targetId, label, trackNum, rawConfig, kitsuId, proto, host, port } = info;
     nextEpTimers.delete(targetId);
-    const nextTargetId = getNextEpisodeTargetId(targetId);
+    const nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
 
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
@@ -155,6 +200,7 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
 
 module.exports = {
     getNextEpisodeTargetId,
+    resolveNextEpisodeTargetId,
     cancelNextEpisodePrefetch,
     scheduleNextEpisodePrefetch,
     activatePendingNextEpTimer
