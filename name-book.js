@@ -19,6 +19,16 @@ const bookKey = s => String(s)
   .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
   .replace(/\s+/g, ' ').trim();
 const rawNorm = s => String(s).replace(DIAC, '');
+const TANWEEN_OR_END_SHADDA_YA = /[\u064B-\u064D]|[\u064A\u0649]\u0651$/;
+const NOT_NAME_RE = /"([\u0621-\u065F\u0670-\u06D3]+)"|\(([\u0621-\u065F\u0670-\u06D3]+)\)/g;
+function stripNotNames(text) {
+  return text.replace(NOT_NAME_RE, (all, q, p, off, str) => {
+    const w = q != null ? q : p;
+    if (TANWEEN_OR_END_SHADDA_YA.test(w)) return w;
+    if ((rawNorm(w) === 'أليس' || rawNorm(w) === 'اليس') && /^[ \t]+كذلك/.test(str.slice(off + all.length))) return w;
+    return all;
+  });
+}
 const NEVER = new Set(['الله', 'الرب'].map(bookKey));
 const FUNC_RAW = new Set(['على', 'إلى', 'الى', 'حتى', 'متى', 'لدى', 'سوى', 'عدا']);
 const ALWAYS_AMBIG = new Set(
@@ -240,7 +250,7 @@ function makeBook(map) {
       pos = m.b;
     }
     out += s.slice(pos);
-    return out.replace(MARK_RE, '').replace(PH_RE, (_, i) => tags[+i]);
+    return stripNotNames(out.replace(MARK_RE, '')).replace(PH_RE, (_, i) => tags[+i]);
   }
   function prime(texts, eligible) {
     const c = new Map();
