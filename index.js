@@ -58,7 +58,7 @@ class RequestQueue {
 }
 
 const globalTranslationQueue = new RequestQueue(1);
-const MAX_BACKGROUND_ROUNDS = 3;
+const MAX_BACKGROUND_ROUNDS = 5;
 const ROUND_PAUSE_MS = 45000;
 
 
@@ -417,13 +417,13 @@ async function getOpenSubtitlesEnglish({ imdbId, season, episode, type, sharedOs
 
 const MANIFEST = {
     id: 'org.nuvio.ai.subtitles',
-    version: '1.9.7',
+    version: '1.9.6',
     logo: 'https://raw.githubusercontent.com/Sluom/Nuvio-AI-Subs/main/logo.png',
     name: 'Nuvio AI Subs (Pro Max)',
     description: 'Ready Arabic subtitles, Arabic Corrector, and Auto-translate to Arabic using Gemini.',
     resources: ['subtitles'],
     types: ['movie', 'series', 'anime', 'other'],
-    idPrefixes: ['tt', 'kitsu', 'cee'],
+    idPrefixes: ['tt', 'kitsu'],
     catalogs: [],
     behaviorHints: { configurable: true, configurationRequired: true }
 };
@@ -685,52 +685,6 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
     }
 }
 
-const CEE_MAP_URL = process.env.CEE_MAP_URL || 'https://sluom.github.io/cinemana-catalog/cee-map.json';
-const CEE_MAP_TTL_MS = 6 * 3600 * 1000;
-let ceeMap = null, ceeMapAt = 0, ceeMapLoading = null;
-async function loadCeeMap() {
-    if (ceeMap && Date.now() - ceeMapAt < CEE_MAP_TTL_MS) return ceeMap;
-    if (!ceeMapLoading) {
-        ceeMapLoading = axios.get(CEE_MAP_URL, { timeout: 8000 })
-            .then(r => {
-                const d = r.data;
-                if (d && typeof d === 'object' && d.m && d.s && d.e) {
-                    ceeMap = d;
-                    ceeMapAt = Date.now();
-                    console.log('[Cee 🔗] تم تحميل جدول التحويل: أفلام=' + Object.keys(d.m).length + ' | مسلسلات=' + Object.keys(d.s).length + ' | حلقات=' + Object.keys(d.e).length);
-                }
-                return ceeMap;
-            })
-            .catch(e => {
-                console.log('[Cee 🔗] تعذر تحميل جدول التحويل: ' + e.message);
-                return ceeMap;
-            })
-            .finally(() => { ceeMapLoading = null; });
-    }
-    return ceeMapLoading;
-}
-async function resolveCeeId(id) {
-    const m = /^cee:(\d+)(?::(\d+):(\d+))?$/.exec(String(id || ''));
-    if (!m) return id;
-    const map = await loadCeeMap();
-    let out = null;
-    if (map) {
-        if (m[2] != null) {
-            const tt = map.s[m[1]];
-            if (tt) out = tt + ':' + m[2] + ':' + m[3];
-        } else if (map.e[m[1]]) {
-            const [seriesNb, season, episode] = map.e[m[1]];
-            const tt = map.s[seriesNb];
-            if (tt) out = tt + ':' + season + ':' + episode;
-        } else if (map.m[m[1]]) {
-            out = map.m[m[1]];
-        }
-    }
-    if (out) console.log('[Cee 🔗] ' + id + ' -> ' + out);
-    else console.log('[Cee 🔗] ' + id + ' ما لكيت له tt بالجدول، أستعمله كما هو.');
-    return out || id;
-}
-
 app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -742,7 +696,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
     targetId = targetId.replace(/[.\s]+$/, '');
-    if (targetId.startsWith('cee:')) targetId = await resolveCeeId(targetId);
     const baseUrl = getBaseUrl(req);
     try {
         let subtitlesData = [];
