@@ -1,3 +1,4 @@
+
 'use strict';
 const AR = '\\u0621-\\u065F\\u0670-\\u06D3';
 const TOKEN_RE = new RegExp('[' + AR + ']+', 'g');
@@ -12,62 +13,40 @@ const SLICE = 600;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
-const SHORT_NAME_LEN = 3;
 const DIAC = /[\u064B-\u065F\u0670\u0640]/g;
 const bookKey = s => String(s)
   .replace(DIAC, '')
   .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
   .replace(/\s+/g, ' ').trim();
 const rawNorm = s => String(s).replace(DIAC, '');
-const toSet = raw => new Set(String(raw).split(/\s+/).filter(Boolean).map(bookKey));
 const NEVER = new Set(['الله', 'الرب'].map(bookKey));
 const FUNC_RAW = new Set(['على', 'إلى', 'الى', 'حتى', 'متى', 'لدى', 'سوى', 'عدا']);
-
-// كلمات وظيفية وضمائر وأفعال شائعة لا تكون اسماً أبداً (تُحذف من القاموس ويُزال تنصيصها)
-// ملاحظة: "علي" و"هنا" و"انا" و"لما" و"امام" و"خلف" و"بين" و"إليك" مستثناة عمداً لأنها أسماء حقيقية (Ben, Alec...)
-const STOP = toSet(`
-الي اليه اليها الينا اليهم اليكم اليهن
-حتي متي لدي لديك لديه لديها لدينا لديهم
-منك منه منها منهم عنك عنه عنها عنهم معك معه معها معهم معنا فيك فيه فيها فيهم بها بهم لكم لهم لها لنا
-لكن لقد انه انها انهم انك انني اني لانه لانها لانك
-حيث حين عندما لماذا كيف ماذا هناك هذا هذه ذلك تلك هؤلاء اولئك الذي التي الذين اللذين اللتين
-بعض جميع خلال اثناء بعد قبل عند فوق تحت حول غير مثل منذ نحو سوف
-ليس ليست لست لسنا
-اذا كذلك هكذا ايضا فقط جدا الان دائما ابدا ربما لعل
-كان كانت كانوا يكون تكون نحن انت انتم انتما
-كلا اجل بلي يوجد يمكن يجب
-`);
-
-// كلمات عادية تتطابق مع أسماء: لا تُلفّ إلا بدليل (علامة من موديل الأسطر، نداء، لقب، أو تكرار قوي)
-const AMBIG_COMMON = toSet(`
-بات اليس اليك وين جاك كول سام جو بن بين لين ديل جيل ميل باك دان بيل دون
-`);
-const ALWAYS_AMBIG = new Set([...toSet(
+const ALWAYS_AMBIG = new Set(
   'علي نور امل سعيد جميل كريم رحمة حياة سلام امين صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير'
-), ...AMBIG_COMMON]);
-const NEVER_STRONG = toSet(
-  'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد');
-const DENY_COMBINED = toSet(
-  'وسام بسام بديل بريد فريد وريد بعيد وعيد بخير بفضل بحمد');
-const VOC = toSet(
-  'يا سيد السيد سيدة السيدة انسة الانسة آنسة الآنسة دكتور الدكتور دكتورة الدكتورة استاذ الاستاذ أستاذ الأستاذ كابتن الكابتن محقق المحقق ضابط الضابط عم العم عمة العمة خال الخال خالة الخالة');
-const ENTITY_HEADS = toSet(
-  'شركة مدينة دولة نهر جامعة مطعم فندق فريق نادي بنك مطار ميناء مجمع مستشفى جزيرة جبل بحر مملكة امبراطورية وكالة منظمة مؤسسة عائلة ال');
-const CTX_BEFORE_AMBIG = toSet(
-  'بلا بدون اي بصيص شعاع قمة منتهى حظ عيد عام سنة خبر وقت مكان شيء رجل شخص');
-const CTX_AFTER_AMBIG = toSet(
-  'جدا حقا للغاية تماما اكثر اقل');
-// عبارات ثابتة: "أليس كذلك" = ألا يكون كذلك، وليس اسماً
-const CTX_AFTER_BY_KEY = new Map([
-  [bookKey('أليس'), toSet('كذلك هكذا ذلك هذا هذه تلك')]
-]);
+    .split(/\s+/).map(bookKey));
+const NEVER_STRONG = new Set(
+  'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
+    .split(/\s+/).map(bookKey));
+const DENY_COMBINED = new Set(
+  'وسام بسام بديل بريد فريد وريد بعيد وعيد بخير بفضل بحمد'
+    .split(/\s+/).map(bookKey));
+const VOC = new Set(
+  'يا سيد السيد سيدة السيدة انسة الانسة آنسة الآنسة دكتور الدكتور دكتورة الدكتورة استاذ الاستاذ أستاذ الأستاذ كابتن الكابتن محقق المحقق ضابط الضابط عم العم عمة العمة خال الخال خالة الخالة'
+    .split(/\s+/).map(bookKey));
+const ENTITY_HEADS = new Set(
+  'شركة مدينة دولة نهر جامعة مطعم فندق فريق نادي بنك مطار ميناء مجمع مستشفى جزيرة جبل بحر مملكة امبراطورية وكالة منظمة مؤسسة عائلة ال'
+    .split(/\s+/).map(bookKey));
+const CTX_BEFORE_AMBIG = new Set(
+  'بلا بدون اي بصيص شعاع قمة منتهى حظ عيد عام سنة خبر وقت مكان شيء رجل شخص'
+    .split(/\s+/).map(bookKey));
+const CTX_AFTER_AMBIG = new Set(
+  'جدا حقا للغاية تماما اكثر اقل'
+    .split(/\s+/).map(bookKey));
 const KNOWN_ENTITIES = `لندن باريس نيويورك شيكاغو بوسطن ميامي هوليوود طوكيو بكين موسكو روما برلين مدريد فيينا
 القاهرة بغداد دمشق بيروت الرياض دبي أبوظبي الدوحة القدس إسطنبول سيدني تورنتو أمستردام برشلونة ميلانو البندقية
 أمريكا بريطانيا إنجلترا اسكتلندا أيرلندا فرنسا ألمانيا إيطاليا إسبانيا روسيا الصين اليابان كندا مصر العراق سوريا
 لبنان الأردن السعودية الإمارات الكويت قطر المغرب الجزائر تونس ليبيا السودان اليمن فلسطين تركيا إيران الهند
 المكسيك البرازيل أستراليا سويسرا السويد النرويج هولندا بلجيكا اليونان كوريا`.split(/\s+/).filter(Boolean).map(bookKey);
-const isStop = w => STOP.has(bookKey(w));
-const isAmbigCommon = w => AMBIG_COMMON.has(bookKey(w));
 function maskTags(text) {
   const tags = [];
   const masked = String(text).replace(TAG_RE, t => { tags.push(t); return '\uE000' + (tags.length - 1) + '\uE001'; });
@@ -111,10 +90,8 @@ Rules:
 1. Write each name EXACTLY as spelled in the lines, without attached prefixes (و ف ب ل ك). Do not translate, do not correct spelling.
 2. A full name of 2-3 words is ONE entry. If the first name also appears alone somewhere, list it as its own entry too.
 3. Do NOT include: God (الله), titles alone, adjectives, nationalities, common nouns, sound cues, religious terms.
-4. Include a name even if it appears only once, BUT only if at least one line clearly uses it as a name.
-5. Many names look like ordinary Arabic words. If the ordinary meaning fits every line where the word appears, it is NOT a name here: never include words such as بات (became), إليّ / الي (to me), أليس كذلك (isn't it so), ليس، كان، حتى، متى، هذا. Never include pronouns, prepositions, particles or verbs.
-6. If a word is a real name in some lines but also appears with its ordinary meaning in other lines, include it AND put it in "ambiguous".
-7. No explanations.
+4. Include a name even if it appears only once.
+5. No explanations.
 ${hintBlock}
 Lines:
 ${lines.join('\n')}`;
@@ -135,7 +112,6 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
       const k = bookKey(w);
       const words = k.split(' ');
       if (words.length > 3 || k.replace(/ /g, '').length < 3 || NEVER.has(k) || VOC.has(words[0])) continue;
-      if (words.length === 1 && STOP.has(k)) continue;
       let o = votes.get(k); if (!o) votes.set(k, o = { p: 0, e: 0, a: 0 });
       o[field]++;
     }
@@ -176,14 +152,6 @@ function splits(k) {
   return out;
 }
 function makeBook(map) {
-  // تنظيف القاموس (يشمل النسخ المحفوظة قديماً في الكاش)
-  for (const [k, e] of [...map]) {
-    if (!e || typeof e !== 'object') { map.delete(k); continue; }
-    const single = !k.includes(' ');
-    if (single && STOP.has(k)) { map.delete(k); continue; }
-    if (single && e.kind === 'person' && k.length <= SHORT_NAME_LEN) e.ambig = true;
-    if (single && AMBIG_COMMON.has(k)) e.ambig = true;
-  }
   let strong = new Set();
   function lookupKeys(keys, marked) {
     const rest = keys.slice(1);
@@ -230,11 +198,9 @@ function makeBook(map) {
           const prevAdj = !!prev && GAP_OK.test(s.slice(prev.b, toks[i].a));
           const nextAdj = !!next && GAP_OK.test(s.slice(toks[i + n - 1].b, next.a));
           const voc = prevAdj && VOC.has(prev.k);
-          const keyCtx = CTX_AFTER_BY_KEY.get(r.key);
           const badCtx = r.e.ambig && !voc && (
             (prevAdj && CTX_BEFORE_AMBIG.has(prev.k)) ||
-            (nextAdj && CTX_AFTER_AMBIG.has(next.k)) ||
-            (nextAdj && !!keyCtx && keyCtx.has(next.k))
+            (nextAdj && CTX_AFTER_AMBIG.has(next.k))
           );
           hit = { a: toks[i].a, b: toks[i + n - 1].b, n, key: r.key, e: r.e, marked, voc, badCtx };
         }
@@ -297,23 +263,11 @@ function makeBook(map) {
     const r = lookupKeys(toks.map(bookKey), true);
     return r && r.e;
   };
-  // حذف اسم من القاموس بحكم المصنّف (الكلمة ليست اسماً في هذه الحلقة)
-  const veto = phrase => map.delete(bookKey(phrase));
-  // هل الكلمة اسم "مشتبه" (قصير أو يشبه كلمة عادية)؟
-  const isRisky = phrase => {
-    const k = bookKey(phrase);
-    const e = map.get(k);
-    return !!(e && (e.ambig || ALWAYS_AMBIG.has(k)));
-  };
-  return {
-    map, lookup, apply, prime, veto, isRisky,
-    get size() { return map.size; },
-    get strong() { return strong; }
-  };
+  return { map, lookup, apply, prime, size: map.size, get strong() { return strong; } };
 }
 function applyNameBook(texts, eligible, book) {
   if (!book || !book.size) return texts;
   book.prime(texts, eligible);
   return texts.map((t, i) => (eligible[i] ? book.apply(t) : t));
 }
-module.exports = { buildNameBook, applyNameBook, makeBook, bookKey, isStop, isAmbigCommon };
+module.exports = { buildNameBook, applyNameBook, makeBook, bookKey };
