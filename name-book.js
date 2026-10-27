@@ -16,7 +16,8 @@ const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
 
 const DIAC = /[\u064B-\u065F\u0670\u0640]/g;
-const SHADDA_OR_TANWEEN = /[\u064B-\u064D\u0651]/;
+// يصيد التنوين أو الياء المشددة بنهاية الكلمة فقط (مثل إليّ، عليّ، لديّ) ولا يمس الأسماء المشددة بالوسط مثل عبّاس
+const TANWEEN_OR_END_SHADDA_YA = /[\u064B-\u064D]|[\u064A\u0649]\u0651$/;
 
 const bookKey = s => String(s)
   .replace(DIAC, '')
@@ -30,29 +31,29 @@ const rawNorm = s => String(s).replace(DIAC, '').trim();
 
 const NEVER = new Set(['الله', 'الرب'].map(bookKey));
 
-const EXACT_SPELLING_SENSITIVE = new Set([
-  'الآن', 'الان', 'رأى', 'راي', 'لأن', 'لان', 'إلا', 'الا', 'ألا',
-  'أبي', 'ابي', 'أمي', 'امي', 'أخي', 'اخي', 'منه', 'منة', 'عنه', 'عنة',
-  'هنا', 'لنا', 'بنا', 'فنا', 'إليّ', 'عليّ'
-]);
-
+// الكلمات التي يستحيل أن تكون أسماء علم بهيئتها الإملائية الصريحة (تُفحص قبل توحيد الحروف)
 const FUNC_RAW = new Set([
-  'على', 'إلى', 'الى', 'إلي', 'الي', 'حتى', 'متى', 'لدى', 'سوى', 'عدا',
+  'على', 'إلى', 'الى', 'حتى', 'متى', 'لدى', 'سوى', 'عدا',
   'أليس', 'اليس', 'ليس', 'بلى', 'نعم', 'أجل', 'اجل', 'فقط', 'لكن', 'بل',
-  'رأى', 'الآن', 'لأن', 'إلا', 'ألا', 'منه', 'عنه', 'لنا', 'بنا', 'هنا',
-  'أبي', 'أمي', 'أخي'
+  'رأى', 'الآن', 'لأن', 'إلا', 'ألا', 'منه', 'عنه'
 ]);
 
+// أزواج تتطابق بعد التطبيع (bookKey) لكن تختلف بالرسم الإملائي؛ لا تُغلّف إلا إذا طابق رسمها الخام ما استخرجه النموذج
+const SPELLING_COLLISION_KEYS = new Set(
+  'الان راي لان الا منه عنه هنا لنا ابي امي اخي'.split(/\s+/).map(bookKey)
+);
+
+// أبقينا فقط الكلمات التي تتصادم فعلياً مع أفعال وأدوات عربية فصحى شائعة، ورفعنا الأسماء الأجنبية الصرفة (توم، سام، جاك، مارك...)
 const ALWAYS_AMBIG = new Set(
   ('علي الي اليس ليس بات عاد صار ظل كان نور امل سعيد جميل كريم رحمة حياة سلام امين ' +
-   'صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير مارك بيل توم ' +
-   'مي تيم جاك دان فان سام بن مات غاب كال قال كام قام خان دار عاش مال بان دام راي الان لان الا')
+   'صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير مي بن ' +
+   'مات غاب قال قام خان دار عاش مال بان دام راي الان لان الا هنا لنا ابي امي اخي منه عنه')
     .split(/\s+/).map(bookKey)
 );
 
 const NEVER_STRONG = new Set(
   ('سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد بات عاد صار ظل ' +
-   'كان اليس الي علي مارك بيل توم مي جاك دان فان مات غاب كال قال كام قام خان دار عاش مال بان دام راي الان لان الا')
+   'كان اليس ليس الي علي مي بن مات غاب قال قام دار عاش مال بان دام راي الان لان الا هنا لنا ابي امي اخي منه عنه')
     .split(/\s+/).map(bookKey)
 );
 
@@ -139,8 +140,8 @@ function namesPrompt(lines, hints) {
 Return ONLY a JSON object: {"persons": [...], "entities": [...], "ambiguous": [...], "ambigLines": {"<name>": [lineNumbers]}}
 - "persons": names of people, characters, nicknames, animal characters. Only the name itself (no titles like سيد، دكتور، كابتن).
 - "entities": cities, countries, regions, landmarks, companies, brands, institutions, organizations, schools, teams, dishes, products.
-- "ambiguous": ANY name whose spelling can ALSO be read as an ordinary Arabic verb, particle, question word, adverb, preposition, or common word (e.g. بات، أليس، إلي، مات، غاب، قال، دار، عاش، رأى، الآن، لأن، إلا، نور، أمل، سعيد، جميل).
-- "ambigLines": for every word in "ambiguous", provide the exact array of line numbers [idx] where it is genuinely used as a proper name (NOT where بات means became, NOT where أليس means isn't it, NOT where إليّ means to me, NOT where مات means died, NOT where الآن means now).
+- "ambiguous": the subset of the two lists above whose Arabic spelling can ALSO be read as an ordinary Arabic verb, particle, question word, preposition, or common word (e.g. بات، أليس، إلي، مات، غاب، قال، دار، عاش، نور، أمل، سعيد، جميل، ورد).
+- "ambigLines": for every word in "ambiguous", provide the array of line numbers [idx] where it is genuinely used as a proper name (NOT where بات means became, NOT where أليس means isn't it, NOT where إليّ means to me, NOT where مات means died).
 Rules:
 1. Write each name EXACTLY as spelled in the lines, without attached prefixes (و ف ب ل ك). Do not translate, do not correct spelling.
 2. A full name of 2-3 words is ONE entry. If the first name also appears alone somewhere, list it as its own entry too.
@@ -167,6 +168,7 @@ function extractOrigSpans(lines) {
     for (const m of masked.matchAll(SPAN_RE)) {
       const inner = (m[1] != null ? m[1] : m[2] || '').trim();
       if (!inner || !INNER_OK.test(inner)) continue;
+      if (FUNC_RAW.has(rawNorm(inner)) || TANWEEN_OR_END_SHADDA_YA.test(inner)) continue;
       const k = bookKey(inner);
       if (k.length < 3) continue;
       let s = byLine.get(idx);
@@ -183,15 +185,23 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   const model = deps.normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const votes = new Map();
   const validLines = new Map();
+  const rawForms = new Map();
 
   const vote = (arr, field) => {
     for (const w of Array.isArray(arr) ? arr : []) {
       if (typeof w !== 'string' || !AR_ONLY.test(w)) continue;
+      const rn = rawNorm(w);
+      if (FUNC_RAW.has(rn) || TANWEEN_OR_END_SHADDA_YA.test(w)) continue;
       const k = bookKey(w);
       const words = k.split(' ');
       if (words.length > 3 || k.replace(/ /g, '').length < 3 || NEVER.has(k) || VOC.has(words[0])) continue;
       let o = votes.get(k); if (!o) votes.set(k, o = { p: 0, e: 0, a: 0 });
       o[field]++;
+      if (field === 'p' || field === 'e') {
+        let rf = rawForms.get(k);
+        if (!rf) rawForms.set(k, rf = new Set());
+        rf.add(rn);
+      }
     }
   };
 
@@ -225,9 +235,9 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   for (const [k, v] of votes) {
     if (!v.p && !v.e) continue;
     const isAmbig = v.a > 0 || ALWAYS_AMBIG.has(k) || validLines.has(k);
-    map.set(k, { kind: v.p >= v.e ? 'person' : 'entity', ambig: isAmbig });
+    map.set(k, { kind: v.p >= v.e ? 'person' : 'entity', ambig: isAmbig, raws: rawForms.get(k) || null });
   }
-  for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
+  for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false, raws: null });
   return makeBook(map, validLines, origByLine);
 }
 
@@ -298,18 +308,23 @@ function makeBook(map, validLines = new Map(), origByLine = new Map()) {
 
           const tokenRaw = rawNorm(toks[i].t);
           if (n === 1 && !voc) {
-            if (FUNC_RAW.has(tokenRaw) || SHADDA_OR_TANWEEN.test(toks[i].t)) continue;
-            if (EXACT_SPELLING_SENSITIVE.has(tokenRaw)) continue;
+            if (FUNC_RAW.has(tokenRaw) || TANWEEN_OR_END_SHADDA_YA.test(toks[i].t)) continue;
           }
 
           const marked = inRange(unw, toks[i].a);
           const r = lookupKeys(toks.slice(i, i + n).map(x => x.k), marked);
           if (!r) continue;
 
+          // إذا الكلمة من ذوات التصادم الإملائي (مثل الآن/آلان، منه/منة، هنا)، نتحقق من تطابق الرسم الإملائي الخام
+          if (n === 1 && !voc && SPELLING_COLLISION_KEYS.has(r.key) && r.e.raws && r.e.raws.size) {
+            const strippedRaw = r.pre ? tokenRaw.slice(r.pre.length) : tokenRaw;
+            if (!r.e.raws.has(strippedRaw) && !r.e.raws.has(tokenRaw)) continue;
+          }
+
           const wasOrigMarked = !!(origSet && origSet.has(r.key));
           const isPastVerbCollision = n === 1 && KAN_AND_PAST_VERBS.has(r.key) && (
             (nextAdj && IMPERFECT_VERB_RE.test(rawNorm(next.t))) ||
-            (prevAdj && (prev.k === 'قد' || prev.k === 'لقد' || prev.k === 'لم'))
+            (prevAdj && (prev.k === 'قد' || prev.k === 'لقد' || prev.k === 'لم' || prev.k === 'ما'))
           );
 
           const badCtx = !voc && (
@@ -338,28 +353,19 @@ function makeBook(map, validLines = new Map(), origByLine = new Map()) {
     const { masked, tags } = maskTags(text);
     const s = masked.replace(SPAN_RE, (all, q, p) => {
       const inner = q != null ? q : p;
-      const trimmed = inner.trim();
-      if (!trimmed || !INNER_OK.test(trimmed)) return all;
-
-      const innerRaw = rawNorm(trimmed);
-      if (FUNC_RAW.has(innerRaw) || SHADDA_OR_TANWEEN.test(trimmed) || EXACT_SPELLING_SENSITIVE.has(innerRaw)) {
-        return trimmed;
-      }
-
-      const toks = [...trimmed.matchAll(TOKEN_RE)].map(m => ({ k: bookKey(m[0]), a: m.index + 1 }));
+      if (!inner.trim() || !INNER_OK.test(inner)) return all;
+      const toks = [...inner.matchAll(TOKEN_RE)].map(m => ({ k: bookKey(m[0]), a: m.index + 1 }));
       if (!toks.length || toks.length > 3) return all;
-
-      const probe = '\uE002' + trimmed + '\uE003';
+      const probe = '\uE002' + inner + '\uE003';
       const matches = findMatches(probe, lineIdx);
       if (!matches.length) return all;
-
       const inMatch = pos => matches.some(m => pos >= m.a && pos < m.b);
       const allValid = toks.every((t, idx) =>
         inMatch(t.a) ||
         (idx === 0 && toks.length >= 2 && ENTITY_HEADS.has(t.k)) ||
         (idx > 0 && idx < toks.length - 1 && t.k === 'و' && matches.length >= 2)
       );
-      return allValid ? probe : trimmed;
+      return allValid ? probe : all;
     });
     return { s, tags };
   }
