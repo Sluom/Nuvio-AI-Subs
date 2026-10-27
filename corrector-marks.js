@@ -88,15 +88,16 @@ function fixMarks(text, q = null) {
 
 const AR_TOKEN = /"([^"\n]*)"|\(([^()\n]*)\)|([\u0621-\u065F\u0670-\u06D3]+)/g;
 const ONE_WORD = /^[\u0621-\u065F\u0670-\u06D3]+$/;
-const SHADDA_OR_TANWEEN = /[\u064B-\u064D\u0651]/;
+const TANWEEN_OR_END_SHADDA_YA = /[\u064B-\u064D]|[\u064A\u0649]\u0651$/;
 
 const nameKey = w => String(w).replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآٱ]/g, 'ا');
 const KNOWN_ENTITIES = new Set(KNOWN_ENTITIES_RAW.split(/\s+/).filter(Boolean).map(nameKey));
 
+// قصر القائمة على الكلمات المشتركة مع الأفعال والحروف والصفات العربية دون الأسماء الأجنبية الصرفة
 const FALLBACK_NO_BARE = new Set(
   ('الله الرب على إلى الى إلي الي حتى متى لدى سوى عدا أليس اليس ليس بات عاد صار ظل كان ' +
-   'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد علي مارك بيل توم ' +
-   'مي جاك دان فان مات غاب كال قال كام قام خان دار عاش مال بان دام راي الان لان الا ابي امي اخي منه عنه لنا بنا هنا')
+   'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد علي مي بن ' +
+   'مات غاب قال قام دار عاش مال بان دام راي الان لان الا ابي امي اخي منه عنه لنا بنا هنا')
     .split(/\s+/).map(nameKey)
 );
 
@@ -108,10 +109,9 @@ function collectNameCandidates(texts, eligible, max = 300, book = null) {
     for (const m of masked.matchAll(AR_TOKEN)) {
       const w = (m[1] != null && ONE_WORD.test(m[1])) ? m[1] : (m[2] != null && ONE_WORD.test(m[2])) ? m[2] : null;
       if (!w) continue;
-      if (SHADDA_OR_TANWEEN.test(w)) continue;
+      if (TANWEEN_OR_END_SHADDA_YA.test(w)) continue;
       const k = nameKey(w);
       if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || seen.has(k)) continue;
-      if (FALLBACK_NO_BARE.has(k)) continue;
       if (book && book.lookup(w)) continue;
       const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
       seen.set(k, { w, ex });
@@ -128,11 +128,11 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     const { masked } = maskTags(t);
     for (const m of masked.matchAll(AR_TOKEN)) {
       if (m[3]) {
-        if (!SHADDA_OR_TANWEEN.test(m[3])) get(nameKey(m[3])).b++;
+        if (!TANWEEN_OR_END_SHADDA_YA.test(m[3])) get(nameKey(m[3])).b++;
       } else if (m[1] && ONE_WORD.test(m[1])) {
-        if (!SHADDA_OR_TANWEEN.test(m[1])) get(nameKey(m[1])).q++;
+        if (!TANWEEN_OR_END_SHADDA_YA.test(m[1])) get(nameKey(m[1])).q++;
       } else if (m[2] && ONE_WORD.test(m[2])) {
-        if (!SHADDA_OR_TANWEEN.test(m[2])) get(nameKey(m[2])).p++;
+        if (!TANWEEN_OR_END_SHADDA_YA.test(m[2])) get(nameKey(m[2])).p++;
       }
     }
   });
@@ -144,11 +144,10 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
 
   for (const [k, o] of st) {
     if (names.has(k) || k.length < NAME_MIN_LEN) continue;
-    if (FALLBACK_NO_BARE.has(k)) continue;
     if (book && book.lookup(k)) continue;
     const marked = o.q + o.p;
     if (!marked) continue;
-    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO;
+    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k);
     const kind = kinds.get(k);
     if (kind === 'person') { names.set(k, 'q'); if (passes) wrapBare.add(k); }
     else if (kind === 'entity') { names.set(k, 'p'); if (passes) wrapBare.add(k); }
@@ -165,7 +164,7 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
       const marked = (q != null && ONE_WORD.test(q)) ? q : (p != null && ONE_WORD.test(p)) ? p : null;
       const word = bare || marked;
       if (!word) return all;
-      if (SHADDA_OR_TANWEEN.test(word)) return all;
+      if (TANWEEN_OR_END_SHADDA_YA.test(word)) return all;
       const k = nameKey(word);
       const kind = names.get(k);
       if (!kind) return all;
@@ -218,8 +217,7 @@ ${JSON.stringify(part)}`;
         const arr = JSON.parse(txt.replace(/```json|```/g, '').trim());
         for (const it of Array.isArray(arr) ? arr : []) {
           if (it && typeof it.w === 'string' && ['person', 'entity', 'none'].includes(it.k)) {
-            const k = nameKey(it.w);
-            if (!FALLBACK_NO_BARE.has(k)) out.set(k, it.k);
+            out.set(nameKey(it.w), it.k);
           }
         }
         break;
