@@ -9,6 +9,7 @@ const GAP_OK = /^[ \t\uE002\uE003]*[ \t][ \t\uE002\uE003]*$/;
 const MARK_RE = /[\uE002\uE003]/g;
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
+const SWAP_ONLY = process.env.NAMES_SWAP_ONLY !== '0';
 const SLICE = 600;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
@@ -240,7 +241,7 @@ function makeBook(map) {
     return { s, tags };
   }
   const wrap = (x, kind) => (kind === 'person' ? '"' + x + '"' : '(' + x + ')');
-  const allowed = m => !m.badCtx && (!m.e.ambig || m.marked || m.voc || strong.has(m.key));
+  const allowed = m => !m.badCtx && (SWAP_ONLY ? m.marked : (!m.e.ambig || m.marked || m.voc || strong.has(m.key)));
   function apply(text) {
     const { s, tags } = prepare(String(text));
     let out = '', pos = 0;
