@@ -3,6 +3,7 @@
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
 const LETTER = /[\p{L}\p{N}]/u;
+const SWAP_ONLY = process.env.NAMES_SWAP_ONLY !== '0';
 const NAME_MIN_WRAPS = 2;
 const NAME_MIN_RATIO = 0.6;
 const NAME_MIN_LEN = 3;
@@ -129,6 +130,7 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     else if (kind === 'none') { }
     else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }
   }
+  if (SWAP_ONLY) wrapBare.clear();
   if (!names.size) return texts;
   const wrap = (w, kind) => (kind === 'q' ? '"' + w + '"' : '(' + w + ')');
   return texts.map((t, i) => {
