@@ -259,15 +259,16 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const reqTimeout = isPrefetch ? 5500 : 2500;
 
-    async function requestWithAgent(url, ua, phase = '') {
+    async function requestWithAgent(url, ua, phase = '', xOnly = false) {
+        const label = xOnly ? ua + ' - X فقط' : ua;
         try {
             const response = await axios.get(url, {
-                headers: { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' },
+                headers: xOnly ? { 'User-Agent': 'node', 'X-User-Agent': ua, 'Accept': 'application/json' } : { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': 'application/json' },
                 timeout: reqTimeout,
                 validateStatus: () => true
             });
             if (!response || response.status < 200 || response.status >= 300) {
-                console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] HTTP ' + (response ? response.status : 'بدون رد'));
+                console.log('[جلب عربي - opensubtitles.org (' + label + ')' + phase + '] HTTP ' + (response ? response.status : 'بدون رد'));
                 return [];
             }
             let json = response.data;
@@ -275,10 +276,10 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
                 try { json = JSON.parse(json); } catch { json = []; }
             }
             const arr = Array.isArray(json) ? json : [];
-            console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] رجع ' + arr.length);
+            console.log('[جلب عربي - opensubtitles.org (' + label + ')' + phase + '] رجع ' + arr.length);
             return arr;
         } catch (err) {
-            console.log('[جلب عربي - opensubtitles.org (' + ua + ')' + phase + '] خطأ طلب: ' + err.message);
+            console.log('[جلب عربي - opensubtitles.org (' + label + ')' + phase + '] خطأ طلب: ' + err.message);
             return [];
         }
     }
@@ -286,10 +287,11 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     async function fetchLegacyData(url, phase = '') {
         const firstPromise = requestWithAgent(url, LEGACY_AGENTS[0], phase);
         const secondPromise = sleep(1000).then(() => requestWithAgent(url, LEGACY_AGENTS[1], phase));
-        const [firstResults, secondResults] = await Promise.all([firstPromise, secondPromise]);
+        const thirdPromise = sleep(1500).then(() => requestWithAgent(url, LEGACY_AGENTS[1], phase, true));
+        const [firstResults, secondResults, thirdResults] = await Promise.all([firstPromise, secondPromise, thirdPromise]);
         const combined = [];
         const seenIds = new Set();
-        for (const item of [...firstResults, ...secondResults]) {
+        for (const item of [...firstResults, ...secondResults, ...thirdResults]) {
             if (!item || !item.SubDownloadLink) continue;
             const key = String(item.IDSubtitleFile || item.SubDownloadLink);
             if (seenIds.has(key)) continue;
