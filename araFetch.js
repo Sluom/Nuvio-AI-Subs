@@ -607,28 +607,22 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     }
 
     // سجلات عالمية عابرة للمواقع لمنع تكرار نفس البصمة النصية (MD5) منذ الضغطة الأولى (للأفلام والمسلسلات)
-    const globalSeenAssSigs = new Set();
+    let globalAssCount = 0;
     const globalSeenSrtSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
         const verifiedOut = [];
         const unverifiedOut = [];
         const seenUrls = new Set();
-        const seenSiteSigs = new Set();
-
         const siteVerifiedAss = sortByConsistentTemplate(
             verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'ass' && !v._bad)
         );
 
         for (const v of siteVerifiedAss) {
             const u = cleanPath(v.url);
-            const sig = v._sig || u;
-            if (seenUrls.has(u) || seenSiteSigs.has(sig)) continue;
-            // منع تكرار البصمة النصية عبر جميع المواقع دائماً (سواء في أول ضغطة أو بالخلفية)
-            if (v._sig && globalSeenAssSigs.has(v._sig)) continue;
+            if (seenUrls.has(u)) continue;
             seenUrls.add(u);
-            seenSiteSigs.add(sig);
-            if (v._sig) globalSeenAssSigs.add(v._sig);
+            if (v._sig) globalAssCount++;
             verifiedOut.push(v);
         }
 
@@ -637,11 +631,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (a._bad) continue;
             const u = cleanPath(a.url);
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
-            if (strictDedupe && globalSeenAssSigs.size >= CORRECTOR_MAX) continue;
-            const sig = a._sig || normalizeNameSig(a.fileName || u);
-            if (sig && (seenSiteSigs.has(sig) || globalSeenAssSigs.has(sig))) continue;
+            if (strictDedupe && globalAssCount >= CORRECTOR_MAX) continue;
             seenUrls.add(u);
-            if (sig) seenSiteSigs.add(sig);
             unverifiedOut.push(a);
         }
 
