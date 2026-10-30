@@ -4,7 +4,6 @@ const { getSubSource } = require('./subsource');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// مراحل الإضافات المجانية بعد OpenSubtitles v3 (بالترتيب)
 const ADDONS = [
   ['Wizdom', 'https://4b139a4b7f94-wizdom-stremio-v2.baby-beamup.club'],
   ['fusiontv', 'https://stremiosubs.fusiontv.co']
@@ -21,7 +20,6 @@ const ASS_RE = /\.(ass|ssa)(?:$|[?\s])|\[(ass|ssa)\]/;
 const textOf = s => [s.title, s.id, s.url, s.name, s.fileName, s.SubFileName, s.subtitleFileName]
   .filter(Boolean).map(x => String(x).toLowerCase()).join(' ');
 
-// غير SDH وSRT فقط
 function usable(s, code) {
   if (!s || !s.url) return false;
   if (s.hearingImpaired === true || s.SubHearingImpaired === '1' || s.SubHearingImpaired === 1) return false;
@@ -42,11 +40,9 @@ const pick = (s, code, src) => ({
 
 const langOk = (s, code) => LANGS[code].re.test(String((s && s.lang) || '').toLowerCase());
 
-// المرحلة 1: OpenSubtitles v3 (القائمة جاهزة من index.js، بدون طلب إضافي)
 const stageOs = (osList, code) =>
   (osList || []).filter(s => s && langOk(s, code) && usable(s, code)).map(s => pick(s, code, 'opensubtitles'));
 
-// المرحلتان 2 و3: إضافات ستريميو (Wizdom ثم fusiontv)
 async function stageAddon(base, type, targetId, code, src) {
   const r = await axios.get(base + '/subtitles/' + type + '/' + targetId + '.json', {
     timeout: 8000,
@@ -56,7 +52,6 @@ async function stageAddon(base, type, targetId, code, src) {
   return list.filter(s => s && langOk(s, code) && usable(s, code)).map(s => pick(s, code, src));
 }
 
-// المرحلة 4: SubDL
 async function stageSubdl(a, code) {
   const list = await getSubDL({
     imdbId: a.imdbId, season: a.season, episode: a.episode,
@@ -65,7 +60,6 @@ async function stageSubdl(a, code) {
   return list.filter(s => usable(s, code)).map(s => pick(s, code, 'subdl'));
 }
 
-// المرحلة 5: Subsource
 async function stageSubsource(a, code) {
   const list = await getSubSource({
     imdbId: a.imdbId, season: a.season, episode: a.episode,
@@ -74,7 +68,6 @@ async function stageSubsource(a, code) {
   return list.filter(s => usable(s, code)).map(s => pick(s, code, 'subsource'));
 }
 
-// العبرية أولًا ثم الهندية، حتى يكتمل العدد (want) من روابط غير SDH وبصيغة SRT
 const BUDGET_MS = 7000;
 const CACHE_TTL = 30 * 60 * 1000;
 const SHORT_TTL = 2 * 60 * 1000;
