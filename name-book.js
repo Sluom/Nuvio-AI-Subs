@@ -12,7 +12,7 @@ const PH_RE = /\uE000(\d+)\uE001/g;
 const SMART_MODE = process.env.NAMES_SWAP_ONLY !== '0';
 const PERSON_MIN_WRAPS = 2;
 const PERSON_MIN_RATIO = 0.6;
-const SLICE = 600;
+const SLICE = 400;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
@@ -132,9 +132,10 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     }
   };
   const tasks = [];
-  let okSlices = 0;
+  let okSlices = 0, totalSlices = 0;
   for (let i = 0; i < lines.length; i += SLICE) {
     const part = lines.slice(i, i + SLICE);
+    totalSlices++;
     tasks.push(async () => {
       const r = await callJson(namesPrompt(part, hints), keysArray, model, deps);
       if (!r || typeof r !== 'object') return;
@@ -150,7 +151,9 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     map.set(k, { kind: v.p >= v.e ? 'person' : 'entity', ambig: v.a > 0 || ALWAYS_AMBIG.has(k) });
   }
   for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
-  return makeBook(map);
+  const book = makeBook(map);
+  book.complete = okSlices === totalSlices;
+  return book;
 }
 const PRE_OK = /^(?:[وف][بلك]?|[بلك])$/;
 const SHORT_PRE_ALWAYS = new Set(['و', 'ف', 'ل', 'ول', 'فل']);
@@ -299,7 +302,7 @@ function makeBook(map) {
     const r = lookupKeys(toks.map(bookKey), true);
     return r && r.e;
   };
-  return { map, lookup, apply, prime, size: map.size, get strong() { return strong; } };
+  return { map, lookup, apply, prime, size: map.size, complete: true, get strong() { return strong; } };
 }
 function applyNameBook(texts, eligible, book) {
   if (!book || !book.size) return texts;
