@@ -9,7 +9,9 @@ const GAP_OK = /^[ \t\uE002\uE003]*[ \t][ \t\uE002\uE003]*$/;
 const MARK_RE = /[\uE002\uE003]/g;
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
-const SWAP_ONLY = process.env.NAMES_SWAP_ONLY !== '0';
+const SMART_MODE = process.env.NAMES_SWAP_ONLY !== '0';
+const PERSON_MIN_WRAPS = 2;
+const PERSON_MIN_RATIO = 0.6;
 const SLICE = 600;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
@@ -38,6 +40,8 @@ const ALWAYS_AMBIG = new Set(
 const NEVER_STRONG = new Set(
   'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
     .split(/\s+/).map(bookKey));
+const PRONOUNS = new Set('انا انت انتي انتم انتن نحن هو هي هم هن'.split(/\s+/).map(bookKey));
+const NO_BARE = new Set([...ALWAYS_AMBIG, ...NEVER_STRONG, ...PRONOUNS]);
 const DENY_COMBINED = new Set(
   'وسام بسام بديل بريد فريد وريد بعيد وعيد بخير بفضل بحمد'
     .split(/\s+/).map(bookKey));
@@ -241,7 +245,16 @@ function makeBook(map) {
     return { s, tags };
   }
   const wrap = (x, kind) => (kind === 'person' ? '"' + x + '"' : '(' + x + ')');
-  const allowed = m => !m.badCtx && (SWAP_ONLY ? m.marked : (!m.e.ambig || m.marked || m.voc || strong.has(m.key)));
+  let stats = new Map();
+  const allowed = m => {
+    if (m.badCtx) return false;
+    if (!SMART_MODE) return !m.e.ambig || m.marked || m.voc || strong.has(m.key);
+    if (m.marked) return true;
+    if (m.e.ambig || NO_BARE.has(m.key)) return false;
+    if (m.e.kind === 'entity') return true;
+    const o = stats.get(m.key);
+    return !!o && o.m >= PERSON_MIN_WRAPS && o.m / (o.m + o.b) >= PERSON_MIN_RATIO;
+  };
   function apply(text) {
     const { s, tags } = prepare(String(text));
     let out = '', pos = 0;
@@ -267,6 +280,18 @@ function makeBook(map) {
     });
     strong = new Set();
     for (const [k, o] of c) if (o.m >= STRONG_MIN_MARKED && o.m / (o.m + o.b) >= STRONG_MIN_RATIO) strong.add(k);
+    stats = new Map();
+    if (!SMART_MODE) return;
+    texts.forEach((t, i) => {
+      if (!eligible[i]) return;
+      const { s } = prepare(String(t));
+      for (const m of findMatches(s)) {
+        if (m.e.kind !== 'person') continue;
+        const o = stats.get(m.key) || { m: 0, b: 0 };
+        if (m.marked) o.m++; else o.b++;
+        stats.set(m.key, o);
+      }
+    });
   }
   const lookup = phrase => {
     const toks = String(phrase).match(TOKEN_RE);
