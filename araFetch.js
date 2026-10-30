@@ -10,12 +10,10 @@ module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEp
 const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
 
-// إعدادات الوضع السريع (المباشر للمستخدم - سقف ~5 ثوانٍ)
 const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500 };
 const FAST_VERIFY_WINDOW_MS = 2800;
 const VERIFY_TIMEOUT_MS = 2600;
 
-// إعدادات الوضع العميق بالخلفية (Prefetch - يأخذ وقته الكامل بفك الضغط والتصفية)
 const BG_SOURCE_TIMEOUTS = { os_legacy: 12000, os_mirror: 8000, subdl: 12000, subsource: 12000, oscom: 10000 };
 const BG_VERIFY_WINDOW_MS = 35000;
 const BG_VERIFY_TIMEOUT_MS = 10000;
@@ -41,9 +39,7 @@ const assFileRe = /\.(ass|ssa)(\b|$)/i;
 const rarFileRe = /\.(rar|7z)(\?|$)/i;
 const osFileIdRe = /\/file\/(\d+)/i;
 
-// كاشف SDH / HI من البيانات الوصفية أو اسم الملف
 const HI_NAME_RE = /(?:^|[._\s\-\[\(])(sdh|hi|cc|deaf)(?=[._\s\-\]\)]|$)|hearing[\s._-]*impaired|closed[\s._-]*caption|ضعاف[\s._-]*السمع/i;
-// كاشف المؤثرات الصوتية النصية داخل الأسطر مثل [موسيقى] أو (ضحك) أو ♪
 const SDH_CUE_RE = /[♪♫]|^\s*[\[\(][^\]\)\n]{2,45}[\]\)]\s*$/;
 
 function isHearingImpairedMeta(item) {
@@ -190,7 +186,6 @@ function normalizeNameSig(name) {
         .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-// توليد بصمة هيكلية ثابتة لاسم الإصدار (مع إعطاء الأولوية للترجمات غير الـ SDH أولاً)
 function computeReleaseTemplateInfo(item) {
     const isSdh = isHearingImpairedMeta(item);
     const sdhRank = isSdh ? '1' : '0';
@@ -609,7 +604,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
     }
 
-    // سجلات عالمية عابرة للمواقع لمنع تكرار نفس البصمة النصية (MD5) منذ الضغطة الأولى (للأفلام والمسلسلات)
     let globalAssCount = 0;
     const globalSeenSrtSigs = new Set();
 
@@ -678,7 +672,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             const sKey = v._sig || uKey;
             const osId = v._osFileId || '';
             if (seenCleanUrls.has(uKey) || seenSigs.has(sKey) || (osId && seenOsIds.has(osId))) continue;
-            // منع تكرار البصمة النصية (MD5) عبر جميع المواقع منذ الضغطة الأولى
             if (v._sig && globalSeenSrtSigs.has(v._sig)) continue;
             seenCleanUrls.add(uKey);
             seenSigs.add(sKey);
@@ -732,7 +725,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
     const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt, ...oscomSrt];
 
-    // للمصحح: منع التكرار بالبصمة النصية (MD5) أو بتطابق اسم الإصدار عبر المواقع دائماً (في أول ضغطة وبالخلفية)
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
     const seenCorrNames = new Set();
@@ -750,7 +742,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
                     const sig = c._sig || u;
                     const nameSig = normalizeNameSig(c.fileName || c.title || '');
                     if (c._bad || seenCorr.has(u) || seenCorrSigs.has(sig)) continue;
-                    // إذا كان الملف غير مفحوص بعد، نمنع تكراره إذا تطابق اسم ملفه تماماً مع ملف آخر تم اختياره من موقع سابق
                     if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameSig)) continue;
                     if (!!c._verified !== pass) continue;
                     seenCorr.add(u);
