@@ -687,7 +687,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           [1, JSON.stringify(Array.from(book.map.entries()))],
           [2, JSON.stringify(Array.from(kinds.entries()))]
         ];
-        db.saveMap('names', nameCacheKey, dataToSave);
+        if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
       } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
     }
     
