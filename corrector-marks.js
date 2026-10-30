@@ -3,7 +3,7 @@
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
 const LETTER = /[\p{L}\p{N}]/u;
-const SWAP_ONLY = process.env.NAMES_SWAP_ONLY !== '0';
+const SMART_MODE = process.env.NAMES_SWAP_ONLY !== '0';
 const NAME_MIN_WRAPS = 2;
 const NAME_MIN_RATIO = 0.6;
 const NAME_MIN_LEN = 3;
@@ -85,6 +85,7 @@ const KNOWN_ENTITIES = new Set(KNOWN_ENTITIES_RAW.split(/\s+/).filter(Boolean).m
 const FALLBACK_NO_BARE = new Set(
   'الله الرب على إلى الى حتى متى لدى سوى عدا سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
     .split(/\s+/).map(nameKey));
+const NO_BARE = new Set([...FALLBACK_NO_BARE, ...'انا انت انتي انتم انتن نحن هو هي هم هن'.split(/\s+/).map(nameKey)]);
 function collectNameCandidates(texts, eligible, max = 300, book = null) {
   const seen = new Map();
   texts.forEach((t, i) => {
@@ -123,14 +124,14 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     if (book && book.lookup(k)) continue;
     const marked = o.q + o.p;
     if (!marked) continue;
-    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k);
+    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !(SMART_MODE ? NO_BARE : FALLBACK_NO_BARE).has(k);
     const kind = kinds.get(k);
+    if (SMART_MODE && NO_BARE.has(k)) { names.set(k, kind === 'entity' ? 'p' : 'q'); continue; }
     if (kind === 'person') { names.set(k, 'q'); if (passes) wrapBare.add(k); }
-    else if (kind === 'entity') { names.set(k, 'p'); if (passes) wrapBare.add(k); }
+    else if (kind === 'entity') { names.set(k, 'p'); if (SMART_MODE ? !NO_BARE.has(k) : passes) wrapBare.add(k); }
     else if (kind === 'none') { }
     else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }
   }
-  if (SWAP_ONLY) wrapBare.clear();
   if (!names.size) return texts;
   const wrap = (w, kind) => (kind === 'q' ? '"' + w + '"' : '(' + w + ')');
   return texts.map((t, i) => {
