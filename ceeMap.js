@@ -1,8 +1,4 @@
 'use strict';
-// يحوّل معرفات سينمانا (cee:123) إلى رقم IMDb.
-// 1) الأول يدوّر بالخريطة (cee-map.json) اللي يجهّزها الموبايل وتنرفع مع الكتالوج على GitHub Pages.
-// 2) إذا العمل مو بالخريطة (مثلاً جاي من البحث)، يسأل سينمانا مباشرة (يشتغل فقط إذا Render مو محجوب).
-//    وإذا انحجب، السجل يطبع السبب بوضوح: [CEE Live] ... فشل.
 
 const axios = require('axios');
 
@@ -62,7 +58,6 @@ async function loadMap() {
     return loading;
 }
 
-// ---------- السؤال المباشر لسينمانا ----------
 const liveCache = new Map();
 
 async function liveInfo(nb) {
@@ -140,14 +135,12 @@ function liveLookup(nb) {
 async function liveFallback(nb, parts) {
     if (!LIVE_ENABLED) return { ok: false, reason: 'not-found' };
     const res = await liveLookup(nb);
-    // الشكل الاحتياطي cee:<مسلسل>:<موسم>:<حلقة>: نأخذ رقم IMDb من المسلسل ونبقي الموسم والحلقة من الطلب
     if (res && res.ok && parts.length >= 4) {
         return { ...res, type: 'series', season: parseInt(parts[2], 10) || 1, episode: parseInt(parts[3], 10) || 1 };
     }
     return res;
 }
 
-// ---------- الخريطة ----------
 function fromSeries(map, seriesNb, season, episode) {
     const info = map.series[seriesNb];
     const imdbId = info && info.i ? info.i : '';
@@ -163,10 +156,6 @@ function fromSeries(map, seriesNb, season, episode) {
     };
 }
 
-// الأشكال المدعومة:
-//   cee:<رقم الفيلم>
-//   cee:<رقم الحلقة>                       (رقم الحلقة نفسه من كتالوجنا)
-//   cee:<رقم المسلسل>:<موسم>:<حلقة>         (احتياطاً، إذا التطبيق ركّبه بهذا الشكل)
 async function resolveCeeId(targetId) {
     const parts = String(targetId || '').split(':');
     if (parts[0] !== 'cee' || !parts[1]) return { ok: false, reason: 'not-cee' };
