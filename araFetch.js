@@ -497,7 +497,8 @@ async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs =
             .digest('hex');
         cacheBoth(text);
         const finalSdh = metaSdh || check.isSdhContent;
-        return { ...s, format: 'srt', _sig: sig, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh, _badSpelling: check.isBadSpelling };
+        const punct = (check.cuesText.match(/["\u201C\u201D\u00AB\u00BB()]/g) || []).length;
+        return { ...s, format: 'srt', _sig: sig, _punct: punct, _verified: true, _isSdh: finalSdh, hearingImpaired: finalSdh, _badSpelling: check.isBadSpelling };
     } catch {
         return null;
     } finally {
@@ -647,6 +648,18 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         ];
     }
 
+    const bestBySig = new Map();
+    for (const siteKey of ['subdl', 'subsource', 'opensubtitles', 'os_legacy', 'oscom']) {
+        const arr = sortByConsistentTemplate(
+            verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'srt' && !v._bad)
+        );
+        for (const v of arr) {
+            if (!v._sig) continue;
+            const cur = bestBySig.get(v._sig);
+            if (!cur || (v._punct || 0) > (cur._punct || 0)) bestBySig.set(v._sig, v);
+        }
+    }
+
     function collectSiteSrt(siteKey, preSrtList) {
         const verifiedOut = [];
         const unverifiedOut = [];
@@ -658,8 +671,9 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'srt' && !v._bad)
         );
 
-        for (const v of siteVerifiedSrt) {
+        for (const v0 of siteVerifiedSrt) {
             if (verifiedOut.length >= MAX_SRT_PER_SITE) break;
+            const v = (v0._sig && bestBySig.get(v0._sig)) || v0;
             const uKey = cleanPath(v.url);
             const sKey = v._sig || uKey;
             const osId = v._osFileId || '';
