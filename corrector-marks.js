@@ -3,7 +3,8 @@
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
 const LETTER = /[\p{L}\p{N}]/u;
-const SMART_MODE = process.env.NAMES_SWAP_ONLY !== '0';
+const { EXCLUDE_RAW } = require('./name-book');
+const TRANSLATOR_MODE = process.env.NAMES_SWAP_ONLY !== '0';
 const NAME_MIN_WRAPS = 2;
 const NAME_MIN_RATIO = 0.6;
 const NAME_MIN_LEN = 3;
@@ -85,7 +86,7 @@ const KNOWN_ENTITIES = new Set(KNOWN_ENTITIES_RAW.split(/\s+/).filter(Boolean).m
 const FALLBACK_NO_BARE = new Set(
   'الله الرب على إلى الى حتى متى لدى سوى عدا سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
     .split(/\s+/).map(nameKey));
-const NO_BARE = new Set([...FALLBACK_NO_BARE, ...'انا انت انتي انتم انتن نحن هو هي هم هن'.split(/\s+/).map(nameKey)]);
+const HARD = new Set(EXCLUDE_RAW.split(/\s+/).filter(Boolean).map(nameKey));
 function collectNameCandidates(texts, eligible, max = 300, book = null) {
   const seen = new Map();
   texts.forEach((t, i) => {
@@ -124,11 +125,10 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
     if (book && book.lookup(k)) continue;
     const marked = o.q + o.p;
     if (!marked) continue;
-    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !(SMART_MODE ? NO_BARE : FALLBACK_NO_BARE).has(k);
+    const passes = marked >= NAME_MIN_WRAPS && marked / (marked + o.b) >= NAME_MIN_RATIO && !FALLBACK_NO_BARE.has(k);
     const kind = kinds.get(k);
-    if (SMART_MODE && NO_BARE.has(k)) { names.set(k, kind === 'entity' ? 'p' : 'q'); continue; }
     if (kind === 'person') { names.set(k, 'q'); if (passes) wrapBare.add(k); }
-    else if (kind === 'entity') { names.set(k, 'p'); if (SMART_MODE ? !NO_BARE.has(k) : passes) wrapBare.add(k); }
+    else if (kind === 'entity') { names.set(k, 'p'); if (passes) wrapBare.add(k); }
     else if (kind === 'none') { }
     else if (passes) { names.set(k, o.q >= o.p ? 'q' : 'p'); wrapBare.add(k); }
   }
@@ -146,6 +146,85 @@ function propagateNames(texts, eligible, kinds = new Map(), book = null) {
       if (!kind) return all;
       if (bare && !wrapBare.has(k)) return all;
       return wrap(word, kind);
+    });
+    return unmaskTags(updated, tags);
+  });
+}
+const ARW = '[\\u0621-\\u065F\\u0670-\\u06D3]+';
+const ARW_G = new RegExp(ARW, 'g');
+const ARP = ARW + '(?: ' + ARW + '){0,2}';
+const QCH = '["\\u201C\\u201D\\u00AB\\u00BB]';
+const T_SPAN = new RegExp('(?<![\\p{L}\\p{N}])' + QCH + '(' + ARP + ')[.,\\u060C\\u061B\\u2026!\\u061F?:]{0,3}' + QCH + '(?![\\p{L}\\p{N}])|\\((' + ARP + ')\\)|\\)(' + ARP + ')\\(', 'gu');
+function scanTranslator(text) {
+  const { masked } = maskTags(text);
+  const toks = [...masked.matchAll(ARW_G)].map(m => ({ k: nameKey(m[0]), a: m.index, b: m.index + m[0].length }));
+  const flags = new Array(toks.length).fill(0);
+  for (const m of masked.matchAll(T_SPAN)) {
+    const a = m.index, b = a + m[0].length;
+    const inside = [];
+    toks.forEach((t, j) => { if (t.a >= a && t.b <= b) inside.push(j); });
+    if (!inside.length) continue;
+    const code = inside.length > 1 ? 3 : (m[1] != null ? 1 : 2);
+    inside.forEach(j => { flags[j] = code; });
+  }
+  return { toks, flags };
+}
+function translatorFlags(orig, fin) {
+  const o = scanTranslator(orig);
+  const ft = [...maskTags(fin).masked.matchAll(ARW_G)].map(m => nameKey(m[0]));
+  if (o.toks.length !== ft.length) return null;
+  return o.flags.map((f, j) => (o.toks[j].k === ft[j] ? f : -1));
+}
+function collectNameCandidatesT(texts, eligible, flagsArr, max = 300, book = null) {
+  const seen = new Map();
+  texts.forEach((t, i) => {
+    const fl = flagsArr[i];
+    if (!eligible[i] || !fl) return;
+    const { masked } = maskTags(t);
+    [...masked.matchAll(ARW_G)].forEach((m, j) => {
+      if (fl[j] !== 1 && fl[j] !== 2) return;
+      const w = m[0], k = nameKey(w);
+      if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || HARD.has(k) || seen.has(k)) return;
+      if (book && book.lookup(w)) return;
+      const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      seen.set(k, { w, ex });
+    });
+  });
+  return [...seen.values()].slice(0, max);
+}
+function propagateNamesT(texts, eligible, kinds, book, flagsArr) {
+  if (!book) return texts;
+  const allowUnwrap = book.complete !== false;
+  const tw = new Set();
+  texts.forEach((t, i) => {
+    const fl = flagsArr[i];
+    if (!eligible[i] || !fl) return;
+    [...maskTags(t).masked.matchAll(ARW_G)].forEach((m, j) => { if (fl[j] === 1 || fl[j] === 2) tw.add(nameKey(m[0])); });
+  });
+  return texts.map((t, i) => {
+    if (!eligible[i]) return t;
+    const fl = flagsArr[i];
+    const { masked, tags } = maskTags(t);
+    let idx = 0;
+    const updated = masked.replace(AR_TOKEN, (all, q, p, bare) => {
+      const inner = bare != null ? bare : (q != null ? q : p);
+      const start = idx;
+      idx += (inner.match(ARW_G) || []).length;
+      const word = bare || ((q != null && ONE_WORD.test(q)) ? q : (p != null && ONE_WORD.test(p)) ? p : null);
+      if (!word || book.lookup(word)) return all;
+      const k = nameKey(word);
+      const excl = HARD.has(k);
+      const kind = kinds.get(k);
+      const f = fl ? fl[start] : -1;
+      const wordLevel = !excl && k.length >= NAME_MIN_LEN && tw.has(k);
+      let t2;
+      if (wordLevel && kind === 'person') t2 = 'q';
+      else if (wordLevel && kind === 'entity') t2 = 'p';
+      else if (f === 1) t2 = 'q';
+      else if (f === 2) t2 = (excl || kind === 'person') ? 'q' : 'p';
+      else if (f === 0 && allowUnwrap) t2 = null;
+      else return all;
+      return t2 === null ? word : (t2 === 'q' ? '"' + word + '"' : '(' + word + ')');
     });
     return unmaskTags(updated, tags);
   });
@@ -204,4 +283,4 @@ ${JSON.stringify(part)}`;
   }));
   return out;
 }
-module.exports = { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, tidyQuotes, tidyParens };
+module.exports = { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, tidyQuotes, tidyParens, TRANSLATOR_MODE, translatorFlags, collectNameCandidatesT, propagateNamesT };
