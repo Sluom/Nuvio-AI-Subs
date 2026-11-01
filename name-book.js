@@ -9,9 +9,7 @@ const GAP_OK = /^[ \t\uE002\uE003]*[ \t][ \t\uE002\uE003]*$/;
 const MARK_RE = /[\uE002\uE003]/g;
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
-const SMART_MODE = process.env.NAMES_SWAP_ONLY !== '0';
-const PERSON_MIN_WRAPS = 2;
-const PERSON_MIN_RATIO = 0.6;
+const TRANSLATOR_MODE = process.env.NAMES_SWAP_ONLY !== '0';
 const SLICE = 400;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
@@ -34,14 +32,13 @@ function stripNotNames(text) {
 }
 const NEVER = new Set(['الله', 'الرب'].map(bookKey));
 const FUNC_RAW = new Set(['على', 'إلى', 'الى', 'حتى', 'متى', 'لدى', 'سوى', 'عدا']);
-const ALWAYS_AMBIG = new Set(
-  'علي نور امل سعيد جميل كريم رحمة حياة سلام امين صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير'
-    .split(/\s+/).map(bookKey));
-const NEVER_STRONG = new Set(
-  'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد'
-    .split(/\s+/).map(bookKey));
-const PRONOUNS = new Set('انا انت انتي انتم انتن نحن هو هي هم هن'.split(/\s+/).map(bookKey));
-const NO_BARE = new Set([...ALWAYS_AMBIG, ...NEVER_STRONG, ...PRONOUNS]);
+const ALWAYS_AMBIG_RAW = 'علي نور امل سعيد جميل كريم رحمة حياة سلام امين صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير';
+const ALWAYS_AMBIG = new Set(ALWAYS_AMBIG_RAW.split(/\s+/).map(bookKey));
+const NEVER_STRONG_RAW = 'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد';
+const NEVER_STRONG = new Set(NEVER_STRONG_RAW.split(/\s+/).map(bookKey));
+const EXCLUDE_EXTRA_RAW = 'انا انت انتي انتم انتن نحن هو هي هم هن لي له لك لنا لها لهم إلي الي كيف ماذا لماذا اين أين هل بات مات الله الرب على إلى الى حتى متى لدى سوى عدا';
+const EXCLUDE_RAW = [ALWAYS_AMBIG_RAW, NEVER_STRONG_RAW, EXCLUDE_EXTRA_RAW].join(' ');
+const NO_BARE = new Set(EXCLUDE_RAW.split(/\s+/).filter(Boolean).map(bookKey));
 const DENY_COMBINED = new Set(
   'وسام بسام بديل بريد فريد وريد بعيد وعيد بخير بفضل بحمد'
     .split(/\s+/).map(bookKey));
@@ -248,21 +245,28 @@ function makeBook(map) {
     return { s, tags };
   }
   const wrap = (x, kind) => (kind === 'person' ? '"' + x + '"' : '(' + x + ')');
-  let stats = new Map();
-  const allowed = m => {
+  const allowedOld = m => !m.badCtx && (!m.e.ambig || m.marked || m.voc || strong.has(m.key));
+  const allowedNew = (m, fl, i0, i1, allowUnwrap) => {
     if (m.badCtx) return false;
-    if (!SMART_MODE) return !m.e.ambig || m.marked || m.voc || strong.has(m.key);
-    if (m.marked) return true;
-    if (m.e.ambig || NO_BARE.has(m.key)) return false;
-    if (m.e.kind === 'entity') return true;
-    const o = stats.get(m.key);
-    return !!o && o.m >= PERSON_MIN_WRAPS && o.m / (o.m + o.b) >= PERSON_MIN_RATIO;
+    if (!m.e.ambig && !NO_BARE.has(m.key)) return true;
+    if (fl && i0 >= 0 && i1 >= i0) {
+      let unknown = false;
+      for (let j = i0; j <= i1; j++) {
+        const f = fl[j];
+        if (f > 0) return true;
+        if (!(f === 0)) unknown = true;
+      }
+      if (!unknown) return allowUnwrap ? false : m.marked;
+    }
+    return m.marked;
   };
-  function apply(text) {
+  function apply(text, fl = null, allowUnwrap = true) {
     const { s, tags } = prepare(String(text));
+    const runs = TRANSLATOR_MODE && fl ? [...s.matchAll(TOKEN_RE)].map(r => [r.index, r.index + r[0].length]) : null;
+    const idxAt = pos => (runs ? runs.findIndex(r => pos >= r[0] && pos < r[1]) : -1);
     let out = '', pos = 0;
     for (const m of findMatches(s)) {
-      if (!allowed(m)) continue;
+      if (!(TRANSLATOR_MODE ? allowedNew(m, fl, idxAt(m.a), idxAt(m.b - 1), allowUnwrap) : allowedOld(m))) continue;
       out += s.slice(pos, m.a) + wrap(s.slice(m.a, m.b).replace(MARK_RE, ''), m.e.kind);
       pos = m.b;
     }
@@ -283,18 +287,6 @@ function makeBook(map) {
     });
     strong = new Set();
     for (const [k, o] of c) if (o.m >= STRONG_MIN_MARKED && o.m / (o.m + o.b) >= STRONG_MIN_RATIO) strong.add(k);
-    stats = new Map();
-    if (!SMART_MODE) return;
-    texts.forEach((t, i) => {
-      if (!eligible[i]) return;
-      const { s } = prepare(String(t));
-      for (const m of findMatches(s)) {
-        if (m.e.kind !== 'person') continue;
-        const o = stats.get(m.key) || { m: 0, b: 0 };
-        if (m.marked) o.m++; else o.b++;
-        stats.set(m.key, o);
-      }
-    });
   }
   const lookup = phrase => {
     const toks = String(phrase).match(TOKEN_RE);
@@ -304,9 +296,10 @@ function makeBook(map) {
   };
   return { map, lookup, apply, prime, size: map.size, complete: true, get strong() { return strong; } };
 }
-function applyNameBook(texts, eligible, book) {
+function applyNameBook(texts, eligible, book, flagsArr = null) {
   if (!book || !book.size) return texts;
-  book.prime(texts, eligible);
-  return texts.map((t, i) => (eligible[i] ? book.apply(t) : t));
+  if (!TRANSLATOR_MODE) book.prime(texts, eligible);
+  const allowUnwrap = book.complete !== false;
+  return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
-module.exports = { buildNameBook, applyNameBook, makeBook, bookKey };
+module.exports = { buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW };
