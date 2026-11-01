@@ -7,7 +7,7 @@ const {
 } = require('./ai').shared;
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
-const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
+const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
 const { buildNameBook, applyNameBook, makeBook } = require('./name-book');
 
 function shortModel(m) {
@@ -139,6 +139,7 @@ function restoreTags(orig, out) {
 }
 function stripPunctPart(s) {
   return s
+    .replace(/(^|\s)(يا)(?=["“«(\[]+\p{L})/gu, '$1$2 ')
     .replace(/["“”«»()\[\]]/g, '')
     .replace(/(?<!\d)[.,:]+|[.,:]+(?!\d)/g, ' ')
     .replace(/[!؟?،؛;]+/g, ' ');
@@ -680,20 +681,28 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   
   if (toDo.length > 0) {
     const tNames = Date.now();
+    let tBookWait = 0, tCls = 0;
     if (!book) {
       book = bookPromise
         ? await bookPromise
         : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
+      tBookWait = Date.now() - tNames;
+      console.log(`\u200F[مرحلة الأسماء - القاموس] ${book ? `جاهز (${book.size} اسم)` : 'فشل بناؤه'} | ${bookPromise ? `كان يعمل بالتوازي مع الأسطر، انتظرته بعدها ${secsOf(tBookWait)} ثانية` : `بنيته بعد الأسطر في ${secsOf(tBookWait)} ثانية`}`);
+    } else {
+      console.log(`\u200F[مرحلة الأسماء - القاموس] من الكاش (${book.size} اسم)`);
     }
 
     let tflags = null;
     if (TRANSLATOR_MODE) {
+      cues.forEach((c, i) => { if (eligible[i]) finalTexts[i] = splitGluedPrefixes(c.text, finalTexts[i]); });
       tflags = cues.map((c, i) => (eligible[i] ? translatorFlags(c.text, finalTexts[i]) : null));
       if (book) {
         try {
           const cands = collectNameCandidatesT(finalTexts, eligible, tflags, 300, book).filter(x => !kinds.has(nameKey(x.w)));
           if (cands.length) {
+            const tC = Date.now();
             const nk = await classifyNames(cands, keysArray, modelName, namesDeps);
+            tCls = Date.now() - tC;
             for (const [k, v] of nk) kinds.set(k, v);
           }
           if ((!namesLoadedFromCache || cands.length) && book.complete !== false) {
@@ -719,6 +728,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
     
+    outTexts = outTexts.map((t, i) => (eligible[i] ? wrapMaddaNames(cues[i].text, t) : t));
+
     const changed = [];
     outTexts.forEach((t, i) => {
       if (t !== finalTexts[i] && cache.has(i)) {
@@ -728,9 +739,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
     
-    if (!namesLoadedFromCache) {
-       console.log(`\u200F[مرحلة الأسماء بعد الأسطر ⏱] ${secsOf(Date.now() - tNames)} ثانية (تصنيف الأسماء + حفظها${bookPromise ? '' : ' + بناء القاموس'})`);
-    }
+    console.log(`\u200F[مرحلة الأسماء بعد الأسطر ⏱] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
   
   console.log(`\u200F[المصحح كامل ⏱ الزمن الكلي الحقيقي] ${secsOf(Date.now() - tStart)} ثانية (الأسطر + مرحلة الأسماء)`);
