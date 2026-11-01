@@ -7,7 +7,7 @@ const {
 } = require('./ai').shared;
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
-const { fixMarks, propagateNames, collectNameCandidates, classifyNames } = require('./corrector-marks');
+const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
 const { buildNameBook, applyNameBook, makeBook } = require('./name-book');
 
 function shortModel(m) {
@@ -182,6 +182,8 @@ function prepareForModel(rawText) {
   }
   return out.join('\\N');
 }
+const QUOTE_CH = /["“”]/g;
+const quoteWords = s => (s.replace(QUOTE_CH, '').match(/[\p{L}\p{N}]+/gu) || []).length;
 function quoteHint(rawText) {
   const t = String(rawText == null ? '' : rawText).replace(/\{[^}]*\}|<[^>]*>/g, '');
   const lines = t.split(LINE_SPLIT).map(l => l.trim()).filter(Boolean);
@@ -191,7 +193,11 @@ function quoteHint(rawText) {
       const s = l.replace(/^[-–—]\s*/, '');
       const st = /^["“”]/.test(s);
       const en = /["“”][.…!؟?،,؛\s]*$/.test(s);
-      return st && en ? 'whole' : st ? 'open' : en ? 'close' : null;
+      const n = (s.match(QUOTE_CH) || []).length;
+      if (st && en) return n === 2 && quoteWords(s) > 2 ? 'whole' : null;
+      if (st) return n === 1 ? 'open' : null;
+      if (en) return n === 1 ? 'close' : null;
+      return null;
     });
     return per.some(Boolean) ? per : null;
   }
@@ -206,7 +212,7 @@ function quoteHint(rawText) {
     if (en && !(st && onlyQuote)) { edge++; if (i === lines.length - 1) endLast = true; }
   });
   if (edge !== total) return null;
-  if (total % 2 === 0) return 'whole';
+  if (total % 2 === 0) return (total === 2 && quoteWords(t) <= 2) ? null : 'whole';
   if (total === 1) { if (startFirst) return 'open'; if (endLast) return 'close'; }
   return null;
 }
@@ -680,18 +686,38 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
         : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
     }
 
-    if (!namesLoadedFromCache && book) {
-      try {
-        kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
-        const dataToSave = [
-          [1, JSON.stringify(Array.from(book.map.entries()))],
-          [2, JSON.stringify(Array.from(kinds.entries()))]
-        ];
-        if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
-      } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+    let tflags = null;
+    if (TRANSLATOR_MODE) {
+      tflags = cues.map((c, i) => (eligible[i] ? translatorFlags(c.text, finalTexts[i]) : null));
+      if (book) {
+        try {
+          const cands = collectNameCandidatesT(finalTexts, eligible, tflags, 300, book).filter(x => !kinds.has(nameKey(x.w)));
+          if (cands.length) {
+            const nk = await classifyNames(cands, keysArray, modelName, namesDeps);
+            for (const [k, v] of nk) kinds.set(k, v);
+          }
+          if ((!namesLoadedFromCache || cands.length) && book.complete !== false) {
+            db.saveMap('names', nameCacheKey, [
+              [1, JSON.stringify(Array.from(book.map.entries()))],
+              [2, JSON.stringify(Array.from(kinds.entries()))]
+            ]);
+          }
+        } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+      }
+      outTexts = applyNameBook(propagateNamesT(finalTexts, eligible, kinds, book, tflags), eligible, book, tflags);
+    } else {
+      if (!namesLoadedFromCache && book) {
+        try {
+          kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
+          const dataToSave = [
+            [1, JSON.stringify(Array.from(book.map.entries()))],
+            [2, JSON.stringify(Array.from(kinds.entries()))]
+          ];
+          if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
+        } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+      }
+      outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
-    
-    outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     
     const changed = [];
     outTexts.forEach((t, i) => {
