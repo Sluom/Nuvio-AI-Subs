@@ -167,29 +167,135 @@ function scanTranslator(text) {
     const code = inside.length > 1 ? 3 : (m[1] != null ? 1 : 2);
     inside.forEach(j => { flags[j] = code; });
   }
+  const covered = new Set();
+  for (const m of masked.matchAll(T_SPAN)) for (let p = m.index; p < m.index + m[0].length; p++) covered.add(p);
+  const stack = [], lone = [];
+  for (let p = 0; p < masked.length; p++) {
+    if (covered.has(p)) continue;
+    const ch = masked[p];
+    if (ch === '(') stack.push(p);
+    else if (ch === ')') { if (stack.length) stack.pop(); else lone.push(p); }
+  }
+  lone.push(...stack);
+  for (const p of lone) {
+    const j = masked[p] === '(' ? toks.findIndex(t => t.a === p + 1) : toks.findIndex(t => t.b === p);
+    if (j < 0 || flags[j] !== 0) continue;
+    const k = toks[j].k;
+    if (k.length < NAME_MIN_LEN || HARD.has(k)) continue;
+    flags[j] = 4;
+  }
   return { toks, flags };
 }
 function translatorFlags(orig, fin) {
   const o = scanTranslator(orig);
   const ft = [...maskTags(fin).masked.matchAll(ARW_G)].map(m => nameKey(m[0]));
-  if (o.toks.length !== ft.length) return null;
-  return o.flags.map((f, j) => (o.toks[j].k === ft[j] ? f : -1));
+  if (o.toks.length === ft.length) return o.flags.map((f, j) => (o.toks[j].k === ft[j] ? f : -1));
+  if (o.toks.map(t => t.k).join('') !== ft.join('')) return null;
+  let pos = 0;
+  const spans = o.toks.map(t => { const a = pos; pos += t.k.length; return [a, pos]; });
+  pos = 0;
+  return ft.map(k => {
+    const a = pos, b = pos + k.length; pos = b;
+    let f = 0;
+    spans.forEach(([x, y], j) => { if (x < b && y > a) f = Math.max(f, o.flags[j]); });
+    return f;
+  });
+}
+const PRE_ONLY = /^(?:[وف][بلك]?|[بلك])$/;
+const DIAC = /[\u064B-\u065F\u0670\u0640]/;
+function splitGluedPrefixes(orig, fin) {
+  const o = scanTranslator(orig);
+  const { masked, tags } = maskTags(fin);
+  const ftoks = [...masked.matchAll(ARW_G)];
+  if (o.toks.length === ftoks.length) return fin;
+  if (o.toks.map(t => t.k).join('') !== ftoks.map(m => nameKey(m[0])).join('')) return fin;
+  const om = maskTags(orig).masked;
+  const need = new Set();
+  let pos = 0;
+  o.toks.forEach((t, j) => {
+    if (j > 0 && o.flags[j] >= 1 && o.flags[j] <= 3 && PRE_ONLY.test(o.toks[j - 1].k) && /^["(\u201C\u00AB]$/.test(om.slice(o.toks[j - 1].b, t.a))) need.add(pos);
+    pos += t.k.length;
+  });
+  if (!need.size) return fin;
+  let out = '', last = 0, cum = 0;
+  for (const m of ftoks) {
+    out += masked.slice(last, m.index);
+    last = m.index + m[0].length;
+    let cnt = 0;
+    for (const ch of m[0]) {
+      if (!DIAC.test(ch)) {
+        if (cnt > 0 && need.has(cum + cnt)) out += ' ';
+        cnt++;
+      }
+      out += ch;
+    }
+    cum += nameKey(m[0]).length;
+  }
+  return unmaskTags(out + masked.slice(last), tags);
+}
+const MADDA_NAMES = new Set('آنا آني آمي آبي آلي آدم آليس آلان آشر آيا آري آدي آرن آلف آلا'.split(' '));
+const MADDA_PRE = /^(?:[وف][بلك]?|[بلك])$/;
+function maddaSplit(rawTok) {
+  const t = rawTok.replace(/[\u064B-\u065F\u0670\u0640]/g, '');
+  if (MADDA_NAMES.has(t)) return 0;
+  for (let n = 1; n <= 2 && n < t.length; n++) {
+    if (MADDA_PRE.test(t.slice(0, n)) && MADDA_NAMES.has(t.slice(n))) return n;
+  }
+  return -1;
+}
+function wrapMaddaNames(orig, out) {
+  if (!/\u0622/.test(orig)) return out;
+  const o = scanTranslator(orig);
+  const om = maskTags(orig).masked;
+  const hits = [];
+  let pos = 0;
+  [...om.matchAll(ARW_G)].forEach((m, j) => {
+    const start = pos;
+    pos += o.toks[j].k.length;
+    if (!m[0].includes('\u0622')) return;
+    if (o.flags[j] !== 0 && o.flags[j] !== 4) return;
+    const n = maddaSplit(m[0]);
+    if (n < 0) return;
+    const nameRaw = m[0].replace(/[\u064B-\u065F\u0670\u0640]/g, '').slice(n);
+    hits.push({ ls: start + n, le: start + o.toks[j].k.length, nameRaw });
+  });
+  if (!hits.length) return out;
+  const { masked, tags } = maskTags(out);
+  const ftoks = [...masked.matchAll(ARW_G)];
+  if (ftoks.map(m => nameKey(m[0])).join('') !== o.toks.map(t => t.k).join('')) return out;
+  const posOf = [];
+  for (const m of ftoks) {
+    for (let c = 0; c < m[0].length; c++) if (!DIAC.test(m[0][c])) posOf.push(m.index + c);
+  }
+  let res = masked;
+  for (const h of hits.sort((a, b) => b.ls - a.ls)) {
+    if (h.le <= h.ls || h.le > posOf.length) continue;
+    const a = posOf[h.ls];
+    let b = posOf[h.le - 1] + 1;
+    while (b < res.length && DIAC.test(res[b])) b++;
+    const before = res[a - 1] || '', after = res[b] || '';
+    if (before === '"' || before === '(' || after === '"' || after === ')') continue;
+    res = res.slice(0, a) + (/[\p{L}\p{N}]/u.test(before) ? ' ' : '') + '"' + h.nameRaw + '"' + res.slice(b);
+  }
+  return unmaskTags(res, tags);
 }
 function collectNameCandidatesT(texts, eligible, flagsArr, max = 300, book = null) {
   const seen = new Map();
-  texts.forEach((t, i) => {
-    const fl = flagsArr[i];
-    if (!eligible[i] || !fl) return;
-    const { masked } = maskTags(t);
-    [...masked.matchAll(ARW_G)].forEach((m, j) => {
-      if (fl[j] !== 1 && fl[j] !== 2) return;
-      const w = m[0], k = nameKey(w);
-      if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || HARD.has(k) || seen.has(k)) return;
-      if (book && book.lookup(w)) return;
-      const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
-      seen.set(k, { w, ex });
+  for (const want of [[1, 2]]) {
+    texts.forEach((t, i) => {
+      const fl = flagsArr[i];
+      if (!eligible[i] || !fl) return;
+      const { masked } = maskTags(t);
+      [...masked.matchAll(ARW_G)].forEach((m, j) => {
+        if (!want.includes(fl[j])) return;
+        const w = m[0], k = nameKey(w);
+        if (k.length < NAME_MIN_LEN || KNOWN_ENTITIES.has(k) || HARD.has(k) || seen.has(k)) return;
+        if (book && book.lookup(w)) return;
+        const ex = masked.replace(PH_RE, '').replace(/["()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        seen.set(k, { w, ex });
+      });
     });
-  });
+  }
   return [...seen.values()].slice(0, max);
 }
 function propagateNamesT(texts, eligible, kinds, book, flagsArr) {
@@ -241,6 +347,8 @@ async function classifyNames(cands, keysArray, modelName, deps) {
   const parts = [];
   for (let i = 0; i < cands.length; i += CLASSIFY_BATCH) parts.push(cands.slice(i, i + CLASSIFY_BATCH));
   let nextPart = 0, noKeys = false;
+  const tCls = Date.now();
+  let okParts = 0;
   const runPart = async part => {
     const prompt = `You will receive a JSON array of Arabic words taken from the subtitles of a film or TV episode: [{"w": "<word>", "ex": "<a line where it appears>"}].
 Each word was marked as a possible proper name. Classify each word by how it is used in its line:
@@ -251,6 +359,7 @@ Return ONLY a JSON array: [{"w": "<same word>", "k": "person" | "entity" | "none
 
 Words:
 ${JSON.stringify(part)}`;
+    let partOk = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       const activeKey = await acquireKey(keysArray);
       if (!activeKey) { noKeys = true; return; }
@@ -269,6 +378,7 @@ ${JSON.stringify(part)}`;
         for (const it of Array.isArray(arr) ? arr : []) {
           if (it && typeof it.w === 'string' && ['person', 'entity', 'none'].includes(it.k)) out.set(nameKey(it.w), it.k);
         }
+        partOk = true;
         break;
       } catch (e) {
         const status = e.response?.status || 0;
@@ -277,10 +387,13 @@ ${JSON.stringify(part)}`;
         if (attempt < 2) await delay(1500 + Math.random() * 1500);
       }
     }
+    if (partOk) okParts++;
+    else console.log(`\u200F[تصنيف الأسماء ⚠] دفعة فشلت (${part.length} كلمة)`);
   };
   await Promise.all(Array.from({ length: Math.min(CLASSIFY_CONC, parts.length) }, async () => {
     while (!noKeys && nextPart < parts.length) await runPart(parts[nextPart++]);
   }));
+  console.log(`\u200F[تصنيف الأسماء 🏷] كلمات=${cands.length} | دفعات=${parts.length} | نجحت=${okParts} | فشلت=${parts.length - okParts} | الزمن=${((Date.now() - tCls) / 1000).toFixed(1)} ثانية`);
   return out;
 }
-module.exports = { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, tidyQuotes, tidyParens, TRANSLATOR_MODE, translatorFlags, collectNameCandidatesT, propagateNamesT };
+module.exports = { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, tidyQuotes, tidyParens, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT };
