@@ -129,19 +129,30 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     }
   };
   const tasks = [];
+  const tBook = Date.now();
+  const plannedSlices = Math.ceil(lines.length / SLICE);
   let okSlices = 0, totalSlices = 0;
   for (let i = 0; i < lines.length; i += SLICE) {
     const part = lines.slice(i, i + SLICE);
     totalSlices++;
+    const sliceNo = totalSlices;
     tasks.push(async () => {
+      const tSlice = Date.now();
       const r = await callJson(namesPrompt(part, hints), keysArray, model, deps);
-      if (!r || typeof r !== 'object') return;
+      if (!r || typeof r !== 'object') {
+        console.log(`\u200F[قاموس الأسماء ⚠] دفعة ${sliceNo}/${plannedSlices} فشلت بعد ${((Date.now() - tSlice) / 1000).toFixed(1)} ثانية`);
+        return;
+      }
       okSlices++;
       vote(r.persons, 'p'); vote(r.entities, 'e'); vote(r.ambiguous, 'a');
     });
   }
   await runLimited(tasks, conc);
-  if (!okSlices) return null;
+  const bookSecs = ((Date.now() - tBook) / 1000).toFixed(1);
+  if (!okSlices) {
+    console.log(`\u200F[قاموس الأسماء 📖] فشل كامل: دفعات=${totalSlices} | نجحت=0 | الزمن=${bookSecs} ثانية`);
+    return null;
+  }
   const map = new Map();
   for (const [k, v] of votes) {
     if (!v.p && !v.e) continue;
@@ -150,6 +161,8 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
   const book = makeBook(map);
   book.complete = okSlices === totalSlices;
+  book.stats = { total: totalSlices, ok: okSlices, secs: bookSecs };
+  console.log(`\u200F[قاموس الأسماء 📖] أسطر=${lines.length} | دفعات=${totalSlices} (كل ${SLICE}) | نجحت=${okSlices} | فشلت=${totalSlices - okSlices} | تعمل معاً=${Math.min(conc, totalSlices)} | الزمن=${bookSecs} ثانية | أسماء=${map.size}${book.complete ? '' : ' | ⚠ القاموس ناقص ولن يُحفظ'}`);
   return book;
 }
 const PRE_OK = /^(?:[وف][بلك]?|[بلك])$/;
