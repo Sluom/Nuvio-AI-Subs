@@ -10,7 +10,9 @@ const MARK_RE = /[\uE002\uE003]/g;
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
 const TRANSLATOR_MODE = process.env.NAMES_SWAP_ONLY !== '0';
-const SLICE = 400;
+const SLICE_SMALL = 100;
+const SLICE_BIG = 300;
+const SMALL_MAX_LINES = 600;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
@@ -130,6 +132,7 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   };
   const tasks = [];
   const tBook = Date.now();
+  const SLICE = lines.length <= SMALL_MAX_LINES ? SLICE_SMALL : SLICE_BIG;
   const plannedSlices = Math.ceil(lines.length / SLICE);
   let okSlices = 0, totalSlices = 0;
   for (let i = 0; i < lines.length; i += SLICE) {
