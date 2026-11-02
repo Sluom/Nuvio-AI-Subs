@@ -8,7 +8,7 @@ const {
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
-const { buildNameBook, applyNameBook, makeBook } = require('./name-book');
+const { buildNameBook, applyNameBook, makeBook, describeBook } = require('./name-book');
 
 function shortModel(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
@@ -690,6 +690,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       console.log(`\u200F[مرحلة الأسماء - القاموس] ${book ? `جاهز (${book.size} اسم)` : 'فشل بناؤه'} | ${bookPromise ? `كان يعمل بالتوازي مع الأسطر، انتظرته بعدها ${secsOf(tBookWait)} ثانية` : `بنيته بعد الأسطر في ${secsOf(tBookWait)} ثانية`}`);
     } else {
       console.log(`\u200F[مرحلة الأسماء - القاموس] من الكاش (${book.size} اسم)`);
+      { const d = describeBook(book); if (d) console.log(d); }
     }
 
     let tflags = null;
