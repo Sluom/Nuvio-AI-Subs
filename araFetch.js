@@ -729,29 +729,33 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const seenCorrSigs = new Set();
     const seenCorrNames = new Set();
     const correctorSrt = [];
-    for (const allowSdh of [false, true]) {
-        for (const allowBad of [false, true]) {
-            for (const pass of [true, false]) {
-                for (const c of readySrt) {
-                    if (correctorSrt.length >= CORRECTOR_MAX) break;
-                    const isSdh = isHearingImpairedMeta(c);
-                    if (isSdh !== allowSdh) continue;
-                    const isBad = !!c._badSpelling;
-                    if (isBad !== allowBad) continue;
-                    const u = cleanPath(c.url);
-                    const sig = c._sig || u;
-                    const nameSig = normalizeNameSig(c.fileName || c.title || '');
-                    if (c._bad || seenCorr.has(u) || seenCorrSigs.has(sig)) continue;
-                    if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameSig)) continue;
-                    if (!!c._verified !== pass) continue;
-                    seenCorr.add(u);
-                    seenCorrSigs.add(sig);
-                    if (nameSig && nameSig.length > 8) seenCorrNames.add(nameSig);
-                    correctorSrt.push(c);
+    const pickInto = pool => {
+        for (const allowSdh of [false, true]) {
+            for (const allowBad of [false, true]) {
+                for (const pass of [true, false]) {
+                    for (const c of pool) {
+                        if (correctorSrt.length >= CORRECTOR_MAX) break;
+                        const isSdh = isHearingImpairedMeta(c);
+                        if (isSdh !== allowSdh) continue;
+                        const isBad = !!c._badSpelling;
+                        if (isBad !== allowBad) continue;
+                        const u = cleanPath(c.url);
+                        const sig = c._sig || u;
+                        const nameSig = normalizeNameSig(c.fileName || c.title || '');
+                        if (c._bad || seenCorr.has(u) || seenCorrSigs.has(sig)) continue;
+                        if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameSig)) continue;
+                        if (!!c._verified !== pass) continue;
+                        seenCorr.add(u);
+                        seenCorrSigs.add(sig);
+                        if (nameSig && nameSig.length > 8) seenCorrNames.add(nameSig);
+                        correctorSrt.push(c);
+                    }
                 }
             }
         }
-    }
+    };
+    pickInto([...subdlSrt, ...subsourceSrt]);
+    if (correctorSrt.length < CORRECTOR_MAX) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
 
     return {
         ass: allAss,
