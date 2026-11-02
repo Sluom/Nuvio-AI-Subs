@@ -251,7 +251,6 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     const primaryUrl = hasSE
         ? 'https://rest.opensubtitles.org/search/episode-' + episode + '/imdbid-' + numericId + '/season-' + season + '/sublanguageid-ara'
         : 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const reqTimeout = isPrefetch ? 5500 : 2500;
 
     async function requestWithAgent(url, ua, phase = '', xOnly = false) {
@@ -280,13 +279,10 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     }
 
     async function fetchLegacyData(url, phase = '') {
-        const firstPromise = requestWithAgent(url, LEGACY_AGENTS[0], phase);
-        const secondPromise = sleep(1000).then(() => requestWithAgent(url, LEGACY_AGENTS[1], phase));
-        const thirdPromise = sleep(1500).then(() => requestWithAgent(url, LEGACY_AGENTS[1], phase, true));
-        const [firstResults, secondResults, thirdResults] = await Promise.all([firstPromise, secondPromise, thirdPromise]);
+        const firstResults = await requestWithAgent(url, LEGACY_AGENTS[0], phase);
         const combined = [];
         const seenIds = new Set();
-        for (const item of [...firstResults, ...secondResults, ...thirdResults]) {
+        for (const item of firstResults) {
             if (!item || !item.SubDownloadLink) continue;
             const key = String(item.IDSubtitleFile || item.SubDownloadLink);
             if (seenIds.has(key)) continue;
