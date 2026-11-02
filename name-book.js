@@ -163,6 +163,8 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   book.complete = okSlices === totalSlices;
   book.stats = { total: totalSlices, ok: okSlices, secs: bookSecs };
   console.log(`\u200F[قاموس الأسماء 📖] أسطر=${lines.length} | دفعات=${totalSlices} (كل ${SLICE}) | نجحت=${okSlices} | فشلت=${totalSlices - okSlices} | تعمل معاً=${Math.min(conc, totalSlices)} | الزمن=${bookSecs} ثانية | أسماء=${map.size}${book.complete ? '' : ' | ⚠ القاموس ناقص ولن يُحفظ'}`);
+  const bookDesc = describeBook(book);
+  if (bookDesc) console.log(bookDesc);
   return book;
 }
 const PRE_OK = /^(?:[وف][بلك]?|[بلك])$/;
@@ -309,10 +311,21 @@ function makeBook(map) {
   };
   return { map, lookup, apply, prime, size: map.size, complete: true, get strong() { return strong; } };
 }
+function describeBook(book) {
+  try {
+    if (!book || !book.map) return '';
+    const known = new Set(KNOWN_ENTITIES);
+    const list = [...book.map.entries()]
+      .filter(([k]) => !known.has(k))
+      .slice(0, 250)
+      .map(([k, e]) => k + (e.ambig ? '★' : '') + (e.kind === 'entity' ? '(م)' : ''));
+    return `\u200F[قاموس الأسماء 📝] ${list.length}: ${list.join('، ')} | ★=غامض (يتنصص فقط لو علّمه المترجم) (م)=مكان/جهة`;
+  } catch (e) { return ''; }
+}
 function applyNameBook(texts, eligible, book, flagsArr = null) {
   if (!book || !book.size) return texts;
   if (!TRANSLATOR_MODE) book.prime(texts, eligible);
   const allowUnwrap = book.complete !== false;
   return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
-module.exports = { buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW };
+module.exports = { buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook };
