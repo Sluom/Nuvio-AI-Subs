@@ -8,8 +8,8 @@ const {
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
-const { buildNameBook, applyNameBook, makeBook, describeBook } = require('./name-book');
-
+const { buildNameBook, applyNameBook, makeBook, seriesInfoFromTarget } = require('./name-book');
+const seriesStore = { load: id => db.loadDoc('namemem', id), save: (id, v) => db.saveDoc('namemem', id, v) };
 function shortModel(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
   let r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash-lite/i);
@@ -18,7 +18,6 @@ function shortModel(m) {
   if (r) return r[1] + ' فلاش';
   return s;
 }
-
 const CORRECTOR_STRIP_BRACKETS = true;
 const CORRECTOR_WRAP_AT = 42;
 const CORRECTOR_CHUNK = 250;
@@ -36,7 +35,6 @@ const TAG_ONE = /\{[^}]*\}|<[^>]*>/;
 const TAIL_TAGS = /(?:\{[^}]*\}|<[^>]*>|\s)*$/;
 const DRAWING_RE = /\{[^}]*\\p0*[1-9][^}]*\}/;
 const DASH_BEFORE_ELL_RE = /\s*[-–—]\s*(\.{3,}|…)$/;
-
 function visibleLen(s) { return String(s).replace(/<[^>]*>|\{[^}]*\}/g, '').length; }
 function needsCorrection(text) {
   const raw = String(text == null ? '' : text);
@@ -430,9 +428,7 @@ async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
   const prompt = `You will receive a JSON array of Arabic subtitle entries: {"id": <number>, "text": "<Arabic words>"}. Some entries also have "q" (a quotation hint, see rule 7).
 Most punctuation of every entry was REMOVED on purpose. What was kept: the speaker dashes "-", the line-break markers \\N, any "...", and any "?", "!", "؟" or ":" that stands at the very end of a line.
 Your job: write the punctuation of each entry from scratch, correctly, in logical Unicode order for modern right-to-left Arabic.
-
 STRICT RULE: do NOT change, add, remove, reorder or replace any WORD. No synonyms, no grammar fixes, no gender changes. You may only ADD punctuation marks, quotation marks, parentheses. There is nothing to translate and nothing to guess about who is speaking.
-
 Rules:
 1. Return a JSON array: [{"id": <same number>, "text": "<the same words with punctuation>"}] with exactly one object per input id, in the same order. Never output "q".
 2. Keep every \\N line break exactly where it is. NEVER merge lines, split lines or add lines.
@@ -443,11 +439,9 @@ Rules:
 7. "q" tells you how the original entry was quoted. "whole" = the whole entry is ONE quotation: put one opening quotation mark right before the first word of the first line and one closing quotation mark right after the last word of the last line, and add NO other quotation marks inside this entry. "open" = the quotation continues in the next entry: put only one opening quotation mark right before the first word, and no other quotation marks. "close" = the quotation began in an earlier entry: put only one closing quotation mark right after the last word, and no other quotation marks. An entry without "q" is not quoted as a whole.If "q" is an array, it has one value per line, in order: apply each value to its own line only; null means that line is not quoted.
 8. NEVER output square brackets [ ].
 9. ONLY output the JSON array. No explanations.
-
 EXAMPLES:
 Input: [{"id": 1, "text": "هل اخبرت مصطفى عن شركة ابل"}]
 Output: [{"id": 1, "text": "هل أخبرت \\"مصطفى\\" عن شركة (أبل)؟"}]
-
 ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
@@ -536,7 +530,6 @@ const secsOf = ms => (ms / 1000).toFixed(1);
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
   .filter(Boolean);
-  
 async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const tStart = Date.now();
   const oldFile = isVisualOrderFile(cues);
@@ -550,14 +543,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const cacheVersion = process.env.CACHE_VER || 'ARB2';
   const lineCacheKey = cacheVersion + '_' + CORRECTOR_REV + '_' + cacheKey;
   const nameCacheKey = cacheVersion + '_names_' + cacheKey;
-
   const cache = await loadLineCache(lineCacheKey);
   const namesStored = await db.loadMap('names', nameCacheKey);
-  
   let book = null;
   let kinds = new Map();
   let namesLoadedFromCache = false;
-
   if (namesStored && namesStored.has(1)) {
     try {
       const parsedBookMap = JSON.parse(namesStored.get(1));
@@ -569,12 +559,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       console.log(`[كاش الأسماء] فشل قراءة الكاش الدائم، سأعيد بناء القاموس من الصفر.`);
     }
   }
-
   const results = new Array(cues.length).fill(null);
   const toDo = [];
   const sentText = new Map();
   let fromCache = 0;
-  
   cues.forEach((c, i) => {
     if (!needsCorrection(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
@@ -585,28 +573,25 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     if (q) item.q = q;
     toDo.push(item);
   });
-  
   if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
   if (namesLoadedFromCache && toDo.length > 0 && opts.round === 1) console.log(`\u200F[كاش الأسماء 💾] تم استرجاع قاموس الأسماء المحفوظ (${book.size} اسم) بدل بنائه من جديد.`);
-  
   const namesDeps = {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
     MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
   };
-  const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
+  const seriesInfo = seriesInfoFromTarget(opts.targetId);
+  const seriesOpts = seriesInfo ? { ...seriesInfo, store: seriesStore } : null;
+  const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))), seriesOpts)
     .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
-    
   let bookPromise = null;
   if (!namesLoadedFromCache && NAMES_PARALLEL && toDo.length > 0) {
     const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
     bookPromise = startBook(plainForBook(sourceTexts));
   }
-  
   let rejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
-  
   const applyLine = (id, text) => {
     const orig = cues[id].text;
     text = spell.restoreFinalYa(orig, text);
@@ -622,12 +607,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     cache.set(id, clean);
     dirty.push([id, clean]);
   };
-  
   const persistDirty = () => {
     if (dirty.length === 0) return;
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
-  
   const runBatchWithModel = async (itemsToRun, activeModel) => {
     const chunks = [];
     for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
@@ -653,11 +636,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     }
     await Promise.all(Array.from({ length: currentWorkers }, () => batchWorker()));
   };
-  
   if (toDo.length > 0) {
     await runBatchWithModel(toDo, modelName);
   }
-  
   let unprocessed = toDo.filter(it => results[it.id] == null);
   if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
@@ -667,18 +648,14 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     await runBatchWithModel(unprocessed, fallbackModel);
     unprocessed = toDo.filter(it => results[it.id] == null);
   }
-  
   const missing = unprocessed.length;
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | زمن مرحلة الأسطر=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
-  
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
   );
-  
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
-  
   if (toDo.length > 0) {
     const tNames = Date.now();
     let tBookWait = 0, tCls = 0;
@@ -690,9 +667,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       console.log(`\u200F[مرحلة الأسماء - القاموس] ${book ? `جاهز (${book.size} اسم)` : 'فشل بناؤه'} | ${bookPromise ? `كان يعمل بالتوازي مع الأسطر، انتظرته بعدها ${secsOf(tBookWait)} ثانية` : `بنيته بعد الأسطر في ${secsOf(tBookWait)} ثانية`}`);
     } else {
       console.log(`\u200F[مرحلة الأسماء - القاموس] من الكاش (${book.size} اسم)`);
-      { const d = describeBook(book); if (d) console.log(d); }
     }
-
     let tflags = null;
     if (TRANSLATOR_MODE) {
       cues.forEach((c, i) => { if (eligible[i]) finalTexts[i] = splitGluedPrefixes(c.text, finalTexts[i]); });
@@ -728,9 +703,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       }
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
-    
     outTexts = outTexts.map((t, i) => (eligible[i] ? wrapMaddaNames(cues[i].text, t) : t));
-
     const changed = [];
     outTexts.forEach((t, i) => {
       if (t !== finalTexts[i] && cache.has(i)) {
@@ -739,14 +712,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
-    
     console.log(`\u200F[مرحلة الأسماء بعد الأسطر ⏱] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
-  
   console.log(`\u200F[المصحح كامل ⏱ الزمن الكلي الحقيقي] ${secsOf(Date.now() - tStart)} ثانية (الأسطر + مرحلة الأسماء)`);
   return { texts: outTexts, missing };
 }
-
 const epInfoOf = id => {
   const p = String(id || '').split(':');
   return (p.length >= 3 && /^\d+$/.test(p[2])) ? { season: p[1], episode: p[2] } : null;
@@ -776,7 +746,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
   console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, targetId });
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -842,7 +812,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
-  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, targetId });
   if (isRealAss) {
     return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
   }
