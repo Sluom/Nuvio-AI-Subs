@@ -1,4 +1,3 @@
-
 'use strict';
 const AR = '\\u0621-\\u065F\\u0670-\\u06D3';
 const TOKEN_RE = new RegExp('[' + AR + ']+', 'g');
@@ -16,6 +15,11 @@ const SMALL_MAX_LINES = 600;
 const CONC = 3;
 const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
+const MEM_MIN_EPS = 2;
+const MEM_LOWER_MIN_EPS = 3;
+const MEM_MAX_EPS = 40;
+const MEM_MAX_NAMES = 4000;
+const MEM_IO_TIMEOUT = 3000;
 const DIAC = /[\u064B-\u065F\u0670\u0640]/g;
 const bookKey = s => String(s)
   .replace(DIAC, '')
@@ -61,6 +65,7 @@ const KNOWN_ENTITIES = `لندن باريس نيويورك شيكاغو بوسط
 أمريكا بريطانيا إنجلترا اسكتلندا أيرلندا فرنسا ألمانيا إيطاليا إسبانيا روسيا الصين اليابان كندا مصر العراق سوريا
 لبنان الأردن السعودية الإمارات الكويت قطر المغرب الجزائر تونس ليبيا السودان اليمن فلسطين تركيا إيران الهند
 المكسيك البرازيل أستراليا سويسرا السويد النرويج هولندا بلجيكا اليونان كوريا`.split(/\s+/).filter(Boolean).map(bookKey);
+const KNOWN_SET = new Set(KNOWN_ENTITIES);
 function maskTags(text) {
   const tags = [];
   const masked = String(text).replace(TAG_RE, t => { tags.push(t); return '\uE000' + (tags.length - 1) + '\uE001'; });
@@ -116,18 +121,99 @@ async function runLimited(tasks, n) {
     while (i < tasks.length) { const t = tasks[i++]; await t(); }
   }));
 }
-async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc = CONC) {
+function withTimeout(p, ms) {
+  let t;
+  return Promise.race([
+    Promise.resolve(p),
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error('timeout')), ms); })
+  ]).finally(() => clearTimeout(t));
+}
+function seriesInfoFromTarget(targetId) {
+  const p = String(targetId || '').split(':').filter(s => s !== '');
+  if (p[0] === 'kitsu') return (p.length >= 3 && /^\d+$/.test(p[1]) && /^\d+$/.test(p[2])) ? { seriesId: 'kitsu:' + p[1], epId: p[2] } : null;
+  if (p.length >= 3 && /^\d+$/.test(p[1]) && /^\d+$/.test(p[2])) return { seriesId: p[0], epId: p[1] + ':' + p[2] };
+  return null;
+}
+const memValid = m => !!m && m.v === 1 && Array.isArray(m.order) && !!m.names && typeof m.names === 'object';
+function updateSeriesMemory(mem, epId, ownMap) {
+  const m = memValid(mem) ? JSON.parse(JSON.stringify(mem)) : { v: 1, order: [], names: {} };
+  const ep = String(epId);
+  if (m.order.includes(ep)) {
+    m.order = m.order.filter(x => x !== ep);
+    for (const k of Object.keys(m.names)) delete m.names[k][ep];
+  }
+  m.order.unshift(ep);
+  for (const [k, e] of ownMap) {
+    if (!e || e.mem || KNOWN_SET.has(k)) continue;
+    (m.names[k] || (m.names[k] = {}))[ep] = (e.kind === 'person' ? 1 : 2) | (e.ambig ? 4 : 0);
+  }
+  while (m.order.length > MEM_MAX_EPS) {
+    const old = m.order.pop();
+    for (const k of Object.keys(m.names)) delete m.names[k][old];
+  }
+  for (const k of Object.keys(m.names)) if (!Object.keys(m.names[k]).length) delete m.names[k];
+  const keys = Object.keys(m.names);
+  if (keys.length > MEM_MAX_NAMES) {
+    keys.sort((a, b) => Object.keys(m.names[a]).length - Object.keys(m.names[b]).length);
+    for (const k of keys.slice(0, keys.length - MEM_MAX_NAMES)) delete m.names[k];
+  }
+  return m;
+}
+function mergeSeriesMemory(map, mem, epId) {
+  const st = { eps: 0, added: 0, raised: 0, lowered: 0 };
+  if (!memValid(mem)) return st;
+  const ep = String(epId);
+  const prev = mem.order.filter(x => x !== ep);
+  st.eps = prev.length;
+  if (prev.length < MEM_MIN_EPS) return st;
+  const prevSet = new Set(prev);
+  for (const [k, rec] of Object.entries(mem.names)) {
+    if (KNOWN_SET.has(k) || NEVER.has(k)) continue;
+    let n = 0, p = 0, a = 0;
+    for (const [id, code] of Object.entries(rec)) {
+      if (!prevSet.has(id)) continue;
+      n++;
+      if (code & 1) p++;
+      if (code & 4) a++;
+    }
+    if (n < MEM_MIN_EPS) continue;
+    const cur = map.get(k);
+    if (cur) {
+      if (ALWAYS_AMBIG.has(k)) continue;
+      let amb = (a + (cur.ambig ? 1 : 0)) * 2 >= n + 1;
+      if (!amb && cur.ambig && n < MEM_LOWER_MIN_EPS) amb = true;
+      if (amb !== cur.ambig) {
+        map.set(k, { ...cur, ambig: amb });
+        if (amb) st.raised++; else st.lowered++;
+      }
+    } else {
+      if (NO_BARE.has(k) || k.split(' ').length > 3) continue;
+      map.set(k, { kind: p * 2 >= n ? 'person' : 'entity', ambig: a * 2 >= n || ALWAYS_AMBIG.has(k), mem: true });
+      st.added++;
+    }
+  }
+  return st;
+}
+async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc = CONC, series = null) {
   if (!lines || !lines.length) return null;
   const model = deps.normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const sid = series && series.seriesId ? String(series.seriesId) : '';
+  const eid = series && series.epId != null ? String(series.epId) : '';
+  const store = series && series.store;
+  const useMem = !!(sid && eid && store && typeof store.load === 'function');
+  const memPromise = useMem
+    ? withTimeout(Promise.resolve().then(() => store.load(sid)), MEM_IO_TIMEOUT).catch(() => null)
+    : Promise.resolve(null);
   const votes = new Map();
-  const vote = (arr, field) => {
+  const vote = (arr, field, seen) => {
     for (const w of Array.isArray(arr) ? arr : []) {
       if (typeof w !== 'string' || !AR_ONLY.test(w)) continue;
       const k = bookKey(w);
       const words = k.split(' ');
       if (words.length > 3 || k.replace(/ /g, '').length < 3 || NEVER.has(k) || VOC.has(words[0])) continue;
-      let o = votes.get(k); if (!o) votes.set(k, o = { p: 0, e: 0, a: 0 });
+      let o = votes.get(k); if (!o) votes.set(k, o = { p: 0, e: 0, a: 0, n: 0 });
       o[field]++;
+      if (seen && !seen.has(k)) { seen.add(k); o.n++; }
     }
   };
   const tasks = [];
@@ -147,7 +233,8 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
         return;
       }
       okSlices++;
-      vote(r.persons, 'p'); vote(r.entities, 'e'); vote(r.ambiguous, 'a');
+      const seen = new Set();
+      vote(r.persons, 'p', seen); vote(r.entities, 'e', seen); vote(r.ambiguous, 'a', null);
     });
   }
   await runLimited(tasks, conc);
@@ -157,15 +244,40 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     return null;
   }
   const map = new Map();
+  let votedClear = 0;
   for (const [k, v] of votes) {
     if (!v.p && !v.e) continue;
-    map.set(k, { kind: v.p >= v.e ? 'person' : 'entity', ambig: v.a > 0 || ALWAYS_AMBIG.has(k) });
+    const byVote = v.a > 0 && v.a * 2 >= Math.max(v.n, v.a);
+    const forced = ALWAYS_AMBIG.has(k);
+    if (v.a > 0 && !byVote && !forced) votedClear++;
+    map.set(k, { kind: v.p >= v.e ? 'person' : 'entity', ambig: byVote || forced });
   }
+  const own = new Map(map);
   for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
+  let memory = null, memStats = null;
+  if (useMem) {
+    memory = await memPromise;
+    memStats = mergeSeriesMemory(map, memory, eid);
+  }
   const book = makeBook(map);
   book.complete = okSlices === totalSlices;
   book.stats = { total: totalSlices, ok: okSlices, secs: bookSecs };
-  console.log(`\u200F[قاموس الأسماء 📖] أسطر=${lines.length} | دفعات=${totalSlices} (كل ${SLICE}) | نجحت=${okSlices} | فشلت=${totalSlices - okSlices} | تعمل معاً=${Math.min(conc, totalSlices)} | الزمن=${bookSecs} ثانية | أسماء=${map.size}${book.complete ? '' : ' | ⚠ القاموس ناقص ولن يُحفظ'}`);
+  console.log(`\u200F[قاموس الأسماء 📖] أسطر=${lines.length} | دفعات=${totalSlices} (كل ${SLICE}) | نجحت=${okSlices} | فشلت=${totalSlices - okSlices} | تعمل معاً=${Math.min(conc, totalSlices)} | الزمن=${bookSecs} ثانية | أسماء=${map.size}${votedClear ? ` | غامض أبطله التصويت=${votedClear}` : ''}${book.complete ? '' : ' | ⚠ القاموس ناقص ولن يُحفظ'}`);
+  if (memStats && memStats.eps) {
+    console.log(`\u200F[ذاكرة المسلسل 🧠] حلقات سابقة=${memStats.eps} | أسماء مدموجة=${memStats.added} | عادي صار غامض=${memStats.raised} | غامض صار عادي=${memStats.lowered}${memStats.eps < MEM_MIN_EPS ? ' | تحتاج حلقتين قبلها' : ''}`);
+  }
+  if (useMem && book.complete && typeof store.save === 'function') {
+    book.memoryDone = (async () => {
+      try {
+        const fresh = await withTimeout(Promise.resolve().then(() => store.load(sid)), MEM_IO_TIMEOUT).catch(() => null);
+        const upd = updateSeriesMemory(fresh || memory, eid, own);
+        await store.save(sid, upd);
+        console.log(`\u200F[ذاكرة المسلسل 💾] حُفظت الحلقة ${eid} | حلقات=${upd.order.length} | أسماء=${Object.keys(upd.names).length}`);
+      } catch (e) {
+        console.log(`\u200F[ذاكرة المسلسل ⚠] تعذر الحفظ: ${e && e.message}`);
+      }
+    })();
+  }
   const bookDesc = describeBook(book);
   if (bookDesc) console.log(bookDesc);
   return book;
@@ -321,8 +433,8 @@ function describeBook(book) {
     const list = [...book.map.entries()]
       .filter(([k]) => !known.has(k))
       .slice(0, 250)
-      .map(([k, e]) => k + (e.ambig ? '★' : '') + (e.kind === 'entity' ? '(م)' : ''));
-    return `\u200F[قاموس الأسماء 📝] ${list.length}: ${list.join('، ')} | ★=غامض (يتنصص فقط لو علّمه المترجم) (م)=مكان/جهة`;
+      .map(([k, e]) => k + (e.ambig ? '★' : '') + (e.kind === 'entity' ? '(م)' : '') + (e.mem ? '(ذ)' : ''));
+    return `\u200F[قاموس الأسماء 📝] ${list.length}: ${list.join('، ')} | ★=غامض (يتنصص فقط لو علّمه المترجم) (م)=مكان/جهة (ذ)=من ذاكرة المسلسل`;
   } catch (e) { return ''; }
 }
 function applyNameBook(texts, eligible, book, flagsArr = null) {
@@ -331,4 +443,7 @@ function applyNameBook(texts, eligible, book, flagsArr = null) {
   const allowUnwrap = book.complete !== false;
   return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
-module.exports = { buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook };
+module.exports = {
+  buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
+  updateSeriesMemory, mergeSeriesMemory, seriesInfoFromTarget
+};
