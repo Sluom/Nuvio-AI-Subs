@@ -32,7 +32,7 @@ const DROP_DRAWINGS = true;
 const ASS_FONT_PCT = 6.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
-const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
+const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم تغطيها مجموعة الستايلات ذات الحجم الواحد حتى ينكبر الملف (0.5 = 50%)
 const ASS_SCALE_OUTLINE = true;      // true = يكبّر الـOutline مع الخط. false = يبقى مثل الملف الأصلي
 const ASS_OUTLINE_AMOUNT = 1;      // كم من التكبير ينطبق على الـOutline: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
 const ASS_SCALE_SHADOW = true;       // true = يكبّر الـShadow مع الخط. false = يبقى مثل الملف الأصلي
@@ -894,14 +894,28 @@ function applyAssFontSize(lines) {
     total++;
   }
   if (!total) return fail('ما في أسطر حوار (كلها fx أو رسم)');
-  let top = null, topN = 0;
-  for (const [nm, n] of counts) if (n > topN) { top = nm; topN = n; }
-  if (topN / total < ASS_MAIN_MIN_SHARE) return fail(`ما في ستايل حوار واضح (الأكثر ${top}: ${topN} من ${total})`);
-  let st = styles.get(top);
-  if (!st) for (const [nm, v] of styles) if (nm.toLowerCase() === top.toLowerCase()) { st = v; break; }
-  if (!st) return fail(`الستايل ${top} مو موجود تحت [V4+ Styles]`);
-  const oldSize = parseFloat(st.vals[iSize]);
-  if (!(oldSize > 0)) return fail(`حجم الخط للستايل ${top} مو رقم صحيح`);
+  const findStyle = nm => {
+    let sv = styles.get(nm);
+    if (!sv) for (const [k2, v2] of styles) if (k2.toLowerCase() === nm.toLowerCase()) { sv = v2; break; }
+    return sv || null;
+  };
+  // نجمّع ستايلات الحوار حسب حجمها الأصلي، ونختار مجموعة الحجم اللي عليها أكثر أسطر
+  const groups = new Map();
+  for (const [nm, n] of counts) {
+    const sv = findStyle(nm);
+    const sz = sv ? parseFloat(sv.vals[iSize]) : NaN;
+    if (!(sz > 0)) continue;
+    const g = groups.get(sz) || { n: 0, top: null, topN: 0 };
+    g.n += n;
+    if (n > g.topN) { g.top = nm; g.topN = n; }
+    groups.set(sz, g);
+  }
+  if (!groups.size) return fail('ما لقيت حجم ستايلات الحوار تحت [V4+ Styles]');
+  let oldSize = 0, grp = null;
+  for (const [sz, g] of groups) if (!grp || g.n > grp.n) { oldSize = sz; grp = g; }
+  if (grp.n / total < ASS_MAIN_MIN_SHARE) return fail(`ما في مجموعة حجم واضحة (الأكبر: حجم ${oldSize} = ${grp.n} من ${total})`);
+  const top = grp.top, topN = grp.n;
+  const st = findStyle(top);
   const usedFallback = !(playResY > 0);
   if (usedFallback) playResY = ASS_FALLBACK_PLAYRESY;
   const k = Math.pow(10, ASS_FONT_DECIMALS);
