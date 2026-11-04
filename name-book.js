@@ -17,7 +17,7 @@ const STRONG_MIN_MARKED = 3;
 const STRONG_MIN_RATIO = 0.5;
 const MEM_MIN_EPS = 2;
 const MEM_LOWER_MIN_EPS = 3;
-const MEM_MAX_EPS = 40;
+const MEM_MAX_EPS = 2000;
 const MEM_MAX_NAMES = 4000;
 const MEM_IO_TIMEOUT = 3000;
 const DIAC = /[\u064B-\u065F\u0670\u0640]/g;
@@ -139,13 +139,14 @@ function updateSeriesMemory(mem, epId, ownMap) {
   const m = memValid(mem) ? JSON.parse(JSON.stringify(mem)) : { v: 1, order: [], names: {} };
   const ep = String(epId);
   if (m.order.includes(ep)) {
-    m.order = m.order.filter(x => x !== ep);
     for (const k of Object.keys(m.names)) delete m.names[k][ep];
+  } else {
+    m.order.unshift(ep);
   }
-  m.order.unshift(ep);
   for (const [k, e] of ownMap) {
     if (!e || e.mem || KNOWN_SET.has(k)) continue;
-    (m.names[k] || (m.names[k] = {}))[ep] = (e.kind === 'person' ? 1 : 2) | (e.ambig ? 4 : 0);
+    const amb = e.own !== undefined ? e.own : e.ambig;
+    (m.names[k] || (m.names[k] = {}))[ep] = (e.kind === 'person' ? 1 : 2) | (amb ? 4 : 0);
   }
   while (m.order.length > MEM_MAX_EPS) {
     const old = m.order.pop();
@@ -178,21 +179,101 @@ function mergeSeriesMemory(map, mem, epId) {
     }
     if (n < MEM_MIN_EPS) continue;
     const cur = map.get(k);
-    if (cur) {
+    if (cur && !cur.mem) {
       if (ALWAYS_AMBIG.has(k)) continue;
-      let amb = (a + (cur.ambig ? 1 : 0)) * 2 >= n + 1;
-      if (!amb && cur.ambig && n < MEM_LOWER_MIN_EPS) amb = true;
+      const own = cur.own !== undefined ? cur.own : cur.ambig;
+      let amb = (a + (own ? 1 : 0)) * 2 >= n + 1;
+      if (!amb && own && n < MEM_LOWER_MIN_EPS) amb = true;
       if (amb !== cur.ambig) {
-        map.set(k, { ...cur, ambig: amb });
+        map.set(k, { ...cur, ambig: amb, own });
         if (amb) st.raised++; else st.lowered++;
       }
     } else {
       if (NO_BARE.has(k) || k.split(' ').length > 3) continue;
       map.set(k, { kind: p * 2 >= n ? 'person' : 'entity', ambig: a * 2 >= n || ALWAYS_AMBIG.has(k), mem: true });
-      st.added++;
+      if (!cur) st.added++;
     }
   }
   return st;
+}
+const memCache = new Map();
+const memCacheGet = sid => memCache.get(sid) || null;
+function memCacheSet(sid, m) {
+  if (!memCache.has(sid) && memCache.size >= 200) memCache.delete(memCache.keys().next().value);
+  memCache.set(sid, m);
+}
+const memLocks = new Map();
+function withSeriesLock(sid, fn) {
+  const prev = memLocks.get(sid) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  memLocks.set(sid, next);
+  next.catch(() => {}).then(() => { if (memLocks.get(sid) === next) memLocks.delete(sid); });
+  return next;
+}
+async function loadMemSafe(store, sid) {
+  try {
+    const m = await withTimeout(Promise.resolve().then(() => store.load(sid)), MEM_IO_TIMEOUT);
+    return { ok: true, mem: memValid(m) ? m : null };
+  } catch (e) {
+    return { ok: false, mem: null };
+  }
+}
+function unionMemory(newer, older) {
+  const a = memValid(newer) ? newer : null;
+  const b = memValid(older) ? older : null;
+  if (!a || !b) return a || b;
+  const inA = new Set(a.order);
+  const names = {};
+  for (const [k, rec] of Object.entries(a.names)) names[k] = { ...rec };
+  for (const [k, rec] of Object.entries(b.names)) {
+    for (const [id, code] of Object.entries(rec)) if (!inA.has(id)) (names[k] || (names[k] = {}))[id] = code;
+  }
+  return { v: 1, order: a.order.concat(b.order.filter(x => !inA.has(x))), names };
+}
+function memCanon(m) {
+  if (!memValid(m)) return '';
+  return JSON.stringify([m.order, Object.keys(m.names).sort().map(k => [k, Object.keys(m.names[k]).sort().map(e => [e, m.names[k][e]])])]);
+}
+function memFromWire(ser) {
+  if (!ser || typeof ser !== 'object') return null;
+  if (memValid(ser)) return ser;
+  const meta = ser['~'];
+  if (meta && meta.v === 1 && Array.isArray(meta.order)) {
+    const names = {};
+    for (const [k, rec] of Object.entries(ser)) if (k !== '~' && rec && typeof rec === 'object') names[k] = rec;
+    return { v: 1, order: meta.order.slice(), names };
+  }
+  const order = [], seen = new Set(), names = {};
+  for (const [k, o] of Object.entries(ser)) {
+    if (!o || typeof o !== 'object' || !o.v || typeof o.v !== 'object') continue;
+    for (const [id, am] of Object.entries(o.v)) {
+      const info = seriesInfoFromTarget(id);
+      if (!info) continue;
+      if (!seen.has(info.epId)) { seen.add(info.epId); order.push(info.epId); }
+      (names[k] || (names[k] = {}))[info.epId] = (o.k === 'person' ? 1 : 2) | (am ? 4 : 0);
+    }
+  }
+  return order.length ? { v: 1, order: order.reverse(), names } : null;
+}
+function memToWire(m) {
+  const out = { '~': { v: 1, order: m.order } };
+  for (const [k, rec] of Object.entries(m.names)) out[k] = rec;
+  return out;
+}
+function mergeSeriesNames(book, ser, targetId, canVote) {
+  const info = seriesInfoFromTarget(targetId);
+  if (!info || !book || !book.map) return { ser, changed: false, added: [] };
+  const incoming = memFromWire(ser);
+  const base = unionMemory(memCacheGet(info.seriesId), incoming);
+  const before = new Set(book.map.keys());
+  const own = new Map(book.map);
+  mergeSeriesMemory(book.map, base, info.epId);
+  book.size = book.map.size;
+  const added = [...book.map.keys()].filter(k => !before.has(k));
+  const next = canVote ? updateSeriesMemory(base, info.epId, own) : (base || { v: 1, order: [], names: {} });
+  memCacheSet(info.seriesId, next);
+  const changed = memCanon(next) !== memCanon(incoming);
+  return { ser: changed ? memToWire(next) : ser, changed, added };
 }
 async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc = CONC, series = null) {
   if (!lines || !lines.length) return null;
@@ -201,9 +282,7 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   const eid = series && series.epId != null ? String(series.epId) : '';
   const store = series && series.store;
   const useMem = !!(sid && eid && store && typeof store.load === 'function');
-  const memPromise = useMem
-    ? withTimeout(Promise.resolve().then(() => store.load(sid)), MEM_IO_TIMEOUT).catch(() => null)
-    : Promise.resolve(null);
+  const memPromise = useMem ? loadMemSafe(store, sid) : Promise.resolve({ ok: true, mem: null });
   const votes = new Map();
   const vote = (arr, field, seen) => {
     for (const w of Array.isArray(arr) ? arr : []) {
@@ -256,7 +335,8 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
   let memory = null, memStats = null;
   if (useMem) {
-    memory = await memPromise;
+    const ml = await memPromise;
+    memory = unionMemory(memCacheGet(sid), ml.mem);
     memStats = mergeSeriesMemory(map, memory, eid);
   }
   const book = makeBook(map);
@@ -267,16 +347,21 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     console.log(`\u200F[ذاكرة المسلسل 🧠] حلقات سابقة=${memStats.eps} | أسماء مدموجة=${memStats.added} | عادي صار غامض=${memStats.raised} | غامض صار عادي=${memStats.lowered}${memStats.eps < MEM_MIN_EPS ? ' | تحتاج حلقتين قبلها' : ''}`);
   }
   if (useMem && book.complete && typeof store.save === 'function') {
-    book.memoryDone = (async () => {
+    book.memoryDone = withSeriesLock(sid, async () => {
       try {
-        const fresh = await withTimeout(Promise.resolve().then(() => store.load(sid)), MEM_IO_TIMEOUT).catch(() => null);
-        const upd = updateSeriesMemory(fresh || memory, eid, own);
+        const fr = await loadMemSafe(store, sid);
+        const upd = updateSeriesMemory(unionMemory(memCacheGet(sid), fr.mem), eid, own);
+        memCacheSet(sid, upd);
+        if (!fr.ok) {
+          console.log(`\u200F[ذاكرة المسلسل ⚠] تعذرت قراءة الذاكرة المحفوظة، ما كتبت فوقها (الحلقة ${eid} محفوظة مؤقتاً بالذاكرة الحية)`);
+          return;
+        }
         await store.save(sid, upd);
         console.log(`\u200F[ذاكرة المسلسل 💾] حُفظت الحلقة ${eid} | حلقات=${upd.order.length} | أسماء=${Object.keys(upd.names).length}`);
       } catch (e) {
         console.log(`\u200F[ذاكرة المسلسل ⚠] تعذر الحفظ: ${e && e.message}`);
       }
-    })();
+    });
   }
   const bookDesc = describeBook(book);
   if (bookDesc) console.log(bookDesc);
@@ -445,5 +530,5 @@ function applyNameBook(texts, eligible, book, flagsArr = null) {
 }
 module.exports = {
   buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
-  updateSeriesMemory, mergeSeriesMemory, seriesInfoFromTarget
+  updateSeriesMemory, mergeSeriesMemory, seriesInfoFromTarget, mergeSeriesNames
 };
