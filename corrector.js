@@ -33,6 +33,8 @@ const ASS_FONT_PCT = 7.8;            // حجم خط الحوار الرئيسي 
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
 const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
+const ASS_SCALE_OUTLINE = false;     // false = يبقى Outline الأصلي بدون تكبير | true = يكبر مع الخط
+const ASS_SCALE_SHADOW = false;      // false = يبقى Shadow الأصلي بدون تكبير | true = يكبر مع الخط
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const DASH_RE = /^[-–—]/;
@@ -913,7 +915,8 @@ function applyAssFontSize(lines) {
   };
   const sizeLead = lead(st.vals[iSize]);
   st.vals[iSize] = sizeLead + String(target);
-  const outline = scale(iOut), shadow = scale(iSh);
+  const outline = ASS_SCALE_OUTLINE ? scale(iOut) : null;
+  const shadow = ASS_SCALE_SHADOW ? scale(iSh) : null;
   lines[st.i] = st.prefix + st.vals.join(',');
   console.log(`[حجم ASS] الستايل=${top} من ${oldSize} إلى ${target} (PlayResY=${playResY}${usedFallback ? ' افتراضي' : ''})`);
   return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, share: topN / total });
