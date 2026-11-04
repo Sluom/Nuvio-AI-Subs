@@ -28,6 +28,11 @@ const FALLBACK_WAIT_MS = 10000;
 const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
+// ===== حجم خط ASS (غيّر الأرقام من هنا) =====
+const ASS_FONT_PCT = 7.8;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
+const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
+const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
+const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const DASH_RE = /^[-–—]/;
@@ -844,8 +849,78 @@ function parseAssKeepingStructure(text) {
   });
   return { lines, cues, slots };
 }
+function applyAssFontSize(lines) {
+  const info = { changed: false };
+  const fail = why => { info.reason = why; console.log('[حجم ASS] ما تغيّر شي: ' + why); return info; };
+  let sect = '', playResY = 0, fmt = null;
+  const styles = new Map();
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i].replace(/^\uFEFF/, '');
+    const sm = L.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (sm) { sect = sm[1].trim().toLowerCase(); continue; }
+    if (sect === 'script info') {
+      const pm = L.match(/^\s*PlayResY\s*:\s*([\d.]+)/i);
+      if (pm && parseFloat(pm[1]) > 0) playResY = parseFloat(pm[1]);
+    } else if (/^v4\+? styles$/.test(sect)) {
+      const fm = L.match(/^\s*Format\s*:(.*)$/i);
+      if (fm) { fmt = fm[1].split(',').map(s => s.trim().toLowerCase()); continue; }
+      const st = L.match(/^(\s*Style\s*:\s*)(.*)$/i);
+      if (st && fmt) {
+        const vals = st[2].split(',');
+        const nm = (vals[fmt.indexOf('name')] || '').trim();
+        styles.set(nm, { i, prefix: st[1], vals });
+      }
+    }
+  }
+  if (!fmt) return fail('ما لقيت سطر Format تحت [V4+ Styles]');
+  const iName = fmt.indexOf('name'), iSize = fmt.indexOf('fontsize'), iOut = fmt.indexOf('outline'), iSh = fmt.indexOf('shadow');
+  if (iName < 0 || iSize < 0) return fail('سطر Format ما فيه Name أو Fontsize');
+  const counts = new Map();
+  let total = 0;
+  for (const line of lines) {
+    const m = line.match(ASS_DLG_RE);
+    if (!m) continue;
+    const f = m[1].split(',');
+    if (/fx/i.test(f[8] || '')) continue;
+    if (DRAWING_RE.test(m[2])) continue;
+    const nm = (f[3] || '').trim();
+    counts.set(nm, (counts.get(nm) || 0) + 1);
+    total++;
+  }
+  if (!total) return fail('ما في أسطر حوار (كلها fx أو رسم)');
+  let top = null, topN = 0;
+  for (const [nm, n] of counts) if (n > topN) { top = nm; topN = n; }
+  if (topN / total < ASS_MAIN_MIN_SHARE) return fail(`ما في ستايل حوار واضح (الأكثر ${top}: ${topN} من ${total})`);
+  let st = styles.get(top);
+  if (!st) for (const [nm, v] of styles) if (nm.toLowerCase() === top.toLowerCase()) { st = v; break; }
+  if (!st) return fail(`الستايل ${top} مو موجود تحت [V4+ Styles]`);
+  const oldSize = parseFloat(st.vals[iSize]);
+  if (!(oldSize > 0)) return fail(`حجم الخط للستايل ${top} مو رقم صحيح`);
+  const usedFallback = !(playResY > 0);
+  if (usedFallback) playResY = ASS_FALLBACK_PLAYRESY;
+  const k = Math.pow(10, ASS_FONT_DECIMALS);
+  const target = Math.round(playResY * ASS_FONT_PCT / 100 * k) / k;
+  if (!(target > 0)) return fail('الحجم الجديد طلع صفر');
+  if (target === oldSize) return fail(`الستايل ${top} حجمه أصلاً ${oldSize} (نفس الهدف، PlayResY=${playResY})`);
+  const ratio = target / oldSize;
+  const lead = s => s.match(/^\s*/)[0];
+  const scale = idx => {
+    if (idx < 0 || idx >= st.vals.length) return null;
+    const n = parseFloat(st.vals[idx]);
+    if (!isFinite(n)) return null;
+    st.vals[idx] = lead(st.vals[idx]) + String(Math.round(n * ratio * 100) / 100);
+    return { from: n, to: Math.round(n * ratio * 100) / 100 };
+  };
+  const sizeLead = lead(st.vals[iSize]);
+  st.vals[iSize] = sizeLead + String(target);
+  const outline = scale(iOut), shadow = scale(iSh);
+  lines[st.i] = st.prefix + st.vals.join(',');
+  console.log(`[حجم ASS] الستايل=${top} من ${oldSize} إلى ${target} (PlayResY=${playResY}${usedFallback ? ' افتراضي' : ''})`);
+  return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, share: topN / total });
+}
 function rebuildAss(parsed, texts) {
   const out = parsed.lines.slice();
+  try { applyAssFontSize(out); } catch (e) { console.log('[حجم ASS] تعذر: ' + (e && e.message)); }
   const drop = new Set();
   parsed.slots.forEach((lineIdx, k) => {
     if (DROP_DRAWINGS && DRAWING_RE.test(texts[k])) { drop.add(lineIdx); return; }
