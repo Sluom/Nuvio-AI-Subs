@@ -29,7 +29,7 @@ const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
-const ASS_FONT_PCT = 7.8;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
+const ASS_FONT_PCT = 6.5;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
 const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
