@@ -130,6 +130,48 @@ function sameWords(orig, out) {
   if (a.length > 600) return false;
   return levenshtein(a, b) <= Math.max(2, Math.floor(a.length * 0.06));
 }
+const LEAK_SCRIPTS = [
+  ['hangul', /[ᄀ-ᇿ㄰-㆏ꥠ-꥿가-퟿]/],
+  ['kana', /[぀-ヿㇰ-ㇿ]/],
+  ['cjk', /[㐀-䶿一-鿿豈-﫿]/],
+  ['cyrillic', /[Ѐ-ԯ]/],
+  ['greek', /[Ͱ-Ͽ]/],
+  ['hebrew', /[֐-׿]/],
+  ['thai', /[฀-๿]/],
+  ['latin', /[A-Za-zÀ-ɏ]/]
+];
+const LEAK_MASK_RE = /\{[^}]*\}|<[^>]*>|\\+[nN]/g;
+const LEAK_TOKEN_RE = /[\p{L}\p{M}\p{N}]+/gu;
+const leakScriptsOf = s => new Set(LEAK_SCRIPTS.filter(([, re]) => re.test(s)).map(c => c[0]));
+function fixForeignLeak(orig, out) {
+  const origVis = String(orig == null ? '' : orig).replace(LEAK_MASK_RE, ' ');
+  const held = [];
+  const masked = String(out == null ? '' : out).replace(LEAK_MASK_RE, m => { held.push(m); return ''; });
+  const base = leakScriptsOf(origVis);
+  const bad = LEAK_SCRIPTS.filter(([n, re]) => leakScriptsOf(masked).has(n) && !base.has(n));
+  if (!bad.length) return { text: out, fixed: 0 };
+  const isBad = tok => bad.some(([, re]) => re.test(tok));
+  const oTokens = origVis.match(LEAK_TOKEN_RE) || [];
+  const oSk = oTokens.map(skeleton);
+  let fixed = 0, failed = false;
+  const res = masked.replace(LEAK_TOKEN_RE, tok => {
+    if (!isBad(tok)) return tok;
+    const sk = skeleton(tok);
+    let best = -1, bd = Infinity, bs = Infinity;
+    oSk.forEach((o, i) => {
+      if (!o) return;
+      const d = levenshtein(sk, o);
+      const score = d / Math.max(sk.length, o.length);
+      if (score < bs) { bs = score; bd = d; best = i; }
+    });
+    if (best < 0 || bd > Math.floor(Math.max(sk.length, oSk[best].length) / 2)) { failed = true; return tok; }
+    fixed++;
+    return oTokens[best];
+  });
+  if (failed) return null;
+  let k = 0;
+  return { text: res.replace(//g, () => (k < held.length ? held[k++] : '')), fixed };
+}
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const LINE_SPLIT = /\\+[nN]|\r?\n/;
 function restoreTags(orig, out) {
@@ -625,15 +667,18 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     bookPromise = startBook(plainForBook(sourceTexts));
   }
   
-  let rejected = 0;
+  let rejected = 0, leakFixed = 0, leakRejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
   
   const applyLine = (id, text) => {
     const orig = cues[id].text;
     text = spell.restoreFinalYa(orig, text);
+    let leakBad = false;
+    const lk = fixForeignLeak(orig, text);
+    if (lk == null) { leakBad = true; leakRejected++; } else if (lk.fixed) { text = lk.text; leakFixed++; }
     let src = text;
-    if (!sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
+    if (leakBad || !sameWords(orig, text) || shapeOf(text) !== shapeOf(sentText.get(id) || orig)) {
       rejected++; src = orig;
     } else {
       const withTags = restoreTags(orig, text);
@@ -691,6 +736,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   }
   
   const missing = unprocessed.length;
+  if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من Gemini) | أرجعت ${leakRejected} سطر للأصلي`);
   console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | زمن مرحلة الأسطر=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
   
