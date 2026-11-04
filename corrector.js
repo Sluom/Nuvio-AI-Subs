@@ -33,8 +33,11 @@ const ASS_FONT_PCT = 7.8;            // حجم خط الحوار الرئيسي 
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
 const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
-const ASS_SCALE_OUTLINE = false;     // false = يبقى Outline الأصلي بدون تكبير | true = يكبر مع الخط
-const ASS_SCALE_SHADOW = false;      // false = يبقى Shadow الأصلي بدون تكبير | true = يكبر مع الخط
+const ASS_SCALE_OUTLINE = false;     // true = يكبّر الـOutline مع الخط. false = يبقى مثل الملف الأصلي
+const ASS_OUTLINE_AMOUNT = 0.5;      // كم من التكبير ينطبق على الـOutline: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
+const ASS_SCALE_SHADOW = false;      // true = يكبّر الـShadow مع الخط. false = يبقى مثل الملف الأصلي
+const ASS_SHADOW_AMOUNT = 0.5;       // كم من التكبير ينطبق على الـShadow: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
+const ASS_BOLD_OFF = false;          // true = يطفّي الـBold بالستايل الرئيسي فقط. false = ما ينلمس
 const TERM_CHARS = '.…!؟?،,؛:';
 const HAS_ARABIC = /[\u0600-\u06FF]/;
 const DASH_RE = /^[-–—]/;
@@ -903,23 +906,33 @@ function applyAssFontSize(lines) {
   const k = Math.pow(10, ASS_FONT_DECIMALS);
   const target = Math.round(playResY * ASS_FONT_PCT / 100 * k) / k;
   if (!(target > 0)) return fail('الحجم الجديد طلع صفر');
-  if (target === oldSize) return fail(`الستايل ${top} حجمه أصلاً ${oldSize} (نفس الهدف، PlayResY=${playResY})`);
+  const sizeChanged = target !== oldSize;
   const ratio = target / oldSize;
   const lead = s => s.match(/^\s*/)[0];
-  const scale = idx => {
-    if (idx < 0 || idx >= st.vals.length) return null;
+  const scale = (idx, amount) => {
+    if (!sizeChanged || idx < 0 || idx >= st.vals.length) return null;
     const n = parseFloat(st.vals[idx]);
-    if (!isFinite(n)) return null;
-    st.vals[idx] = lead(st.vals[idx]) + String(Math.round(n * ratio * 100) / 100);
-    return { from: n, to: Math.round(n * ratio * 100) / 100 };
+    const a = Number(amount);
+    if (!isFinite(n) || !isFinite(a)) return null;
+    const to = Math.round(n * (1 + (ratio - 1) * a) * 100) / 100;
+    if (to === n) return null;
+    st.vals[idx] = lead(st.vals[idx]) + String(to);
+    return { from: n, to };
   };
-  const sizeLead = lead(st.vals[iSize]);
-  st.vals[iSize] = sizeLead + String(target);
-  const outline = ASS_SCALE_OUTLINE ? scale(iOut) : null;
-  const shadow = ASS_SCALE_SHADOW ? scale(iSh) : null;
+  const outline = ASS_SCALE_OUTLINE ? scale(iOut, ASS_OUTLINE_AMOUNT) : null;
+  const shadow = ASS_SCALE_SHADOW ? scale(iSh, ASS_SHADOW_AMOUNT) : null;
+  let bold = null;
+  const iBold = fmt.indexOf('bold');
+  if (ASS_BOLD_OFF && iBold >= 0 && iBold < st.vals.length) {
+    const bv = parseFloat(st.vals[iBold]);
+    if (isFinite(bv) && bv !== 0) { bold = { from: bv, to: 0 }; st.vals[iBold] = lead(st.vals[iBold]) + '0'; }
+  }
+  if (!sizeChanged && !bold) return fail(`الستايل ${top} حجمه أصلاً ${oldSize} (نفس الهدف، PlayResY=${playResY})`);
+  if (sizeChanged) st.vals[iSize] = lead(st.vals[iSize]) + String(target);
   lines[st.i] = st.prefix + st.vals.join(',');
-  console.log(`[حجم ASS] الستايل=${top} من ${oldSize} إلى ${target} (PlayResY=${playResY}${usedFallback ? ' افتراضي' : ''})`);
-  return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, share: topN / total });
+  const extra = (outline ? ` | Outline ${outline.from}→${outline.to}` : '') + (shadow ? ` | Shadow ${shadow.from}→${shadow.to}` : '') + (bold ? ' | Bold طافي' : '');
+  console.log(`[حجم ASS] الستايل=${top} ${sizeChanged ? `من ${oldSize} إلى ${target}` : `الحجم بقى ${oldSize}`} (PlayResY=${playResY}${usedFallback ? ' افتراضي' : ''})${extra}`);
+  return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, bold, share: topN / total });
 }
 function rebuildAss(parsed, texts) {
   const out = parsed.lines.slice();
