@@ -29,14 +29,14 @@ const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
-const ASS_FONT_PCT = 6.5;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
+const ASS_FONT_PCT = 6.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
 const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم ياخذها الستايل حتى يُعتبر رئيسي (0.5 = 50%)
 const ASS_SCALE_OUTLINE = true;      // true = يكبّر الـOutline مع الخط. false = يبقى مثل الملف الأصلي
-const ASS_OUTLINE_AMOUNT = 0.5;      // كم من التكبير ينطبق على الـOutline: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
+const ASS_OUTLINE_AMOUNT = 1;      // كم من التكبير ينطبق على الـOutline: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
 const ASS_SCALE_SHADOW = true;       // true = يكبّر الـShadow مع الخط. false = يبقى مثل الملف الأصلي
-const ASS_SHADOW_AMOUNT = 0.5;       // كم من التكبير ينطبق على الـShadow: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
+const ASS_SHADOW_AMOUNT = 1;       // كم من التكبير ينطبق على الـShadow: 1 كامل، 0.5 نص، 0.25 ربع، 0 = بدون
 const ASS_BOLD_OFF = false;          // true = يطفّي الـBold بالستايل الرئيسي (وبالستايلات اللي معه). false = ما ينلمس
 const ASS_SCALE_OTHER_STYLES = true; // true = أي ستايل ثاني حجمه الأصلي يساوي الرئيسي (مثل Italics) يتكبّر معه. false = الرئيسي فقط
 const TERM_CHARS = '.…!؟?،,؛:';
