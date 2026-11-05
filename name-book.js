@@ -442,7 +442,10 @@ function makeBook(map) {
   function prepare(text) {
     const { masked, tags } = maskTags(text);
     const s = masked.replace(SPAN_RE, (all, q, p) => {
-      const inner = q != null ? q : p;
+      const raw = q != null ? q : p;
+      const tm = raw.match(/^(.*?)\s*([!؟?.…،,؛]+)$/);
+      const inner = tm ? tm[1] : raw;
+      const tail = tm ? tm[2] : '';
       if (!inner.trim() || !INNER_OK.test(inner)) return all;
       const toks = [...inner.matchAll(TOKEN_RE)].map(m => ({ k: bookKey(m[0]), a: m.index + 1 }));
       if (!toks.length || toks.length > 3) return all;
@@ -455,7 +458,7 @@ function makeBook(map) {
         (idx === 0 && toks.length >= 2 && ENTITY_HEADS.has(t.k)) ||
         (idx > 0 && idx < toks.length - 1 && t.k === 'و' && matches.length >= 2)
       );
-      return allValid ? probe : all;
+      return allValid ? probe + tail : all;
     });
     return { s, tags };
   }
