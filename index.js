@@ -704,6 +704,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         let finalTargetId = targetId;
         let finalType = req.params.type;
         let originalKitsuId = null;
+        let originalKitsuEp = null;
         if (targetId.startsWith('cee:')) {
             const ceeInfo = await resolveCeeId(targetId);
             if (ceeInfo.ok && ceeInfo.imdbId) {
@@ -719,6 +720,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         }
         if (targetId.startsWith('kitsu')) {
             originalKitsuId = targetId.split(':')[1];
+            originalKitsuEp = /^\d+$/.test(targetId.split(':')[2] || '') ? targetId.split(':')[2] : null;
             const mapped = await mapKitsuToImdb(targetId);
             if (mapped) {
                 finalTargetId = mapped;
@@ -839,7 +841,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const streamPathSrt = configParam ? '/' + configParam + '/stream-ai.srt' : '/stream-ai.srt';
         const streamPathAss = configParam ? '/' + configParam + '/stream-ai.ass' : '/stream-ai.ass';
         let extraParams = '&id=' + finalTargetId;
-        if (originalKitsuId) extraParams += '&kitsu=' + originalKitsuId;
+        if (originalKitsuId) extraParams += '&kitsu=' + originalKitsuId + (originalKitsuEp ? '&kep=' + originalKitsuEp : '');
         if (arabicSubs.ass && arabicSubs.ass.length > 0) {
             const assSiteCounters = {};
             for (let i = 0; i < arabicSubs.ass.length; i++) {
@@ -983,6 +985,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const targetUrl = req.query.url;
     const targetId = req.query.id || '';
     const kitsuId = req.query.kitsu || '';
+    const kitsuEp = req.query.kep || '';
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
     const srcLang = /^(he|hi)$/.test(String(req.query.src || '')) ? String(req.query.src) : '';
     const isPrefetch = String(req.query.prefetch || '') === '1';
@@ -1028,6 +1031,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
             trackNum,
             rawConfig: req.params.config || '',
             kitsuId,
+            kitsuEp,
             proto,
             host,
             port: PORT,
