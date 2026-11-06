@@ -25,6 +25,7 @@ const CORRECTOR_CHUNK = 250;
 const CORRECTOR_MAX_WORKERS = 8;
 const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const FALLBACK_WAIT_MS = 10000;
+const HEDGE_AFTER_FAILS = 2;
 const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
@@ -481,7 +482,7 @@ function analyzeEllipsis(cues) {
   const reversed = total >= ELL_MIN_LINES && (countRev || pairsRev) && !(countOk || pairsOk);
   return { total, startN, endN, pairOk, pairRev, reversed };
 }
-async function correctChunkStrict(items, keysArray, modelName, ctx = null) {
+async function correctChunkStrict(items, keysArray, modelName, ctx = null, hook = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
@@ -512,6 +513,7 @@ ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
   for (let attempt = 0; attempt < 4; attempt++) {
+    if (hook && hook.cancelled) return { status: 'cancelled', map: new Map() };
     const activeKey = await acquireKey(keysArray);
     if (!activeKey) return { status: 'no_keys', map: new Map() };
     const cleanKey = String(activeKey).trim();
@@ -552,17 +554,20 @@ ${JSON.stringify(items)}`;
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
       console.log(`[تبريد طارئ - مصحح] (${shortModel(cleanModel)}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      if (hook && hook.onFail) hook.onFail();
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
   }
   return { status: 'api_exhausted', map: new Map() };
 }
-async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null) {
+async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null, hook = null) {
   const done = new Map();
   if (!items || items.length === 0) return done;
   let pending = items;
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
-    const result = await correctChunkStrict(pending, keysArray, modelName, ctx);
+    if (hook && hook.cancelled) break;
+    const result = await correctChunkStrict(pending, keysArray, modelName, ctx, hook);
+    if (result.status === 'cancelled') break;
     if (result.status === 'api_exhausted' || result.status === 'no_keys') {
       console.log(`[تجاوز طارئ - مصحح] (${shortModel(modelName)}) مختنق. تأجيل (${pending.length}) سطر لجولة الإنقاذ.`);
       break;
@@ -570,8 +575,8 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
     if ((result.status === 'bad_ids' || result.status === 'bad_format' || (result.status === 'ok' && result.map.size === 0)) && pending.length > 1) {
       const mid = Math.ceil(pending.length / 2);
       console.log(`[عزل مسموم - مصحح] الموديل مختنق بـ (${pending.length}) سطر. أقسمها لنصفين وأعيد.`);
-      const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx);
-      const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx);
+      const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx, hook);
+      const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx, hook);
       for (const [id, text] of left) done.set(id, text);
       for (const [id, text] of right) done.set(id, text);
       pending = pending.filter(it => !done.has(it.id));
@@ -590,6 +595,50 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null)
     }
   }
   return done;
+}
+const fallbackModelOf = m => (String(m || 'gemini-3.1-flash-lite').trim() === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL);
+function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
+  const fbModel = fallbackModelOf(primaryModel);
+  const ids = items.map(it => it.id);
+  const isComplete = m => !!m && ids.every(id => m.get(id));
+  const priHook = { cancelled: false, fails: 0, onFail: null };
+  const fbHook = { cancelled: false };
+  return new Promise(resolve => {
+    let priMap = null, fbMap = null, fbStarted = false, settled = false;
+    const finish = (map, winner) => {
+      if (settled) return;
+      settled = true;
+      if (winner === 'fb') {
+        priHook.cancelled = true;
+        console.log(`\u200F[طلب احتياطي ✅] (${shortModel(fbModel)}) أنجز الدفعة (${items.length} سطر) قبل (${shortModel(primaryModel)}).`);
+      } else if (winner === 'pri') {
+        fbHook.cancelled = true;
+        if (fbStarted) console.log(`\u200F[طلب احتياطي] (${shortModel(primaryModel)}) نجح أولاً، ألغيت الاحتياطي.`);
+      }
+      resolve(map);
+    };
+    const check = () => {
+      if (settled) return;
+      if (isComplete(priMap)) return finish(priMap, 'pri');
+      if (isComplete(fbMap)) return finish(fbMap, 'fb');
+      if (priMap !== null && (!fbStarted || fbMap !== null)) {
+        const merged = new Map(fbMap || []);
+        for (const [id, text] of priMap) if (text) merged.set(id, text);
+        finish(merged, 'merge');
+      }
+    };
+    priHook.onFail = () => {
+      if (++priHook.fails !== HEDGE_AFTER_FAILS || fbStarted || settled) return;
+      fbStarted = true;
+      console.log(`\u200F[طلب احتياطي 🏇] (${shortModel(primaryModel)}) فشل ${HEDGE_AFTER_FAILS} مرات ⟵ أطلق (${shortModel(fbModel)}) بالتوازي لنفس الدفعة (${items.length} سطر).`);
+      correctItemsWithRecovery(items, keysArray, fbModel, ctx, fbHook)
+        .catch(() => new Map())
+        .then(m => { fbMap = m; check(); });
+    };
+    correctItemsWithRecovery(items, keysArray, primaryModel, ctx, priHook)
+      .catch(() => new Map())
+      .then(m => { priMap = m; check(); });
+  });
 }
 const NAMES_PARALLEL = process.env.NAMES_PARALLEL !== '0';
 const secsOf = ms => (ms / 1000).toFixed(1);
@@ -695,7 +744,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
   
-  const runBatchWithModel = async (itemsToRun, activeModel) => {
+  const runBatchWithModel = async (itemsToRun, activeModel, hedge = false) => {
     const chunks = [];
     for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
     const currentWorkers = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS, chunks.length));
@@ -707,7 +756,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
         try {
           const ctx0 = buildChunkContext(cues, chunk);
           const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
-          const map = await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx);
+          const map = hedge
+            ? await hedgedCorrectItems(chunk, keysArray, activeModel, ctx)
+            : await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx);
           for (const it of chunk) {
             const text = map.get(it.id);
             if (text) applyLine(it.id, text);
@@ -722,7 +773,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   };
   
   if (toDo.length > 0) {
-    await runBatchWithModel(toDo, modelName);
+    await runBatchWithModel(toDo, modelName, true);
   }
   
   let unprocessed = toDo.filter(it => results[it.id] == null);
