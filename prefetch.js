@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { skipFillerAhead } = require('./filler');
 
 const NEXT_EP_DELAY_MS = 3 * 60 * 1000;
 const MAX_PREFETCHED_SET = 1000;
@@ -85,8 +86,21 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 async function runNextEpisodePrefetch(info) {
     const { targetId, label, trackNum, rawConfig, kitsuId, proto, host, port } = info;
     nextEpTimers.delete(targetId);
-    const nextTargetId = await resolveNextEpisodeTargetId(targetId);
+    let nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
+
+    // تجاوز حلقات الحشو (في الخلفية فقط): إن كانت الحلقة التالية حشواً نجهّز أقرب حلقة غير حشو بعدها
+    try {
+        const skip = await skipFillerAhead(targetId, kitsuId);
+        if (skip) {
+            console.log('[تجهيز تلقائي] الحلقة ' + skip.from + ' وما بعدها حشو ⟵ تجاوز ' + skip.skipped
+                + ' حلقة، وأجهز الحلقة ' + skip.to + ' (' + skip.kind + ') ⟵ ' + skip.targetId
+                + ' [فحص الحشو: ' + skip.ms + ' ms]');
+            nextTargetId = skip.targetId;
+        }
+    } catch (e) {
+        console.error('[تجهيز تلقائي] فحص الحشو فشل (' + e.message + ') ⟵ أكمل بالحلقة التالية العادية.');
+    }
 
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
     if (prefetchedNextSet.has(prefetchKey)) {
