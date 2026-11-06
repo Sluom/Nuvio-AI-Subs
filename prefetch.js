@@ -84,14 +84,14 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 }
 
 async function runNextEpisodePrefetch(info) {
-    const { targetId, label, trackNum, rawConfig, kitsuId, proto, host, port } = info;
+    const { targetId, label, trackNum, rawConfig, kitsuId, kitsuEp, proto, host, port } = info;
     nextEpTimers.delete(targetId);
     let nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
 
     // تجاوز حلقات الحشو (في الخلفية فقط): إن كانت الحلقة التالية حشواً نجهّز أقرب حلقة غير حشو بعدها
     try {
-        const skip = await skipFillerAhead(targetId, kitsuId);
+        const skip = await skipFillerAhead(targetId, kitsuId, kitsuEp);
         if (skip) {
             console.log('[تجهيز تلقائي] الحلقة ' + skip.from + ' وما بعدها حشو ⟵ تجاوز ' + skip.skipped
                 + ' حلقة، وأجهز الحلقة ' + skip.to + ' (' + skip.kind + ') ⟵ ' + skip.targetId
