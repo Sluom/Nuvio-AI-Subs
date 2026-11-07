@@ -1,21 +1,19 @@
 const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 
-// جلب روابط القاعدتين
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
 const MONGO_URI_TRACKS = String(process.env.MONGO_URI_TRACKS || '').trim();
 
 const MONGODB_DB = 'nuvio_ai_subs';
-const TRACKS_DB = 'nuvio_tracks'; // اسم القاعدة الثانوية
+const TRACKS_DB = 'nuvio_tracks';
 
 const CACHE_VERSION = 'v1';
-const TTL_DAYS = 120; // مدة احتفاظ القاعدة الأساسية
-const TRACKS_TTL_DAYS = 90; // مدة احتفاظ قاعدة التراكات الجديدة
+const TTL_DAYS = 120;
+const TRACKS_TTL_DAYS = 90;
 const RAW_NS = 'rawsrt';
 const DAY_SECONDS = 24 * 60 * 60;
 const RETRY_AFTER_MS = 30000;
 
-// فصل حالات الاتصال للقاعدتين لضمان عدم التداخل
 let primaryDb = null;
 let tracksDb = null;
 let connectingPrimary = null;
@@ -25,7 +23,6 @@ let retryAtTracks = 0;
 
 const docId = (ns, key) => crypto.createHash('sha1').update(`${CACHE_VERSION}|${ns}|${key}`).digest('hex');
 
-// دالة إنشاء أو تحديث الفهرس (نفسها بدون تغيير)
 async function ensureTtlIndex(d, collName, indexName, seconds, partialFilter) {
   const options = { name: indexName, expireAfterSeconds: seconds };
   if (partialFilter) options.partialFilterExpression = partialFilter;
@@ -49,7 +46,6 @@ async function ensureTtlIndex(d, collName, indexName, seconds, partialFilter) {
   }
 }
 
-// الاتصال بالقاعدة الأساسية (القديمة)
 async function getPrimaryDb() {
   if (!MONGODB_URI) return null;
   if (primaryDb) return primaryDb;
@@ -79,7 +75,6 @@ async function getPrimaryDb() {
   return connectingPrimary;
 }
 
-// الاتصال بقاعدة التراكات (الجديدة)
 async function getTracksDb() {
   if (!MONGO_URI_TRACKS) return null;
   if (tracksDb) return tracksDb;
@@ -92,7 +87,6 @@ async function getTracksDb() {
         await client.connect();
         const d = client.db(TRACKS_DB);
         const ttlSeconds = TRACKS_TTL_DAYS * DAY_SECONDS;
-        // إنشاء فهرس 90 يوم للتراكات الجديدة
         await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
         tracksDb = d;
         console.log(`[MongoDB] متصل بقاعدة التراكات (${TRACKS_DB}) | مدة الاحتفاظ ${TRACKS_TTL_DAYS} يوم.`);
@@ -109,7 +103,6 @@ async function getTracksDb() {
   return connectingTracks;
 }
 
-// دالة توجيه الطلبات: تحدد وين يروح الحفظ/القراءة بناءً على نوع البيانات
 function getTargetDb(ns) {
   return (ns === RAW_NS) ? getTracksDb() : getPrimaryDb();
 }
@@ -118,12 +111,9 @@ async function init() {
   if (!MONGODB_URI) console.log('[MongoDB] MONGODB_URI غير موجود للأساسية.');
   if (!MONGO_URI_TRACKS) console.log('[MongoDB] MONGO_URI_TRACKS غير موجود للتراكات.');
   
-  // تشغيل الاتصالين بالتوازي
   const [p, t] = await Promise.all([getPrimaryDb(), getTracksDb()]);
   return !!(p || t);
 }
-
-// ---------------- عمليات القراءة والحفظ ---------------- //
 
 async function loadDoc(ns, key) {
   const d = await getTargetDb(ns);
@@ -155,7 +145,7 @@ async function saveDoc(ns, key, value) {
 
 async function loadMap(ns, key) {
   const out = new Map();
-  const d = await getPrimaryDb(); // الخرائط دائماً بالأساسية
+  const d = await getPrimaryDb();
   if (!d) return out;
   try {
     const doc = await d.collection('maps').findOne({ _id: docId(ns, key) });
@@ -173,7 +163,7 @@ async function loadMap(ns, key) {
 
 async function saveMap(ns, key, entries) {
   if (!entries || entries.length === 0) return false;
-  const d = await getPrimaryDb(); // الخرائط دائماً بالأساسية
+  const d = await getPrimaryDb();
   if (!d) return false;
   const set = { ns, updatedAt: new Date() };
   for (const [id, value] of entries) set[`data.${id}`] = value;
