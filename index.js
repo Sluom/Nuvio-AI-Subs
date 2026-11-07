@@ -7,7 +7,7 @@ const { getSubSource } = require('./subsource');
 const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
 const { setOsComCreds } = require('./oscom');
-const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV } = require('./corrector');
+const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
 const {
     cancelNextEpisodePrefetch,
     scheduleNextEpisodePrefetch,
@@ -100,7 +100,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     const freshSrt = (freshSrtList || []).slice(0, 4);
     const freshAss = (freshAssList || []).slice(0, 4);
     if (!targetId) return { pinnedSrt: freshSrt, pinnedAss: freshAss };
-    const pinKey = 'corr_pins_' + targetId;
+    const pinKey = 'corr_pins_' + targetId + TRACKS_TAG;
     let saved = pinnedCorrectorMemCache.get(pinKey);
     if (!saved) {
         try {
@@ -662,8 +662,8 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
             const n = i + 1;
             const item = list[i];
             if (!item || !item.url) continue;
-            const rawKey = (isAss ? 'ass_' : '') + targetId + '_track' + n;
-            const jobKey = (isAss ? 'ARA-ASS_' : 'ARA-SRT_') + targetId + '_track' + n + '_' + CORRECTOR_REV;
+            const rawKey = (isAss ? 'ass_' : '') + targetId + '_track' + n + TRACKS_TAG;
+            const jobKey = (isAss ? 'ARA-ASS_' : 'ARA-SRT_') + targetId + '_track' + n + '_' + CORRECTOR_REV + TRACKS_TAG;
             try {
                 const done = await db.loadDoc('job', jobKey);
                 if (done && done.content) continue;
@@ -993,7 +993,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     const isCorrector = label === 'ARA-SRT' || label === 'ARA-ASS';
     const isPinnedCorrector = isCorrector && targetId;
     const srcCacheTag = srcLang ? '_' + srcLang + 'v2' : '';
-    const revTag = isCorrector ? '_' + CORRECTOR_REV : '';
+    const revTag = isCorrector ? '_' + CORRECTOR_REV + TRACKS_TAG : '';
     const primaryCacheKey = (isPinnedCorrector
         ? [label, targetId, 'track' + trackNum].join('_')
         : [label, targetId, targetUrl].join('_') + srcCacheTag) + revTag;
