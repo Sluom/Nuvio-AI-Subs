@@ -1,25 +1,31 @@
 const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 
+// جلب روابط القاعدتين
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
+const MONGO_URI_TRACKS = String(process.env.MONGO_URI_TRACKS || '').trim();
+
 const MONGODB_DB = 'nuvio_ai_subs';
+const TRACKS_DB = 'nuvio_tracks'; // اسم القاعدة الثانوية
+
 const CACHE_VERSION = 'v1';
-// مدة الاحتفاظ العامة (الترجمات المصححة، الأسماء، كاش الأسطر، الجنس...): 120 يوم
-const TTL_DAYS = 120;
-// مدة احتفاظ التراكات الخام (rawsrt) فقط: 10 أيام
+const TTL_DAYS = 120; // مدة احتفاظ القاعدة الأساسية
+const TRACKS_TTL_DAYS = 90; // مدة احتفاظ قاعدة التراكات الجديدة
 const RAW_NS = 'rawsrt';
-const RAW_TTL_DAYS = 10;
 const DAY_SECONDS = 24 * 60 * 60;
 const RETRY_AFTER_MS = 30000;
 
-let database = null;
-let connecting = null;
-let retryAt = 0;
+// فصل حالات الاتصال للقاعدتين لضمان عدم التداخل
+let primaryDb = null;
+let tracksDb = null;
+let connectingPrimary = null;
+let connectingTracks = null;
+let retryAtPrimary = 0;
+let retryAtTracks = 0;
 
 const docId = (ns, key) => crypto.createHash('sha1').update(`${CACHE_VERSION}|${ns}|${key}`).digest('hex');
 
-// ينشئ فهرس انتهاء على updatedAt. إن كان موجودا بمدة مختلفة (مثلا 45 يوم القديمة)
-// يعدّل مدته في مكانه بـ collMod. وإن فشل يكتب سببا واضحا في السجل ويكمل العمل.
+// دالة إنشاء أو تحديث الفهرس (نفسها بدون تغيير)
 async function ensureTtlIndex(d, collName, indexName, seconds, partialFilter) {
   const options = { name: indexName, expireAfterSeconds: seconds };
   if (partialFilter) options.partialFilterExpression = partialFilter;
@@ -37,54 +43,90 @@ async function ensureTtlIndex(d, collName, indexName, seconds, partialFilter) {
       console.log(`[MongoDB] تم تحديث مدة فهرس ${indexName} في ${collName} إلى ${Math.round(seconds / DAY_SECONDS)} يوم.`);
       return true;
     } catch (e2) {
-      console.log(`[MongoDB] تعذر ضبط فهرس الانتهاء ${indexName} لمجموعة ${collName}: ${e2.message}. إن كان الفهرس القديم ما زال بمدته السابقة فاحذفه من تبويب Indexes في Atlas ثم أعد تشغيل البوت.`);
+      console.log(`[MongoDB] تعذر ضبط فهرس الانتهاء ${indexName} لمجموعة ${collName}: ${e2.message}.`);
       return false;
     }
   }
 }
 
-async function getDb() {
+// الاتصال بالقاعدة الأساسية (القديمة)
+async function getPrimaryDb() {
   if (!MONGODB_URI) return null;
-  if (database) return database;
-  if (Date.now() < retryAt) return null;
+  if (primaryDb) return primaryDb;
+  if (Date.now() < retryAtPrimary) return null;
 
-  if (!connecting) {
-    connecting = (async () => {
+  if (!connectingPrimary) {
+    connectingPrimary = (async () => {
       try {
         const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000, maxPoolSize: 10 });
         await client.connect();
         const d = client.db(MONGODB_DB);
         const ttlSeconds = TTL_DAYS * DAY_SECONDS;
-        const rawTtlSeconds = RAW_TTL_DAYS * DAY_SECONDS;
         await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
         await ensureTtlIndex(d, 'maps', 'updatedAt_1', ttlSeconds);
-        await ensureTtlIndex(d, 'docs', 'updatedAt_rawsrt_ttl', rawTtlSeconds, { ns: RAW_NS });
-        database = d;
-        console.log(`[MongoDB] متصل بقاعدة (${MONGODB_DB}) | مدة الاحتفاظ ${TTL_DAYS} يوم (التراكات الخام ${RAW_TTL_DAYS} أيام) | نسخة الكاش ${CACHE_VERSION}`);
+        primaryDb = d;
+        console.log(`[MongoDB] متصل بالقاعدة الأساسية (${MONGODB_DB}) | مدة الاحتفاظ ${TTL_DAYS} يوم | الكاش ${CACHE_VERSION}`);
         return d;
       } catch (e) {
-        retryAt = Date.now() + RETRY_AFTER_MS;
-        console.log(`[MongoDB] فشل الاتصال: ${e.message}. إعادة المحاولة بعد ${Math.round(RETRY_AFTER_MS / 1000)}s.`);
+        retryAtPrimary = Date.now() + RETRY_AFTER_MS;
+        console.log(`[MongoDB] فشل الاتصال بالأساسية: ${e.message}. إعادة المحاولة لاحقاً.`);
         return null;
       } finally {
-        connecting = null;
+        connectingPrimary = null;
       }
     })();
   }
-  return connecting;
+  return connectingPrimary;
+}
+
+// الاتصال بقاعدة التراكات (الجديدة)
+async function getTracksDb() {
+  if (!MONGO_URI_TRACKS) return null;
+  if (tracksDb) return tracksDb;
+  if (Date.now() < retryAtTracks) return null;
+
+  if (!connectingTracks) {
+    connectingTracks = (async () => {
+      try {
+        const client = new MongoClient(MONGO_URI_TRACKS, { serverSelectionTimeoutMS: 8000, maxPoolSize: 10 });
+        await client.connect();
+        const d = client.db(TRACKS_DB);
+        const ttlSeconds = TRACKS_TTL_DAYS * DAY_SECONDS;
+        // إنشاء فهرس 90 يوم للتراكات الجديدة
+        await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
+        tracksDb = d;
+        console.log(`[MongoDB] متصل بقاعدة التراكات (${TRACKS_DB}) | مدة الاحتفاظ ${TRACKS_TTL_DAYS} يوم.`);
+        return d;
+      } catch (e) {
+        retryAtTracks = Date.now() + RETRY_AFTER_MS;
+        console.log(`[MongoDB] فشل الاتصال بقاعدة التراكات: ${e.message}. إعادة المحاولة لاحقاً.`);
+        return null;
+      } finally {
+        connectingTracks = null;
+      }
+    })();
+  }
+  return connectingTracks;
+}
+
+// دالة توجيه الطلبات: تحدد وين يروح الحفظ/القراءة بناءً على نوع البيانات
+function getTargetDb(ns) {
+  return (ns === RAW_NS) ? getTracksDb() : getPrimaryDb();
 }
 
 async function init() {
-  if (!MONGODB_URI) {
-    console.log('[MongoDB] المتغير MONGODB_URI غير موجود. الكاش الدائم معطل، والعمل بالذاكرة فقط.');
-    return false;
-  }
-  const d = await getDb();
-  return !!d;
+  if (!MONGODB_URI) console.log('[MongoDB] MONGODB_URI غير موجود للأساسية.');
+  if (!MONGO_URI_TRACKS) console.log('[MongoDB] MONGO_URI_TRACKS غير موجود للتراكات.');
+  
+  // تشغيل الاتصالين بالتوازي
+  const [p, t] = await Promise.all([getPrimaryDb(), getTracksDb()]);
+  return !!(p || t);
 }
 
+// ---------------- عمليات القراءة والحفظ ---------------- //
+
 async function loadDoc(ns, key) {
-  const d = await getDb();
+  const d = await getTargetDb(ns);
   if (!d) return null;
   try {
     const doc = await d.collection('docs').findOne({ _id: docId(ns, key) });
@@ -96,7 +138,7 @@ async function loadDoc(ns, key) {
 }
 
 async function saveDoc(ns, key, value) {
-  const d = await getDb();
+  const d = await getTargetDb(ns);
   if (!d) return false;
   try {
     await d.collection('docs').updateOne(
@@ -113,7 +155,7 @@ async function saveDoc(ns, key, value) {
 
 async function loadMap(ns, key) {
   const out = new Map();
-  const d = await getDb();
+  const d = await getPrimaryDb(); // الخرائط دائماً بالأساسية
   if (!d) return out;
   try {
     const doc = await d.collection('maps').findOne({ _id: docId(ns, key) });
@@ -131,7 +173,7 @@ async function loadMap(ns, key) {
 
 async function saveMap(ns, key, entries) {
   if (!entries || entries.length === 0) return false;
-  const d = await getDb();
+  const d = await getPrimaryDb(); // الخرائط دائماً بالأساسية
   if (!d) return false;
   const set = { ns, updatedAt: new Date() };
   for (const [id, value] of entries) set[`data.${id}`] = value;
