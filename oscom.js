@@ -26,12 +26,7 @@ function setOsComCreds(c) {
     if (changed) { session = null; blockedUntil = 0; }
 }
 function getCreds() {
-    if (cfgCreds) return cfgCreds;
-    return {
-        apiKey: String(process.env.OSCOM_API_KEY || '').trim(),
-        username: String(process.env.OSCOM_USER || '').trim(),
-        password: String(process.env.OSCOM_PASS || '')
-    };
+    return cfgCreds || { apiKey: '', username: '', password: '' };
 }
 function isOsComConfigured() {
     const { apiKey, username, password } = getCreds();
