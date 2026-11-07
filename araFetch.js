@@ -26,7 +26,6 @@ const CORRECTOR_MAX = 4;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const VERIFY_LEGACY = process.env.OS_LEGACY_VERIFY !== '0';
-const LEGACY_DIRECT_LINK = process.env.OS_LEGACY_DIRECT === '1';
 
 const resultCache = new Map();
 const MAX_RAW_CACHE = 150;
@@ -318,7 +317,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             const fName = e.SubFileName || e.MovieReleaseName || (format === 'ass' ? 'OS_Legacy_Ara_ASS' : 'OS_Legacy_Ara_SRT');
             const isHi = ['1', 1, true].includes(e.SubHearingImpaired) || HI_NAME_RE.test(fName);
             out.push({
-                url: LEGACY_DIRECT_LINK ? link.replace(/\.gz$/i, '') + '.' + format : link,
+                url: link,
                 format,
                 fileName: fName,
                 hearingImpaired: isHi,
@@ -330,7 +329,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             });
         }
         const nSrt = out.filter(x => x.format === 'srt').length;
-        console.log('[جلب عربي - opensubtitles.org] رجع ' + data.length + ' | بعد الفلترة: SRT=' + nSrt + ' ASS=' + (out.length - nSrt) + (LEGACY_DIRECT_LINK ? ' | رابط مباشر' : ''));
+        console.log('[جلب عربي - opensubtitles.org] رجع ' + data.length + ' | بعد الفلترة: SRT=' + nSrt + ' ASS=' + (out.length - nSrt));
         return out;
     } catch (e) {
         const why = e.code || (e.cause && (e.cause.code || e.cause.message)) || '';
