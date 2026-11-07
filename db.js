@@ -2,9 +2,14 @@ const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 
 const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
-const MONGODB_DB = String(process.env.MONGODB_DB || 'nuvio_ai_subs').trim();
-const CACHE_VERSION = String(process.env.CACHE_VERSION || 'v1').trim();
-const TTL_DAYS = Math.max(1, parseInt(process.env.MONGODB_TTL_DAYS || '45', 10) || 45);
+const MONGODB_DB = 'nuvio_ai_subs';
+const CACHE_VERSION = 'v1';
+// مدة الاحتفاظ العامة (الترجمات المصححة، الأسماء، كاش الأسطر، الجنس...): 120 يوم
+const TTL_DAYS = 120;
+// مدة احتفاظ التراكات الخام (rawsrt) فقط: 10 أيام
+const RAW_NS = 'rawsrt';
+const RAW_TTL_DAYS = 10;
+const DAY_SECONDS = 24 * 60 * 60;
 const RETRY_AFTER_MS = 30000;
 
 let database = null;
@@ -12,6 +17,31 @@ let connecting = null;
 let retryAt = 0;
 
 const docId = (ns, key) => crypto.createHash('sha1').update(`${CACHE_VERSION}|${ns}|${key}`).digest('hex');
+
+// ينشئ فهرس انتهاء على updatedAt. إن كان موجودا بمدة مختلفة (مثلا 45 يوم القديمة)
+// يعدّل مدته في مكانه بـ collMod. وإن فشل يكتب سببا واضحا في السجل ويكمل العمل.
+async function ensureTtlIndex(d, collName, indexName, seconds, partialFilter) {
+  const options = { name: indexName, expireAfterSeconds: seconds };
+  if (partialFilter) options.partialFilterExpression = partialFilter;
+  try {
+    await d.collection(collName).createIndex({ updatedAt: 1 }, options);
+    return true;
+  } catch (e) {
+    const conflict = e && (e.code === 85 || e.code === 86 || e.codeName === 'IndexOptionsConflict' || e.codeName === 'IndexKeySpecsConflict');
+    if (!conflict) {
+      console.log(`[MongoDB] تعذر إنشاء فهرس الانتهاء ${indexName} لمجموعة ${collName}: ${e.message}`);
+      return false;
+    }
+    try {
+      await d.command({ collMod: collName, index: { name: indexName, expireAfterSeconds: seconds } });
+      console.log(`[MongoDB] تم تحديث مدة فهرس ${indexName} في ${collName} إلى ${Math.round(seconds / DAY_SECONDS)} يوم.`);
+      return true;
+    } catch (e2) {
+      console.log(`[MongoDB] تعذر ضبط فهرس الانتهاء ${indexName} لمجموعة ${collName}: ${e2.message}. إن كان الفهرس القديم ما زال بمدته السابقة فاحذفه من تبويب Indexes في Atlas ثم أعد تشغيل البوت.`);
+      return false;
+    }
+  }
+}
 
 async function getDb() {
   if (!MONGODB_URI) return null;
@@ -24,16 +54,13 @@ async function getDb() {
         const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000, maxPoolSize: 10 });
         await client.connect();
         const d = client.db(MONGODB_DB);
-        const ttlSeconds = TTL_DAYS * 24 * 60 * 60;
-        for (const name of ['docs', 'maps']) {
-          try {
-            await d.collection(name).createIndex({ updatedAt: 1 }, { expireAfterSeconds: ttlSeconds });
-          } catch (e) {
-            console.log(`[MongoDB] تعذر إنشاء فهرس الانتهاء لمجموعة ${name}: ${e.message}`);
-          }
-        }
+        const ttlSeconds = TTL_DAYS * DAY_SECONDS;
+        const rawTtlSeconds = RAW_TTL_DAYS * DAY_SECONDS;
+        await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
+        await ensureTtlIndex(d, 'maps', 'updatedAt_1', ttlSeconds);
+        await ensureTtlIndex(d, 'docs', 'updatedAt_rawsrt_ttl', rawTtlSeconds, { ns: RAW_NS });
         database = d;
-        console.log(`[MongoDB] متصل بقاعدة (${MONGODB_DB}) | مدة الاحتفاظ ${TTL_DAYS} يوم | نسخة الكاش ${CACHE_VERSION}`);
+        console.log(`[MongoDB] متصل بقاعدة (${MONGODB_DB}) | مدة الاحتفاظ ${TTL_DAYS} يوم (التراكات الخام ${RAW_TTL_DAYS} أيام) | نسخة الكاش ${CACHE_VERSION}`);
         return d;
       } catch (e) {
         retryAt = Date.now() + RETRY_AFTER_MS;
