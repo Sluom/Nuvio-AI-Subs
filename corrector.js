@@ -656,7 +656,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
   }
   const CHUNK = CORRECTOR_CHUNK;
-  const cacheVersion = process.env.CACHE_VER || 'ARB2';
+  const cacheVersion = 'ARB2';
   const lineCacheKey = cacheVersion + '_' + CORRECTOR_REV + '_' + cacheKey;
   const nameCacheKey = cacheVersion + '_names_' + cacheKey;
   const seriesTid = String(cacheKey).split('|')[0];
