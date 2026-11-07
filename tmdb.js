@@ -6,7 +6,7 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CAST = 40;
 const cache = new Map();
 function authConfig(userKey) {
-  const rawKey = userKey || process.env.TMDB_API_KEY || '';
+  const rawKey = userKey || '';
   const key = String(rawKey).replace(/["'\s]/g, '').replace(/^Bearer/i, '');
   if (!key) return null;
   if (key.length > 40) return { headers: { Authorization: `Bearer ${key}` }, params: {} };
@@ -14,7 +14,7 @@ function authConfig(userKey) {
 }
 async function tmdbGet(path, params = {}, userKey = null) {
   const auth = authConfig(userKey);
-  if (!auth) throw new Error('TMDB API Key غير موجود (لا في الإعدادات ولا في السيرفر)');
+  if (!auth) throw new Error('TMDB API Key غير موجود في الإعدادات');
   const r = await axios.get(BASE + path, {
     headers: auth.headers,
     params: { ...auth.params, ...params },
