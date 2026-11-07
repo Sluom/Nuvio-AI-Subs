@@ -27,6 +27,8 @@ const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const FALLBACK_WAIT_MS = 10000;
 const HEDGE_AFTER_FAILS = 2;
 const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
+const TRACKS_REV = String(process.env.TRACKS_REV || '').trim();
+const TRACKS_TAG = (TRACKS_REV && TRACKS_REV !== '0') ? '_t' + TRACKS_REV : '';
 const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
@@ -889,7 +891,7 @@ function loadArabicSub(url, subsourceKey, targetId) {
 }
 async function loadSavedOrFetch(url, subsourceKey, targetId, trackNum) {
   if (targetId && trackNum) {
-    const saved = await db.loadDoc('rawsrt', targetId + '_track' + trackNum);
+    const saved = await db.loadDoc('rawsrt', targetId + '_track' + trackNum + TRACKS_TAG);
     if (saved && saved.text) {
       console.log(`[مصحح Nuvio] Track ${trackNum}: المصدر جاهز من التخزين الدائم، ما أحتاج الموقع.`);
       return saved.text;
@@ -1104,6 +1106,7 @@ module.exports = {
   handleCorrectionSrt,
   handleCorrectionAss,
   CORRECTOR_REV,
+  TRACKS_TAG,
   analyzeEllipsis,
   flipEllipsisText,
   isVisualOrderFile,
