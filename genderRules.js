@@ -55,7 +55,6 @@ const WB_L = '(?<![\\p{L}\\p{N}])';
 const WB_R = '(?![\\p{L}\\p{N}])';
 const RE_ROSTER_MALE_ROLE = new RegExp(`${WB_L}(?:${alt(ROSTER_MALE_ROLES)})${WB_R}`, 'iu');
 const RE_ROSTER_FEMALE_ROLE = new RegExp(`${WB_L}(?:${alt(ROSTER_FEMALE_ROLES)})${WB_R}`, 'iu');
-const ANNOTATION_MODEL = String(process.env.ANNOTATION_MODEL || '').trim();
 const ANNOTATION_BUDGET_MS = 75000;
 const ANNOTATION_SLICE_SIZE = 200;
 const ANNOTATION_OVERLAP = 8;
@@ -67,10 +66,8 @@ const SCENE_BREAK_SECONDS = 4;
 const RESCUE_CONTEXT = 10;
 const RESCUE_MAX_ASK = 80;
 const RESCUE_MAX_SPAN = 250;
-const ROSTER_ENABLED = process.env.ROSTER_PASS !== '0';
 const ROSTER_VOTE_MIN = 2;
 const ROSTER_ALT_MAX_GAP_SECONDS = 2.5;
-const STRIP_SDH_ENABLED = process.env.STRIP_SDH !== '0';
 const VERIFY_RUN_MIN = 6;
 const VERIFY_MAX_REQUESTS = 6;
 const VERIFY_CONTEXT = 10;
@@ -96,7 +93,6 @@ const RE_SDH_PAREN = /\(([^)\n]*)\)/g;
 const RE_SDH_UPPER_LABEL = /^((?:[-–—]\s*)?)([A-Z][A-Z0-9 .'’-]{0,30}):\s+/;
 const RE_HAS_CONTENT = /[\p{L}\p{N}]/u;
 const SDH_LABEL_STOP = new Set(['YES', 'NO', 'OK', 'OKAY', 'STOP', 'WAIT', 'HELP', 'WARNING', 'NOTE', 'PLEASE', 'NOW', 'WHAT', 'WHY', 'NEVER']);
-let annotationModelBroken = false;
 const annotationCaches = new Map();
 const MAX_ANNOTATION_CACHES = 40;
 const registryCaches = new Map();
@@ -450,18 +446,12 @@ ${JSON.stringify(windowItems)}`;
 }
 async function callAnnotationLLM({ prompt, keysArray, modelName, deadline, deps, timeout = ANNOTATION_REQUEST_TIMEOUT_MS, attempts = ANNOTATION_ATTEMPTS, stopOn429 = false }) {
   const baseModel = deps.normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  let model = (!annotationModelBroken && ANNOTATION_MODEL) ? deps.normalizeGeminiModelId(ANNOTATION_MODEL) : baseModel;
+  const model = baseModel;
   const call = m => deps.callGeminiText({
     prompt, keysArray, modelName: m, generationConfig: annotationConfig(m, baseModel, deps.isGemini3Model),
     timeout, attempts, deadline, stopOn429
   });
-  let res = await call(model);
-  if (res.status === 'config_error' && model !== baseModel) {
-    annotationModelBroken = true;
-    console.log(`[تحليل الضمائر] موديل التحليل (${model}) غير صالح. أرجع لموديل الترجمة (${baseModel}) لباقي الطلبات.`);
-    model = baseModel;
-    res = await call(model);
-  }
+  const res = await call(model);
   return { res, model };
 }
 async function annotateWindow({ windowItems, mode, keysArray, modelName, deadline, label, castPromptBlock, deps, depth = 0, state = null }) {
@@ -702,12 +692,6 @@ async function annotateRosterWindow({ windowItems, keysArray, modelName, deadlin
   rosterStats.slices++;
   rosterStats.people += parsed.people.size;
   console.log(`[تحليل الضمائر] ${label}: ${parsed.people.size} شخص | ${map.size} كود من ${windowItems.length} سطر في ${deps.secs(Date.now() - t0)} (${model}).`);
-  if (process.env.GENDER_DEBUG === '1') {
-    console.log(`[مشهد] ${label}: ` + [...parsed.people.values()].slice(0, 40).map(p => {
-      const pName = p.name || '?';
-      return `${p.id}=${pName}(${p.gender})`;
-    }).join(', '));
-  }
   return { map, links, people: parsed.people };
 }
 const isFFcode = c => !!c && c.split('/').every(seg => seg === 'FF');
@@ -1158,13 +1142,10 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
       tasks.push(async () => {
         const need = core.filter(it => !cache.has(it.id));
         const needSet = new Set(need.map(it => it.id));
-        let rr = null;
-        if (ROSTER_ENABLED) {
-          rr = await annotateRosterWindow({
-            windowItems, keysArray, modelName, deadline, castPromptBlock, regIndex, evidence, turnsById, rosterStats, deps,
-            label: `جولة 1 (مشهد) شريحة ${ri + 1}/${ranges.length}`
-          });
-        }
+        let rr = await annotateRosterWindow({
+          windowItems, keysArray, modelName, deadline, castPromptBlock, regIndex, evidence, turnsById, rosterStats, deps,
+          label: `جولة 1 (مشهد) شريحة ${ri + 1}/${ranges.length}`
+        });
         let map = rr ? rr.map : null;
         const covered = map ? need.filter(it => map.has(it.id)).length : 0;
         if (rr) {
@@ -1189,9 +1170,7 @@ async function getAnnotations(cues, keysArray, modelName, cacheKey, deadline, ca
     });
     console.log(`[تحليل الضمائر] ${items.length} سطر بالتسلسل (من ${cues.length}) | ${tasks.length} طلب (تزامن ${Math.min(conc, tasks.length)}، مفاتيح حية ${deps.aliveKeyCount(keysArray)}).`);
     await deps.runConcurrentPool(tasks, conc);
-    if (ROSTER_ENABLED) {
-      console.log(`[مشهد] ${rosterStats.slices} شريحة بنظام الأشخاص | ${rosterStats.people} شخص | الكاست والأدلة والأدوار غيّرت جنس ${rosterStats.changed} شخص وملأت ${rosterStats.filled} | رجعت للحروف ${rosterStats.fallbacks} شريحة.`);
-    }
+    console.log(`[مشهد] ${rosterStats.slices} شريحة بنظام الأشخاص | ${rosterStats.people} شخص | الكاست والأدلة والأدوار غيّرت جنس ${rosterStats.changed} شخص وملأت ${rosterStats.filled} | رجعت للحروف ${rosterStats.fallbacks} شريحة.`);
   }
   applyAllEvidence();
   splitFixed += unifySplitPairs(cues, items, eff, setH, linkOf);
@@ -1420,68 +1399,14 @@ async function analyzeSubtitlesGender({ cues, toDo, keysArray, modelName, cacheK
     if (ruleFixes > 0) console.log(`[قواعد الألقاب] عدّلت أو أضفت معلومة الجنس لـ ${ruleFixes} سطر إضافي.`);
   }
   let sdhRemovedIds = [];
-  if (STRIP_SDH_ENABLED && toDo.length > 0) {
+  if (toDo.length > 0) {
     const r = applySdhStrip(cues, toDo);
     sdhRemovedIds = r.removedIds;
     if (r.changed > 0) console.log(`[SDH] عدّلت ${r.changed} سطر وحذفت ${r.removedIds.length} سطر كامل (وصف أصوات أو أسماء متحدثين).`);
   }
   return { enhancedCastPrompt, annotationSummary, regIndex, sdhRemovedIds };
 }
-function logGenderDebug({ cues, toDo, results, regIndex }) {
-  const FIND = String(process.env.GENDER_FIND || '').trim();
-  const DEBUG = process.env.GENDER_DEBUG === '1';
-  const GOLD = process.env.GOLD_DUMP === '1';
-  if ((!FIND && !DEBUG && !GOLD) || !toDo || toDo.length === 0) return;
-  const flat2 = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim().slice(0, 90);
-  const flatFull = x => String(x == null ? '' : x).replace(/\{[^}]*\}|<[^>]*>/g, '').replace(/\\N|\\n|\r?\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim();
-  if (GOLD) {
-    const windows = Math.max(1, parseInt(process.env.GOLD_WINDOWS || '6', 10) || 6);
-    const size = Math.max(10, parseInt(process.env.GOLD_WINDOW_SIZE || '50', 10) || 50);
-    const n = toDo.length;
-    const picked = [];
-    if (n <= windows * size) {
-      for (let k = 0; k < n; k++) picked.push(k);
-    } else {
-      const seen = new Set();
-      for (let w = 0; w < windows; w++) {
-        const start = windows === 1 ? 0 : Math.floor(w * (n - size) / (windows - 1));
-        for (let k = start; k < start + size && k < n; k++) {
-          if (!seen.has(k)) { seen.add(k); picked.push(k); }
-        }
-      }
-    }
-    console.log(`[GOLD] عدد الأسطر المختارة: ${picked.length}`);
-    for (const k of picked) {
-      const it = toDo[k];
-      const cue = cues[it.id];
-      console.log('[GOLD] ' + JSON.stringify({ id: it.id, en: flatFull(cue ? cue.text : it.text), g: it.g || '', ar: flatFull(results[it.id]) }));
-    }
-  }
-  if (DEBUG && regIndex) {
-    console.log(`[سجل] ${regIndex.entries.length} شخصية (كاست ${regIndex.castCount} + ملف ${regIndex.fileCount}):`);
-    regIndex.entries.slice(0, 80).forEach(e => console.log(`[سجل] ${e.name} = ${e.gender} (${e.tier})${e.aliases.length ? ' | ' + e.aliases.slice(0, 5).join(', ') : ''}`));
-  }
-  if (FIND) {
-    let re = null;
-    try { re = new RegExp(FIND, 'iu'); } catch (e) { console.log(`[بحث] تعبير غير صالح: ${e.message}`); }
-    if (re) {
-      const byId = new Map(toDo.map(it => [it.id, it]));
-      const hits = [];
-      cues.forEach((c, i) => { if (byId.has(i) && (re.test(flat2(c.text)) || re.test(flat2(results[i])))) hits.push(i); });
-      const MAX_HITS = 25;
-      console.log(`[بحث] "${FIND}": ${hits.length} سطر مطابق${hits.length > MAX_HITS ? ` (أطبع أول ${MAX_HITS})` : ''}`);
-      for (const i of hits.slice(0, MAX_HITS)) {
-        console.log(`[بحث] ----- #${i}`);
-        for (let j = Math.max(0, i - 2); j <= Math.min(cues.length - 1, i + 2); j++) {
-          const it = byId.get(j);
-          if (!it) continue;
-          const gLabel = it.g || '--';
-          console.log(`[بحث] ${j === i ? '>>' : '  '}#${j} [${gLabel}] ${flat2(cues[j].text)} => ${flat2(results[j])}`);
-        }
-      }
-    }
-  }
-}
+function logGenderDebug() {}
 module.exports = {
   applyVocativeRules,
   extractRuleEvidenceForCue,
