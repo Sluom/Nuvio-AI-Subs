@@ -19,6 +19,9 @@ const BG_VERIFY_WINDOW_MS = 35000;
 const BG_VERIFY_TIMEOUT_MS = 10000;
 const BG_MAX_ZIPS_PER_SITE = 35;
 
+const VERIFIED_ONLY = process.env.ARA_VERIFIED_ONLY !== '0';
+const STREM_VERIFY_MAX = 6;
+
 const CONCURRENCY_LIMIT = 8;
 const MAX_SRT_PER_SITE = 20;
 const OSCOM_VERIFY_EACH = 2;
@@ -601,6 +604,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     }
 
     let globalAssCount = 0;
+    let hiddenUnverified = 0;
     const globalSeenSrtSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
@@ -629,7 +633,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             unverifiedOut.push(a);
         }
 
-        const combinedSiteAss = [...verifiedOut, ...unverifiedOut];
+        if (VERIFIED_ONLY) hiddenUnverified += unverifiedOut.length;
+        const combinedSiteAss = VERIFIED_ONLY ? verifiedOut : [...verifiedOut, ...unverifiedOut];
         return [
             ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
             ...combinedSiteAss.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
@@ -691,7 +696,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             unverifiedOut.push(p);
         }
 
-        const combinedSiteSrt = [...verifiedOut, ...unverifiedOut];
+        if (VERIFIED_ONLY) hiddenUnverified += unverifiedOut.length;
+        const combinedSiteSrt = VERIFIED_ONLY ? verifiedOut : [...verifiedOut, ...unverifiedOut];
         return [
             ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
             ...combinedSiteSrt.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
@@ -763,7 +769,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             subsourceSrt: subsourceSrt.length,
             osSrt: osSrt.length,
             legacySrt: legacySrt.length,
-            oscomSrt: oscomSrt.length
+            oscomSrt: oscomSrt.length,
+            hiddenUnverified
         }
     };
 }
@@ -841,6 +848,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const maxPerSite = isPrefetch ? BG_MAX_ZIPS_PER_SITE : 20;
     const zipCandidates = [];
     const subdlZips = [...subdlPre.assList, ...subdlPre.srtList.filter(x => !String(x.url).includes('strem.top'))].slice(0, maxPerSite);
+    const stremCandidates = subdlPre.srtList.filter(x => String(x.url).includes('strem.top')).slice(0, STREM_VERIFY_MAX);
     const subsourceZips = [...subsourcePre.assList, ...subsourcePre.srtList].slice(0, maxPerSite);
     const osZips = [...osPre.assList, ...osPre.srtList].slice(0, maxPerSite);
     const legacyZips = VERIFY_LEGACY ? [...legacyPre.assList, ...legacyPre.srtList].slice(0, maxPerSite) : [];
@@ -859,8 +867,16 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     const windowMs = isPrefetch ? BG_VERIFY_WINDOW_MS : FAST_VERIFY_WINDOW_MS;
     const itemTimeoutMs = isPrefetch ? BG_VERIFY_TIMEOUT_MS : VERIFY_TIMEOUT_MS;
 
+    // روابط strem.top: بالتجهيز المسبق (بالخلفية) تنفحص ضمن نفس الدفعة بآخرها،
+    // وبالطلب العادي تنفحص بعد نهاية نافذة الفحص حتى ما تزيد وقت انتظار المستخدم.
+    if (isPrefetch) zipCandidates.push(...stremCandidates);
+
     const job = runFastParallelCheck(zipCandidates, subsourceKey, epInfo, windowMs, itemTimeoutMs);
     await job.windowPromise;
+
+    const stremJob = (!isPrefetch && stremCandidates.length > 0)
+        ? runFastParallelCheck(stremCandidates, subsourceKey, epInfo, 0, itemTimeoutMs)
+        : null;
 
     const snapshot = job.verified.slice();
     const value = buildFinalArabicLists({
@@ -869,16 +885,26 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         strictDedupe: isPrefetch
     });
 
+    if (VERIFIED_ONLY && value.counts.hiddenUnverified > 0) {
+        console.log('[جلب عربي] أُخفي ' + value.counts.hiddenUnverified + ' ملف لم ينجح فحصه بعد (ما يظهر إلا إذا انحمّل ونجح بالفحص).');
+    }
+
     if (value.ass.length > 0 || value.srt.length > 0) {
         setResultCache(cacheKey, value, isPrefetch);
     }
 
     if (!isPrefetch) {
-        job.allPromise.then(() => {
-            if (job.verified.length > snapshot.length) {
+        const pending = [job.allPromise];
+        if (stremJob) pending.push(stremJob.allPromise);
+        Promise.all(pending).then(() => {
+            const allVerified = stremJob ? [...job.verified, ...stremJob.verified] : job.verified;
+            if (stremJob) {
+                console.log('[جلب عربي - strem.top] فحص بالخلفية: نجح ' + stremJob.verified.length + ' من ' + stremCandidates.length + ' (الناجح يظهر بالطلب القادم).');
+            }
+            if (allVerified.length > snapshot.length) {
                 const updated = buildFinalArabicLists({
                     legacyPre, osPre, subdlPre, subsourcePre, oscomPre,
-                    verifiedZipItems: job.verified,
+                    verifiedZipItems: allVerified,
                     strictDedupe: true
                 });
                 setResultCache(cacheKey, updated, true);
