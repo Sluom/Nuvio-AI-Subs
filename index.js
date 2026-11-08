@@ -14,6 +14,7 @@ const {
     activatePendingNextEpTimer
 } = require('./prefetch');
 const db = require('./db');
+const trackPref = require('./trackPref');
 const { resolveCeeId } = require('./ceeMap');
 
 const app = express();
@@ -96,7 +97,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
     });
 }
 
-async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList, isPrefetch = false) {
+async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList, isPrefetch = false, srtPool = []) {
     const freshSrt = (freshSrtList || []).slice(0, 4);
     const freshAss = (freshAssList || []).slice(0, 4);
     if (!targetId) return { pinnedSrt: freshSrt, pinnedAss: freshAss };
@@ -130,7 +131,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshSrt) {
         if (finalSrt.length >= 4) break;
         if (item && item.url && !usedSrtUrls.has(item.url)) {
-            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl' });
+            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: trackPref.nameOf(item) });
             usedSrtUrls.add(item.url);
             changed = true;
         }
@@ -146,9 +147,34 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshAss) {
         if (finalAss.length >= 4) break;
         if (item && item.url && !usedAssUrls.has(item.url)) {
-            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl' });
+            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: trackPref.nameOf(item) });
             usedAssUrls.add(item.url);
             changed = true;
+        }
+    }
+
+    // تفضيل الرافع: عند بناء تثبيت جديد فقط (لا أمسّ تثبيتًا محفوظًا) نضع حزمتك المفضلة في مكان تراكك المعتاد.
+    // إن لم نجدها يبقى الترتيب كما هو (نفس رقم التراك).
+    if (savedSrt.length === 0 || savedAss.length === 0) {
+        let prefs = null;
+        try { prefs = await trackPref.loadPref(targetId); } catch { prefs = null; }
+        if (prefs) {
+            const applyPref = (kind, savedLen, pool, list) => {
+                const p = prefs[kind];
+                if (savedLen > 0 || !p || !pool.length) return list;
+                const found = trackPref.findPreferred(pool, p);
+                if (!found) {
+                    console.log('[تفضيل الرافع] ' + targetId + ' (' + kind.toUpperCase() + '): لم أجد حزمتك المفضلة ⟵ أبقيت الترتيب كما هو.');
+                    return list;
+                }
+                changed = true;
+                console.log('[تفضيل الرافع] ' + targetId + ' (' + kind.toUpperCase() + '): وجدت حزمتك المفضلة (' + (found.how === 'url' ? 'نفس الحزمة' : 'نفس نمط الاسم') + ') ⟵ وضعتها في تراك ' + Math.min(p.slot, 4) + '.');
+                return trackPref.placeAtSlot(list, trackPref.makePinEntry(found.item), p.slot, 4);
+            };
+            const nextSrt = applyPref('srt', savedSrt.length, [...(freshSrtList || []), ...(srtPool || [])], finalSrt);
+            const nextAss = applyPref('ass', savedAss.length, freshAssList || [], finalAss);
+            finalSrt.splice(0, finalSrt.length, ...nextSrt);
+            finalAss.splice(0, finalAss.length, ...nextAss);
         }
     }
 
@@ -158,6 +184,25 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
         db.saveDoc('job', pinKey, docToSave).catch(() => {});
     }
     return { pinnedSrt: finalSrt, pinnedAss: finalAss };
+}
+
+// يُستدعى بعد استقرارك 3 دقائق على تراك مصحح: نحفظ هوية رافعك (رابط الحزمة + الموقع + الاسم + مكان التراك) لهذا المسلسل.
+async function learnTrackPreference(targetId, label, trackNum) {
+    const kind = label === 'ARA-ASS' ? 'ass' : (label === 'ARA-SRT' ? 'srt' : null);
+    if (!kind || !targetId) return;
+    const slot = parseInt(trackNum, 10);
+    if (!(slot >= 1 && slot <= 4)) return;
+    const pinKey = 'corr_pins_' + targetId + TRACKS_TAG;
+    let pins = pinnedCorrectorMemCache.get(pinKey);
+    if (!pins) {
+        try { pins = await db.loadDoc('job', pinKey); } catch { pins = null; }
+    }
+    const entry = pins && Array.isArray(pins[kind]) ? pins[kind][slot - 1] : null;
+    if (!entry || !entry.url) return;
+    const r = await trackPref.savePref(targetId, kind, slot, entry);
+    if (r && r.changed) {
+        console.log('[تفضيل الرافع] حفظت تفضيلك للمسلسل ' + r.key + ' (' + kind.toUpperCase() + ' تراك ' + slot + ') ⟵ ' + (r.pref.name || r.pref.url));
+    }
 }
 
 const armCache = new Map();
@@ -879,7 +924,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             finalTargetId,
             initialCorrSrtList,
             arabicSubs.ass || [],
-            isPrefetch
+            isPrefetch,
+            arabicSubs.srt || []
         );
         persistRawTracks(finalTargetId, corrSrtList, addonCfg.subsourceKey, 'srt').catch(() => {});
         persistRawTracks(finalTargetId, corrAssList, addonCfg.subsourceKey, 'ass').catch(() => {});
@@ -1035,7 +1081,8 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
             proto,
             host,
             port: PORT,
-            isReady
+            isReady,
+            onStable: () => learnTrackPreference(targetId, label, trackNum)
         });
     }
     if (isReady) {
