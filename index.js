@@ -5,7 +5,7 @@ const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getHebHindiSubs } = require('./hebHindi');
-const { getArabicSubsForCorrection, getRawArabicSubContent } = require('./araFetch');
+const { getArabicSubsForCorrection, getRawArabicSubContent, verifyArabicSub } = require('./araFetch');
 const { setOsComCreds } = require('./oscom');
 const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
 const {
@@ -64,19 +64,181 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 45000;
 
 
-function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, extraKeys, trackNum, label, targetId, kitsuId }) {
+// ===== إصلاح التراك الفاشل أثناء الضغطة: لو الملف الأصلي فشل تحميله، نفس الشغلة تبحث عن بديل لنفس الحلقة =====
+const ALT_SEARCH_MS = 15000;       // أقصى مدة كلية لمرحلة البحث عن بديل
+const ALT_BATCH_SIZE = 3;          // عدد المرشحين الذين نفحصهم بالتوازي
+const ALT_MAX_CANDIDATES = 15;     // أقصى عدد مرشحين نجرّبهم
+const ALT_ITEM_TIMEOUT_MS = 5000;  // مهلة فحص المرشح الواحد (تُقصّ بما تبقى من الـ 15 ثانية)
+const FAILED_KEEP_MS = 5 * 60 * 1000;
+const ALT_TIMEOUT = Symbol('alt-timeout');
+const HEAL_KINDS = { 'ARA-SRT': 'srt', 'ARA-ASS': 'ass' };
+
+function raceMs(promise, ms) {
+    let timer;
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(ALT_TIMEOUT), Math.max(0, ms)); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function canHealTrack(targetId, trackNum) {
+    const slot = parseInt(trackNum, 10);
+    return slot >= 1 && slot <= 4 && /^tt\d+$/.test(String(targetId || '').split(':')[0]);
+}
+
+async function loadPinsDoc(targetId) {
+    const pinKey = 'corr_pins_' + targetId + TRACKS_TAG;
+    let doc = pinnedCorrectorMemCache.get(pinKey);
+    if (!doc) {
+        try { doc = await db.loadDoc('job', pinKey); } catch { doc = null; }
+        if (doc && (Array.isArray(doc.srt) || Array.isArray(doc.ass))) pinnedCorrectorMemCache.set(pinKey, doc);
+    }
+    return { pinKey, doc: doc || null };
+}
+
+// يثبّت البديل مكان التراك الفاشل (نفس الرقم) بدون ما يمس بقية التراكات
+async function repinFailedSlot(targetId, kind, slot, item) {
+    const { pinKey, doc } = await loadPinsDoc(targetId);
+    const next = {
+        srt: Array.isArray(doc && doc.srt) ? doc.srt.slice() : [],
+        ass: Array.isArray(doc && doc.ass) ? doc.ass.slice() : []
+    };
+    if (next[kind].length < slot) return false;
+    next[kind][slot - 1] = trackPref.makePinEntry(item);
+    pinnedCorrectorMemCache.set(pinKey, next);
+    try { await db.saveDoc('job', pinKey, next); } catch { }
+    return true;
+}
+
+// يبحث بقائمة نفس الحلقة (من أي موقع) عن ملف يشتغل. نفس فاحص الجودة المستخدم عند بناء القوائم (عربي نظيف، ≥10 أسطر، ترميز سليم)
+async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extraKeys }) {
+    const slot = parseInt(trackNum, 10);
+    const parts = String(targetId || '').split(':');
+    const startedAt = Date.now();
+    const left = () => ALT_SEARCH_MS - (Date.now() - startedAt);
+    const isSeries = parts.length >= 3;
+    const epInfo = parseEpInfoFromTargetId(targetId);
+    const subsourceKey = (extraKeys && extraKeys.subsourceKey) || '';
+    const subdlKey = (extraKeys && extraKeys.subdlKey) || '';
+
+    const pool = await raceMs(
+        getArabicSubsForCorrection({
+            imdbId: parts[0],
+            season: isSeries ? parts[1] : null,
+            episode: isSeries ? parts[2] : null,
+            type: isSeries ? 'series' : 'movie',
+            subdlKey,
+            subsourceKey,
+            isPrefetch: false
+        }).catch(() => null),
+        left()
+    );
+    if (!pool || pool === ALT_TIMEOUT) return { item: null, tried: 0, ms: Date.now() - startedAt, reason: 'pool' };
+
+    const { doc } = await loadPinsDoc(targetId);
+    const pinned = (doc && Array.isArray(doc[kind])) ? doc[kind] : [];
+    const skip = new Set([trackPref.urlKey(failedUrl)]);
+    pinned.forEach((p, i) => { if (i !== slot - 1 && p && p.url) skip.add(trackPref.urlKey(p.url)); });
+    const siteOfItem = it => String((it && (it._site || it._source)) || '').toLowerCase();
+    const failedPin = pinned[slot - 1];
+    const failedSite = failedPin ? siteOfItem(failedPin) : '';
+
+    const raw = kind === 'ass' ? (pool.ass || []) : [...(pool.correctorSrt || []), ...(pool.srt || [])];
+    const seen = new Set();
+    const cands = [];
+    for (const it of raw) {
+        if (!it || !it.url || it._bad) continue;
+        const k = trackPref.urlKey(it.url);
+        if (skip.has(k) || seen.has(k)) continue;
+        seen.add(k);
+        cands.push(it);
+    }
+    // الأفضل أولا: إملاء سليم ثم غير SDH ثم المفحوص مسبقا ثم من موقع غير الموقع الفاشل
+    const rank = it => (it._badSpelling ? 8 : 0) + ((it.hearingImpaired || it._isSdh) ? 4 : 0) + (it._verified ? 0 : 2) + ((failedSite && siteOfItem(it) === failedSite) ? 1 : 0);
+    cands.sort((a, b) => rank(a) - rank(b));
+    const list = cands.slice(0, ALT_MAX_CANDIDATES);
+
+    let tried = 0;
+    for (let i = 0; i < list.length && left() > 300; i += ALT_BATCH_SIZE) {
+        const batch = list.slice(i, i + ALT_BATCH_SIZE);
+        tried += batch.length;
+        const results = await Promise.all(batch.map(async it => {
+            try {
+                const ms = Math.min(ALT_ITEM_TIMEOUT_MS, left());
+                if (ms < 300) return null;
+                const v = await verifyArabicSub({ ...it }, subsourceKey, epInfo, ms);
+                if (!v || v.format !== kind) return null;
+                const text = await raceMs(getRawArabicSubContent(it.url, subsourceKey, epInfo), Math.max(300, left()));
+                if (text === ALT_TIMEOUT || !text || !String(text).trim()) return null;
+                return { item: it, text: String(text) };
+            } catch {
+                return null;
+            }
+        }));
+        const hit = results.find(Boolean);
+        if (hit) return { ...hit, tried, ms: Date.now() - startedAt };
+    }
+    return { item: null, tried, ms: Date.now() - startedAt, reason: 'none' };
+}
+
+// يُستدعى لما يفشل الملف الأصلي. يرجّع {url,text} للبديل أو null. أثناء البحث يضع علامة phase='alt' ليظهر "جاري البحث عن بديل".
+async function healFailedTrack({ label, kind, targetId, trackNum, failedUrl, extraKeys, cacheKey }) {
+    if (!canHealTrack(targetId, trackNum)) return null;
+    const slot = parseInt(trackNum, 10);
+    const tag = '[إصلاح تراك] ' + label + ' Track ' + trackNum;
+    translationCache[cacheKey] = { status: 'pending', phase: 'alt' };
+    console.log(tag + ': الملف الأصلي فشل ⟵ أبحث عن بديل لنفس الحلقة (أقصى ' + Math.round(ALT_SEARCH_MS / 1000) + ' ث).');
+    let found = null;
+    try {
+        found = await findAlternativeSource({ kind, targetId, trackNum, failedUrl, extraKeys });
+    } catch (e) {
+        console.log(tag + ': خطأ أثناء البحث عن بديل: ' + e.message);
+    }
+    translationCache[cacheKey] = { status: 'pending' };
+    const secs = found ? (found.ms / 1000).toFixed(1) : '?';
+    if (!found || !found.item) {
+        console.log(tag + ': ما لقيت بديل شغّال خلال ' + secs + ' ث (جرّبت ' + (found ? found.tried : 0) + (found && found.reason === 'pool' ? ' | القائمة ما انجلبت بالوقت' : '') + ').');
+        return null;
+    }
+    const pinned = await repinFailedSlot(targetId, kind, slot, found.item).catch(() => false);
+    const rawKey = (kind === 'ass' ? 'ass_' : '') + targetId + '_track' + slot + TRACKS_TAG;
+    try { await db.saveDoc('rawsrt', rawKey, { text: found.text }); } catch { }
+    console.log(tag + ': لقيت بديل بعد ' + secs + ' ث (جرّبت ' + found.tried + ') ⟵ ' + getSourceLabel(found.item._site || found.item._source) + ' | ' + trackPref.nameOf(found.item) + (pinned ? ' | ثبّتُه مكان التراك' : ' | ما قدرت أثبّته بالقائمة'));
+    return { url: found.item.url, text: found.text };
+}
+
+function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel, userTmdbKey, extraKeys, trackNum, label, targetId, kitsuId, isPrefetch = false }) {
     translationCache[cacheKey] = { status: 'pending' };
     const dropIfNotDone = () => {
         const cur = translationCache[cacheKey];
         if (!cur || cur.status !== 'done') delete translationCache[cacheKey];
     };
+    const healKind = HEAL_KINDS[label] || null;
+    // فشل نهائي: بالمصحح (ضغطة مستخدم) نحتفظ برسالة الفشل لتنعرض مرة وحدة بالضغطة الجاية، وبعدها ينعاد التشغيل من الصفر
+    const failNow = result => {
+        const cur = translationCache[cacheKey];
+        if (cur && cur.status === 'done') return;
+        if (healKind && !isPrefetch && result && result.content) {
+            translationCache[cacheKey] = { status: 'failed', content: result.content, time: Date.now() };
+        } else {
+            delete translationCache[cacheKey];
+        }
+    };
     globalTranslationQueue.add(async () => {
         try {
+            let curUrl = targetUrl;
+            let curExtra = { ...(extraKeys || {}) };
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                const r = await handler(targetUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...(extraKeys || {}), round });
+                let r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
+                if (r.failed && healKind && round === 1) {
+                    const alt = await healFailedTrack({ label, kind: healKind, targetId, trackNum, failedUrl: curUrl, extraKeys: curExtra, cacheKey });
+                    if (alt) {
+                        curUrl = alt.url;
+                        curExtra = { ...curExtra, preloadedText: alt.text };
+                        r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
+                    }
+                }
                 if (r.failed) {
                     console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
-                    dropIfNotDone();
+                    failNow(r);
                     return;
                 }
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
@@ -1026,7 +1188,7 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
     }
 };
 
-const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) => {
+const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     const targetUrl = req.query.url;
     const targetId = req.query.id || '';
@@ -1045,6 +1207,18 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
         : [label, targetId, targetUrl].join('_') + srcCacheTag) + revTag;
     const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag + revTag;
     let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
+    if (cached && cached.status === 'failed') {
+        // فشل نهائي سابق (الأصلي + البحث عن بديل): نعرض رسالة الفشل مرة وحدة ثم ينعاد التشغيل من الصفر بالضغطة التالية
+        delete translationCache[primaryCacheKey];
+        delete translationCache[legacyUrlCacheKey];
+        const failedContent = cached.content;
+        const fresh = (Date.now() - cached.time) < FAILED_KEEP_MS;
+        cached = undefined;
+        if (fresh && !isPrefetch) {
+            console.log('[' + label + '] Track ' + trackNum + ': عرض رسالة الفشل (الأصلي + البحث عن بديل فشلوا)، الضغطة التالية تعيد المحاولة.');
+            return sendSub(res, mime, 'Trans-Failed-' + label + '.' + ext, failedContent);
+        }
+    }
     if (!cached) {
         let stored = await db.loadDoc('job', primaryCacheKey);
         if ((!stored || !stored.content) && isPinnedCorrector) {
@@ -1060,7 +1234,7 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
                     cacheKey: primaryCacheKey, handler, targetUrl,
                     userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
                     extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey, trackNum, srcLang },
-                    trackNum, label, targetId, kitsuId
+                    trackNum, label, targetId, kitsuId, isPrefetch
                 });
             }
         }
@@ -1088,11 +1262,18 @@ const streamRoute = (ext, label, mime, handler, waitBody) => async (req, res) =>
     if (isReady) {
         return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, cached.content);
     }
+    if (altWaitBody && cached && cached.status === 'pending' && cached.phase === 'alt') {
+        return sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, altWaitBody);
+    }
     sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, waitBody);
 };
 
 const SRT_WAIT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
 const ASS_WAIT = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.';
+
+// نسخة الانتظار أثناء البحث عن بديل (تظهر بالطلب التالي من Nuvio)
+const SRT_WAIT_ALT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳ | جاري البحث عن بديل\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
+const ASS_WAIT_ALT = ASS_WAIT.replace('⏳ انقر', '⏳ | جاري البحث عن بديل | انقر');
 
 app.all(['/stream-raw.srt', '/:config/stream-raw.srt'],
     rawStreamRoute('srt', 'text/plain; charset=utf-8'));
@@ -1103,9 +1284,9 @@ app.all(['/stream-ai.srt', '/:config/stream-ai.srt'],
 app.all(['/stream-ai.ass', '/:config/stream-ai.ass'],
     streamRoute('ass', 'ASS', 'text/x-ssa; charset=utf-8', handleTranslationAssDetailed, ASS_WAIT));
 app.all(['/stream-ara.srt', '/:config/stream-ara.srt'],
-    streamRoute('srt', 'ARA-SRT', 'text/plain; charset=utf-8', handleCorrectionSrt, SRT_WAIT));
+    streamRoute('srt', 'ARA-SRT', 'text/plain; charset=utf-8', handleCorrectionSrt, SRT_WAIT, SRT_WAIT_ALT));
 app.all(['/stream-ara.ass', '/:config/stream-ara.ass'],
-    streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT));
+    streamRoute('ass', 'ARA-ASS', 'text/x-ssa; charset=utf-8', handleCorrectionAss, ASS_WAIT, ASS_WAIT_ALT));
 
 const CHECK_GROUPS = [
     { key: 'ara-srt', title: 'مصحّح SRT', hint: '', needKeys: true },

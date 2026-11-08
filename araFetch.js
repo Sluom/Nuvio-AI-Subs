@@ -5,7 +5,7 @@ const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 
-module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl };
+module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub };
 
 const cleanPath = p => String(p || '').split('?')[0];
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
