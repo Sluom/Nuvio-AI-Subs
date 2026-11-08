@@ -86,9 +86,6 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 async function runNextEpisodePrefetch(info) {
     const { targetId, label, trackNum, rawConfig, kitsuId, kitsuEp, proto, host, port } = info;
     nextEpTimers.delete(targetId);
-    if (typeof info.onStable === 'function') {
-        try { await info.onStable(); } catch (e) { console.error('[تفضيل الرافع] تعذر حفظ التفضيل: ' + e.message); }
-    }
     let nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
 
