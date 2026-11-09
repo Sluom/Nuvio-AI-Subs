@@ -15,6 +15,7 @@ const {
 } = require('./prefetch');
 const db = require('./db');
 const trackPref = require('./trackPref');
+const notify = require('./notify');
 const { resolveCeeId } = require('./ceeMap');
 
 const app = express();
@@ -223,22 +224,43 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         }
     };
     globalTranslationQueue.add(async () => {
+        const t0 = Date.now();
+        let curUrl = targetUrl;
+        let curExtra = { ...(extraKeys || {}) };
+        let lastR = null;
+        let healTried = false;
+        let healed = false;
+        // ملخص التراك + إشعار تيليغرام (للمصحح فقط). يرجع فورا ولا يرمي خطأ أبدا.
+        const note = (kind, r, extra) => {
+            if (!healKind) return;
+            try {
+                notify.trackEvent({
+                    kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey,
+                    ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, rejected: r && r.rejected,
+                    healTried, healed, rounds: MAX_BACKGROUND_ROUNDS,
+                    loadDoc: k => db.loadDoc('job', k),
+                    ...(extra || {})
+                });
+            } catch { }
+        };
         try {
-            let curUrl = targetUrl;
-            let curExtra = { ...(extraKeys || {}) };
             for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
                 let r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
                 if (r.failed && healKind && round === 1) {
+                    healTried = true;
                     const alt = await healFailedTrack({ label, kind: healKind, targetId, trackNum, failedUrl: curUrl, extraKeys: curExtra, cacheKey });
                     if (alt) {
+                        healed = true;
                         curUrl = alt.url;
                         curExtra = { ...curExtra, preloadedText: alt.text };
                         r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
                     }
                 }
+                lastR = r;
                 if (r.failed) {
                     console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     failNow(r);
+                    note('failed', r);
                     return;
                 }
                 translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
@@ -247,14 +269,17 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                     const saved = await db.saveDoc('job', cacheKey, { content: r.content });
                     if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.');
                     if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
+                    note('done', r);
                     return;
                 }
                 console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + MAX_BACKGROUND_ROUNDS + '). النتيجة الحالية جاهزة للمستخدم.');
                 if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
             }
+            if (lastR && lastR.missing > 0) note('partial', lastR);
         } catch (e) {
             console.error('[Background Error - ' + label + '] Track ' + trackNum + ':', e.message);
             dropIfNotDone();
+            note('error', null, { error: e && e.message });
         }
     });
 }
