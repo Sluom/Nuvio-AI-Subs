@@ -878,7 +878,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   }
   
   console.log(`\u200F[المصحح كامل ⏱ الزمن الكلي الحقيقي] ${secsOf(Date.now() - tStart)} ثانية (الأسطر + مرحلة الأسماء)`);
-  return { texts: outTexts, missing };
+  return { texts: outTexts, missing, rejected };
 }
 
 const epInfoOf = id => {
@@ -910,7 +910,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
   console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
-  const { texts: finalCorrections, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts: finalCorrections, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -925,7 +925,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
     srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
     counter++;
   });
-  return { content: srtOutput, missing, total: cues.length, failed: false };
+  return { content: srtOutput, missing, total: cues.length, failed: false, rejected };
 }
 const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
 const ASS_RTL_MARKS = true;
@@ -1090,9 +1090,9 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
-  const { texts, missing } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
   if (isRealAss) {
-    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false };
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected };
   }
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -1100,7 +1100,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
     assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
   });
-  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false };
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false, rejected };
 }
 module.exports = {
   handleCorrectionSrt,
