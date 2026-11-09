@@ -77,9 +77,6 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
     if (existing) {
         if (existing.timer) clearTimeout(existing.timer);
         nextEpTimers.delete(targetId);
-        if (reason) {
-            console.log('[تجهيز تلقائي] تم إلغاء مؤقت ' + targetId + ' (' + reason + ')');
-        }
     }
 }
 
@@ -104,7 +101,7 @@ async function runNextEpisodePrefetch(info) {
 
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
     if (prefetchedNextSet.has(prefetchKey)) {
-        console.log('[تجهيز تلقائي] المسار ' + trackNum + ' (' + label + ') للحلقة القادمة ' + nextTargetId + ' مجهّز مسبقاً.');
+        console.log('[تجهيز] ' + nextTargetId + ' مجهّزة مسبقاً (' + label + ' مسار ' + trackNum + ')');
         return;
     }
 
@@ -116,7 +113,7 @@ async function runNextEpisodePrefetch(info) {
     const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '')
         + '/subtitles/' + mediaType + '/' + encodeURIComponent(nextTargetId).replace(/%3A/gi, ':') + '.json?prefetch=1';
 
-    console.log('[تجهيز تلقائي] استقرار 3 دقائق على ' + targetId + ' (' + label + ' مسار ' + trackNum + ') ⟵ بدء تجهيز الحلقة القادمة بالوضع العميق: ' + nextTargetId);
+    console.log('[تجهيز] 3 دقائق على ' + targetId + ' ⟵ أجهز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
 
     try {
         const r = await axios.get('http://127.0.0.1:' + serverPort + subsPath, {
@@ -164,8 +161,6 @@ async function runNextEpisodePrefetch(info) {
             timeout: 20000,
             validateStatus: () => true
         });
-
-        console.log('[تجهيز تلقائي] ✅ تم إرسال ' + label + ' مسار ' + trackNum + ' للحلقة ' + nextTargetId + ' إلى طابور التجهيز بالخلفية.');
     } catch (e) {
         console.error('[تجهيز تلقائي] خطأ أثناء تجهيز الحلقة القادمة ' + nextTargetId + ':', e.message);
     }
@@ -183,7 +178,7 @@ function scheduleNextEpisodePrefetch(info) {
     if (existing) {
         if (existing.timer) clearTimeout(existing.timer);
         if (existing.label !== label || String(existing.trackNum) !== String(trackNum)) {
-            console.log('[تجهيز تلقائي] تغيير المسار في ' + targetId + ' من (' + existing.label + ' مسار ' + existing.trackNum + ') إلى (' + label + ' مسار ' + trackNum + ') ⟵ إعادة ضبط المؤقت.');
+            console.log('[تجهيز] تغيّر المسار على ' + targetId + ': ' + existing.label + ' ' + existing.trackNum + ' ⟵ ' + label + ' ' + trackNum + ' (أُعيد المؤقت)');
         }
     }
 
@@ -192,7 +187,7 @@ function scheduleNextEpisodePrefetch(info) {
         entry.timer = setTimeout(() => {
             runNextEpisodePrefetch(entry).catch(() => {});
         }, NEXT_EP_DELAY_MS);
-        console.log('[تجهيز تلقائي] بدء مؤقت 3 دقائق لـ ' + targetId + ' (' + label + ' مسار ' + trackNum + ') لتجهيز ' + nextTargetId);
+        console.log('[تجهيز] بدأ مؤقت 3 دقائق على ' + targetId + ' ⟵ لتجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
     }
     nextEpTimers.set(targetId, entry);
 }
@@ -208,7 +203,7 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
         existing.timer = setTimeout(() => {
             runNextEpisodePrefetch(existing).catch(() => {});
         }, NEXT_EP_DELAY_MS);
-        console.log('[تجهيز تلقائي] اكتمل تجهيز ' + targetId + ' (' + label + ' مسار ' + trackNum + ') ⟵ بدء مؤقت 3 دقائق لتجهيز ' + nextTargetId);
+        console.log('[تجهيز] بدأ مؤقت 3 دقائق على ' + targetId + ' ⟵ لتجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
     }
 }
 
