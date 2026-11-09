@@ -20,6 +20,7 @@ let connectingPrimary = null;
 let connectingTracks = null;
 let retryAtPrimary = 0;
 let retryAtTracks = 0;
+let announcing = false;
 
 const docId = (ns, key) => crypto.createHash('sha1').update(`${CACHE_VERSION}|${ns}|${key}`).digest('hex');
 
@@ -61,7 +62,7 @@ async function getPrimaryDb() {
         await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
         await ensureTtlIndex(d, 'maps', 'updatedAt_1', ttlSeconds);
         primaryDb = d;
-        console.log(`[MongoDB] متصل بالقاعدة الأساسية (${MONGODB_DB}) | مدة الاحتفاظ ${TTL_DAYS} يوم | الكاش ${CACHE_VERSION}`);
+        if (!announcing) console.log(`[MongoDB] متصل ✅ أساسية ${TTL_DAYS} يوم`);
         return d;
       } catch (e) {
         retryAtPrimary = Date.now() + RETRY_AFTER_MS;
@@ -89,7 +90,7 @@ async function getTracksDb() {
         const ttlSeconds = TRACKS_TTL_DAYS * DAY_SECONDS;
         await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
         tracksDb = d;
-        console.log(`[MongoDB] متصل بقاعدة التراكات (${TRACKS_DB}) | مدة الاحتفاظ ${TRACKS_TTL_DAYS} يوم.`);
+        if (!announcing) console.log(`[MongoDB] متصل ✅ تراكات ${TRACKS_TTL_DAYS} يوم`);
         return d;
       } catch (e) {
         retryAtTracks = Date.now() + RETRY_AFTER_MS;
@@ -111,7 +112,17 @@ async function init() {
   if (!MONGODB_URI) console.log('[MongoDB] MONGODB_URI غير موجود للأساسية.');
   if (!MONGO_URI_TRACKS) console.log('[MongoDB] MONGO_URI_TRACKS غير موجود للتراكات.');
   
-  const [p, t] = await Promise.all([getPrimaryDb(), getTracksDb()]);
+  announcing = true;
+  let p = null, t = null;
+  try {
+    [p, t] = await Promise.all([getPrimaryDb(), getTracksDb()]);
+  } finally {
+    announcing = false;
+  }
+  const parts = [];
+  if (p) parts.push(`أساسية ${TTL_DAYS} يوم`);
+  if (t) parts.push(`تراكات ${TRACKS_TTL_DAYS} يوم`);
+  if (parts.length) console.log(`[MongoDB] متصل ✅ ${parts.join(' | ')}`);
   return !!(p || t);
 }
 
