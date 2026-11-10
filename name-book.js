@@ -333,19 +333,18 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   }
   const own = new Map(map);
   for (const k of KNOWN_ENTITIES) map.set(k, { kind: 'entity', ambig: false });
-  let memory = null, memStats = null;
+  let memory = null;
   if (useMem) {
     const ml = await memPromise;
     memory = unionMemory(memCacheGet(sid), ml.mem);
-    memStats = mergeSeriesMemory(map, memory, eid);
+    mergeSeriesMemory(map, memory, eid);
   }
   const book = makeBook(map);
   book.complete = okSlices === totalSlices;
-  book.stats = { total: totalSlices, ok: okSlices, secs: bookSecs };
-  console.log(`\u200F[قاموس الأسماء 📖] أسطر=${lines.length} | دفعات=${totalSlices} (كل ${SLICE}) | نجحت=${okSlices} | فشلت=${totalSlices - okSlices} | تعمل معاً=${Math.min(conc, totalSlices)} | الزمن=${bookSecs} ثانية | أسماء=${map.size}${votedClear ? ` | غامض أبطله التصويت=${votedClear}` : ''}${book.complete ? '' : ' | ⚠ القاموس ناقص ولن يُحفظ'}`);
-  if (memStats && memStats.eps) {
-    console.log(`\u200F[ذاكرة المسلسل 🧠] حلقات سابقة=${memStats.eps} | أسماء مدموجة=${memStats.added} | عادي صار غامض=${memStats.raised} | غامض صار عادي=${memStats.lowered}${memStats.eps < MEM_MIN_EPS ? ' | تحتاج حلقتين قبلها' : ''}`);
-  }
+  let realNames = 0;
+  for (const k of own.keys()) if (!KNOWN_SET.has(k)) realNames++;
+  book.stats = { total: totalSlices, ok: okSlices, secs: bookSecs, names: realNames, voted: votedClear, slice: SLICE };
+  if (!book.complete) console.log(`\u200F[قاموس الأسماء ⚠] القاموس ناقص (نجحت ${okSlices} من ${totalSlices} دفعة) ⟵ ولن يُحفظ`);
   if (useMem && book.complete && typeof store.save === 'function') {
     book.memoryDone = withSeriesLock(sid, async () => {
       try {
@@ -357,14 +356,11 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
           return;
         }
         await store.save(sid, upd);
-        console.log(`\u200F[ذاكرة المسلسل 💾] حُفظت الحلقة ${eid} | حلقات=${upd.order.length} | أسماء=${Object.keys(upd.names).length}`);
       } catch (e) {
         console.log(`\u200F[ذاكرة المسلسل ⚠] تعذر الحفظ: ${e && e.message}`);
       }
     });
   }
-  const bookDesc = describeBook(book);
-  if (bookDesc) console.log(bookDesc);
   return book;
 }
 const PRE_OK = /^(?:[وف][بلك]?|[بلك])$/;
