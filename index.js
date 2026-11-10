@@ -29,6 +29,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const translationCache = {};
 const pinnedCorrectorMemCache = new Map();
+require('./cacheclear').onDrop(k => { const c = translationCache[k]; if (c && c.status !== 'pending') delete translationCache[k]; });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -912,6 +913,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     res.setHeader('Content-Type', 'application/json');
     const configParam = req.params.config ? encodeURIComponent(req.params.config) : '';
     const addonCfg = parseConfig(req.params.config);
+    tgbot.noteContext(req);
     const isPrefetch = String(req.query.prefetch || '') === '1';
 
     let targetId = req.params.reqId.split('/')[0];
