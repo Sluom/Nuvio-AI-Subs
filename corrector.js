@@ -599,7 +599,8 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null,
   return done;
 }
 const fallbackModelOf = m => (String(m || 'gemini-3.1-flash-lite').trim() === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL);
-function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
+const notifyModel = ev => { try { require('./notify').modelEvent(ev); } catch (e) { /* لا شيء */ } };
+function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}) {
   const fbModel = fallbackModelOf(primaryModel);
   const ids = items.map(it => it.id);
   const isComplete = m => !!m && ids.every(id => m.get(id));
@@ -613,6 +614,7 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
       if (winner === 'fb') {
         priHook.cancelled = true;
         console.log(`\u200F[طلب احتياطي ✅] (${shortModel(fbModel)}) أنجز الدفعة (${items.length} سطر) قبل (${shortModel(primaryModel)}).`);
+        notifyModel({ ...ntf, kind: 'fallback-won', model: shortModel(fbModel), other: shortModel(primaryModel) });
       } else if (winner === 'pri') {
         fbHook.cancelled = true;
         if (fbStarted) console.log(`\u200F[طلب احتياطي] (${shortModel(primaryModel)}) فاز أولاً ⟵ ألغيت الاحتياطي.`);
@@ -633,6 +635,7 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
       if (++priHook.fails !== HEDGE_AFTER_FAILS || fbStarted || settled) return;
       fbStarted = true;
       console.log(`\u200F[طلب احتياطي 🏇] (${shortModel(primaryModel)}) اختنق ${HEDGE_AFTER_FAILS} مرات ⟵ شغّلت (${shortModel(fbModel)}) بالتوازي لهالدفعة (${items.length} سطر).`);
+      notifyModel({ ...ntf, kind: 'choke', model: shortModel(primaryModel), other: shortModel(fbModel), fails: HEDGE_AFTER_FAILS });
       correctItemsWithRecovery(items, keysArray, fbModel, ctx, fbHook)
         .catch(() => new Map())
         .then(m => { fbMap = m; check(); });
@@ -761,7 +764,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           const ctx0 = buildChunkContext(cues, chunk);
           const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
           const map = hedge
-            ? await hedgedCorrectItems(chunk, keysArray, activeModel, ctx)
+            ? await hedgedCorrectItems(chunk, keysArray, activeModel, ctx, opts.notifyCtx)
             : await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx);
           for (const it of chunk) {
             const text = map.get(it.id);
@@ -785,9 +788,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
     const fallbackModel = primaryClean === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL;
     console.log(`\u200F[إنقاذ تلقائي 🚑] بقى ${unprocessed.length} سطر باختناق (${shortModel(primaryClean)}) ⟵ أنتظر ${FALLBACK_WAIT_MS / 1000} ث وأحوّل إلى (${shortModel(fallbackModel)})`);
+    notifyModel({ ...opts.notifyCtx, kind: 'rescue', model: shortModel(primaryClean), other: shortModel(fallbackModel) });
     await delay(FALLBACK_WAIT_MS);
     await runBatchWithModel(unprocessed, fallbackModel);
     unprocessed = toDo.filter(it => results[it.id] == null);
+    if (unprocessed.length > 0) notifyModel({ ...opts.notifyCtx, kind: 'both-failed', model: shortModel(primaryClean), other: shortModel(fallbackModel) });
   }
   
   const missing = unprocessed.length;
@@ -916,7 +921,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(startLineOf('SRT', extraKeys, cues, keysArray));
-  const { texts: finalCorrections, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts: finalCorrections, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-SRT', trackNum: extraKeys.trackNum, targetId } });
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -1094,7 +1099,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   console.log(startLineOf('ASS', extraKeys, cues, keysArray) + (isRealAss ? '' : ' | المصدر SRT (حوّلته لـ ASS)'));
-  const { texts, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
+  const { texts, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-ASS', trackNum: extraKeys.trackNum, targetId } });
   if (isRealAss) {
     return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected };
   }
