@@ -16,6 +16,7 @@ const {
 const db = require('./db');
 const trackPref = require('./trackPref');
 const notify = require('./notify');
+const tgbot = require('./tgbot');
 const { resolveCeeId } = require('./ceeMap');
 
 const app = express();
@@ -1246,6 +1247,8 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
         cached = translationCache[primaryCacheKey];
     }
     const isReady = !!(cached && cached.status === 'done');
+    const adjDesc = (isPinnedCorrector && !isPrefetch) ? { label, targetId, trackNum, ext, tracksTag: TRACKS_TAG } : null;
+    if (adjDesc) tgbot.noteTrack(adjDesc);
     if (targetId && !isPrefetch) {
         const proto = req.headers['x-forwarded-proto'] || 'https';
         const host = req.headers['x-forwarded-host'] || req.headers.host;
@@ -1264,7 +1267,13 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
         });
     }
     if (isReady) {
-        return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, cached.content);
+        let body = cached.content;
+        if (adjDesc) {
+            const adj = await tgbot.adjustSub(adjDesc, body);
+            body = adj.content;
+            if (adj.touched) res.setHeader('Cache-Control', 'no-store');
+        }
+        return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, body);
     }
     if (altWaitBody && cached && cached.status === 'pending' && cached.phase === 'alt') {
         return sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, altWaitBody);
@@ -1452,6 +1461,7 @@ app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req
 app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
+    tgbot.start();
 });
 
 module.exports = app;
