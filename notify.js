@@ -209,57 +209,175 @@ function siteOfUrl(url) {
   return site + (pack ? ' ' + pack : '');
 }
 
+const LRI = '⁦';
+const PDI = '⁩';
+// سطر كامل يُقرأ من اليمين لليسار؛ الأجزاء اللاتينية (اسم، رقم، ASS) تُعزل حتى لا تنقلب
+const rtl = t => RLM + t;
+const latin = t => LRI + t + PDI;
+
+// الثواني بالعربي الصحيح: ثانية، ثانيتان، 3 ثوانٍ، 12 ثانية، دقيقة و12 ثانية
+function arSeconds(n) {
+  const x = Math.max(0, Math.round(Number(n) || 0));
+  const secWord = k => (k === 1 ? 'ثانية واحدة' : k === 2 ? 'ثانيتان' : k <= 10 ? k + ' ثوانٍ' : k + ' ثانية');
+  const minWord = k => (k === 1 ? 'دقيقة' : k === 2 ? 'دقيقتان' : k <= 10 ? k + ' دقائق' : k + ' دقيقة');
+  if (x === 0) return 'أقل من ثانية';
+  if (x < 60) return secWord(x);
+  const m = Math.floor(x / 60);
+  const sec = x % 60;
+  return minWord(m) + (sec ? ' و' + secWord(sec) : '');
+}
+
 async function report(ev) {
   let ep;
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
   if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
-  try {
-    const isMovie = /^tt\d+$/.test(String(ev.targetId || ''));
-    const title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series');
-    if (title) ep = { text: isMovie ? 'فيلم ' + title : title + ' ' + ep.text, alt: ep.alt };
-  } catch (e) { /* لا شيء */ }
 
-  const head = (KIND[ev.label] || ev.label) + ' تراك ' + ev.trackNum;
+  // اسم العمل (لا يرمي خطأ أبدا)
+  const idStr = String(ev.targetId || '');
+  const isMovie = /^tt\d+$/.test(idStr);
+  let title = null;
+  try { title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series'); } catch (e) { title = null; }
+  const ttMatch = /^(tt\d+)/.exec(idStr);
+  const workId = ttMatch ? ttMatch[1] : idStr;
+
+  const kindName = KIND[ev.label] || ev.label;
+  const head = kindName + ' تراك ' + ev.trackNum;
   const why = ev.isPrefetch ? 'تجهيز تلقائي للحلقة التالية' : 'بضغطة منك';
   const src = siteOfUrl(ev.url);
-  const secs = Math.max(0, Math.round((ev.ms || 0) / 1000)) + ' ثانية';
+  const secs = Math.max(0, Math.round((ev.ms || 0) / 1000));
   let line = '';
   let warn = false;
+  let badge = '✅';
+  let title1 = '';
+  let detail = [];
+
+  // رأس الرسالة بتيليغرام: "تراك 1 ASS" بترتيب يُقرأ صح من اليمين لليسار
+  const tgHead = 'تراك ' + ev.trackNum + ' ' + latin(kindName);
 
   if (ev.kind === 'done') {
-    line = head + ' | ' + ep.text + ' | ' + src + ' | ' + secs + ' | ' + (ev.total || 0) + ' سطر'
+    line = head + ' | ' + ep.text + ' | ' + src + ' | ' + secs + ' ثانية | ' + (ev.total || 0) + ' سطر'
       + (ev.rejected > 0 ? ' | ' + ev.rejected + ' مرفوض' : '')
       + (ev.healed ? ' | ملف بديل (الأصلي فشل)' : '')
       + ' | ' + why;
+    title1 = 'اكتمل: ' + tgHead;
+    detail = ['work', 'ep', 'src',
+      '📄 الأسطر: ' + (ev.total || 0) + (ev.rejected > 0 ? ' — مرفوض: ' + ev.rejected : ''),
+      '⏱ الوقت: ' + arSeconds(secs)];
+    if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
+    detail.push('🔔 ' + why);
   } else if (ev.kind === 'partial') {
-    warn = true;
+    warn = true; badge = '⚠️';
     line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
+    title1 = 'اكتمل جزئياً: ' + tgHead;
+    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', '🔔 ' + why];
   } else if (ev.kind === 'failed') {
-    warn = true;
+    warn = true; badge = '❌';
     line = 'فشل ' + head + ' | ' + ep.text + ' | ' + src + ' | الملف الأصلي لم يُحمَّل أو لم يُستخرج'
       + (ev.healTried ? ' (وجرّبت بديلا فلم أنجح)' : '')
       + ' | ستُعاد المحاولة عند الضغطة القادمة | ' + why;
+    title1 = 'فشل: ' + tgHead;
+    detail = ['src', 'work', 'ep',
+      '💬 الملف الأصلي لم يُحمَّل أو لم يُستخرج' + (ev.healTried ? ' (وجرّبت بديلاً فلم أنجح)' : ''),
+      '🔁 ستُعاد المحاولة عند الضغطة القادمة', '🔔 ' + why];
   } else {
-    warn = true;
-    line = 'خطأ غير متوقع في ' + head + ' | ' + ep.text + ' | ' + scrub(ev.error).slice(0, 150) + ' | ' + why;
+    warn = true; badge = '⚠️';
+    const msg = scrub(ev.error).slice(0, 150);
+    line = 'خطأ غير متوقع في ' + head + ' | ' + ep.text + ' | ' + msg + ' | ' + why;
+    title1 = 'خطأ غير متوقع: ' + tgHead;
+    detail = ['src', 'work', 'ep', '💬 ' + msg, '🔔 ' + why];
   }
 
   // تنبيه التكرار: نفس الحلقة ونفس التراك محفوظان أيضا تحت الاسم الآخر (الموسم/المطلق)
-  let dupLine = '';
+  let dupText = '';
   if (ev.kind === 'done' && ep.alt && typeof ev.loadDoc === 'function' && ev.cacheKey && ev.cacheKey.includes('_' + ev.targetId + '_track')) {
     try {
       const altKey = ev.cacheKey.replace('_' + ev.targetId + '_track', '_' + ep.alt.id + '_track');
       const other = await ev.loadDoc(altKey);
       if (other && other.content) {
-        warn = true;
-        dupLine = 'نفس الحلقة محفوظة أيضا باسم (' + ep.alt.text + ') لنفس التراك ⟵ صُحّحت مرتين بسبب اختلاف الاسم.';
+        warn = true; badge = '⚠️';
+        dupText = 'نفس الحلقة محفوظة أيضا باسم (' + ep.alt.text + ') لنفس التراك ⟵ صُحّحت مرتين بسبب اختلاف الاسم.';
       }
     } catch (e) { /* لا شيء */ }
   }
 
-  const text = RLM + (warn ? '⚠️ ' : '✅ ') + line + (dupLine ? '\n' + RLM + '⚠️ ' + dupLine : '');
-  console.log('[ملخص التراك] ' + text.replace(/‏/g, ''));
-  enqueue(text);
+  // سطر اللوغ (مضغوط كما كان) — بدون رموز اتجاه
+  const epLog = title ? (isMovie ? 'فيلم ' + title : title + ' ' + ep.text) : ep.text;
+  console.log('[ملخص التراك] ' + (warn ? '⚠️ ' : '✅ ') + line.replace(ep.text, epLog) + (dupText ? '\n⚠️ ' + dupText : ''));
+
+  // رسالة تيليغرام: كل معلومة بسطر
+  const workLine = '🎬 ' + latin((title ? title + ' (' + workId + ')' : workId));
+  const epLine = isMovie ? null : '📺 ' + ep.text;
+  const lines = [rtl(badge + ' ' + title1)];
+  for (const d of detail) {
+    if (d === 'src') {
+      lines.push(rtl('📦 المصدر: ' + latin(src)));
+    } else if (d === 'work') {
+      lines.push(rtl(workLine));
+    } else if (d === 'ep') {
+      if (epLine) lines.push(rtl(epLine));
+    } else {
+      lines.push(rtl(d));
+    }
+  }
+  if (dupText) {
+    lines.push('');
+    lines.push(rtl('⚠️ نفس الحلقة محفوظة باسمين'));
+    lines.push(rtl('📺 ' + ep.text));
+    lines.push(rtl('💬 صُحّحت مرتين بسبب اختلاف الاسم'));
+  }
+  enqueue(lines.join('\n'));
+}
+
+// أحداث الموديل (اختناق، تشغيل الاحتياطي...). للتيليغرام فقط، ولا يرمي خطأ أبدا.
+const modelSeen = new Map();
+const MODEL_EVENT_GAP_MS = 5 * 60 * 1000;
+async function modelReport(ev) {
+  if (!ENABLED) return;
+  const kind = String(ev && ev.kind || '');
+  const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
+  const now = Date.now();
+  const last = modelSeen.get(key);
+  if (last && now - last < MODEL_EVENT_GAP_MS) return;
+  modelSeen.set(key, now);
+  if (modelSeen.size > 200) modelSeen.clear();
+
+  let ep = null;
+  try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
+  const idStr = String(ev.targetId || '');
+  const isMovie = /^tt\d+$/.test(idStr);
+  let title = null;
+  try { title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series'); } catch (e) { title = null; }
+  const ttMatch = /^(tt\d+)/.exec(idStr);
+  const workId = ttMatch ? ttMatch[1] : idStr;
+  const m1 = ev.model ? latin(String(ev.model)) : '؟';
+  const m2 = ev.other ? latin(String(ev.other)) : '؟';
+  const trk = (KIND[ev.label] || ev.label || '') ? 'تراك ' + (ev.trackNum || '؟') + ' ' + latin(KIND[ev.label] || ev.label) : '';
+
+  const out = [];
+  if (kind === 'choke') {
+    out.push('⚠️ اختناق الموديل');
+    const f = ev.fails || 2;
+    out.push('🧠 الموديل ' + m1 + ' فشل ' + (f === 2 ? 'مرتين' : f <= 10 ? f + ' مرات' : f + ' مرة') + ' على نفس الدفعة');
+  } else if (kind === 'fallback-won') {
+    out.push('✅ الاحتياطي ' + m1 + ' سبق وأنجز الدفعة');
+  } else if (kind === 'both-failed') {
+    out.push('❌ الموديلان ' + m1 + ' و' + m2 + ' فشلا');
+  } else if (kind === 'rescue') {
+    out.push('🚑 إنقاذ تلقائي');
+    out.push('🧠 حوّلت الباقي من الموديل ' + m1 + ' إلى ' + m2);
+  } else {
+    return;
+  }
+  out.push('🎬 ' + latin(title ? title + ' (' + workId + ')' : workId));
+  if (!isMovie && ep) out.push('📺 ' + ep.text + (trk ? ' — ' + trk : ''));
+  else if (trk) out.push('📺 ' + trk);
+  if (kind === 'choke') out.push('↪️ شغّلت الموديل ' + m2 + ' جنبه، والأسرع يفوز');
+  if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
+  enqueue(out.map(rtl).join('\n'));
+}
+
+function modelEvent(ev) {
+  try { modelReport(ev || {}).catch(() => {}); } catch (e) { /* لا شيء */ }
 }
 
 // الواجهة الوحيدة: ترجع فورا ولا ترمي خطأ أبدا
@@ -271,10 +389,10 @@ function trackEvent(ev) {
 
 if (ENABLED) {
   console.log('[إشعار] تيليغرام مفعّل ⟵ يصلك ملخص كل تراك يُصحَّح وتنبيهات المشاكل.');
-  const t = setTimeout(() => enqueue(RLM + '🟢 Nuvio AI اشتغل (أو أُعيد تشغيله). إشعارات التصحيح مفعّلة.'), 8000);
+  const t = setTimeout(() => enqueue(rtl('🟢 ' + latin('Nuvio AI') + ' اشتغل') + '\n' + rtl('🔔 إشعارات التصحيح مفعّلة')), 8000);
   if (t && t.unref) t.unref();
 } else {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf };
+module.exports = { trackEvent, modelEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds };
