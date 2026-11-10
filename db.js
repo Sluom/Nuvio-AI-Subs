@@ -187,4 +187,28 @@ async function saveMap(ns, key, entries) {
   }
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap };
+async function deleteDoc(ns, key) {
+  const d = await getTargetDb(ns);
+  if (!d) return -1;
+  try {
+    const r = await d.collection('docs').deleteOne({ _id: docId(ns, key) });
+    return (r && r.deletedCount) || 0;
+  } catch (e) {
+    console.log(`[MongoDB] فشل الحذف (${ns}): ${e.message}`);
+    return -1;
+  }
+}
+
+async function deleteMap(ns, key) {
+  const d = await getPrimaryDb();
+  if (!d) return -1;
+  try {
+    const r = await d.collection('maps').deleteOne({ _id: docId(ns, key) });
+    return (r && r.deletedCount) || 0;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حذف الخريطة (${ns}): ${e.message}`);
+    return -1;
+  }
+}
+
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap };
