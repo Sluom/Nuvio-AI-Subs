@@ -186,7 +186,7 @@ async function healFailedTrack({ label, kind, targetId, trackNum, failedUrl, ext
     const slot = parseInt(trackNum, 10);
     const tag = '[إصلاح تراك] ' + label + ' Track ' + trackNum;
     translationCache[cacheKey] = { status: 'pending', phase: 'alt' };
-    console.log(tag + ': الملف الأصلي فشل ⟵ أبحث عن بديل لنفس الحلقة (أقصى ' + Math.round(ALT_SEARCH_MS / 1000) + ' ث).');
+    console.log(tag + ': الأصلي فشل ⟵ أبحث عن بديل (' + Math.round(ALT_SEARCH_MS / 1000) + ' ث)');
     let found = null;
     try {
         found = await findAlternativeSource({ kind, targetId, trackNum, failedUrl, extraKeys });
@@ -196,13 +196,13 @@ async function healFailedTrack({ label, kind, targetId, trackNum, failedUrl, ext
     translationCache[cacheKey] = { status: 'pending' };
     const secs = found ? (found.ms / 1000).toFixed(1) : '?';
     if (!found || !found.item) {
-        console.log(tag + ': ما لقيت بديل شغّال خلال ' + secs + ' ث (جرّبت ' + (found ? found.tried : 0) + (found && found.reason === 'pool' ? ' | القائمة ما انجلبت بالوقت' : '') + ').');
+        console.log(tag + ': ما لقيت بديل (' + secs + ' ث، جرّبت ' + (found ? found.tried : 0) + (found && found.reason === 'pool' ? ' | القائمة تأخرت' : '') + ')');
         return null;
     }
     const pinned = await repinFailedSlot(targetId, kind, slot, found.item).catch(() => false);
     const rawKey = (kind === 'ass' ? 'ass_' : '') + targetId + '_track' + slot + TRACKS_TAG;
     try { await db.saveDoc('rawsrt', rawKey, { text: found.text }); } catch { }
-    console.log(tag + ': لقيت بديل بعد ' + secs + ' ث (جرّبت ' + found.tried + ') ⟵ ' + getSourceLabel(found.item._site || found.item._source) + ' | ' + trackPref.nameOf(found.item) + (pinned ? ' | ثبّتُه مكان التراك' : ' | ما قدرت أثبّته بالقائمة'));
+    console.log(tag + ': لقيت بديل ✅ (' + secs + ' ث، جرّبت ' + found.tried + ') ⟵ ' + getSourceLabel(found.item._site || found.item._source) + ' | ' + trackPref.nameOf(found.item) + (pinned ? ' | ثبّتُه' : ' | ما قدرت أثبّته'));
     return { url: found.item.url, text: found.text };
 }
 
@@ -258,7 +258,6 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 }
                 lastR = r;
                 if (r.failed) {
-                    console.error('[' + label + '] Track ' + trackNum + ': فشل تحميل/استخراج الملف الأصلي. ستُعاد المحاولة عند الضغطة القادمة.');
                     failNow(r);
                     note('failed', r);
                     return;
@@ -267,12 +266,12 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                 activatePendingNextEpTimer(targetId, label, trackNum);
                 if (r.missing === 0) {
                     const saved = await db.saveDoc('job', cacheKey, { content: r.content });
-                    if (saved) console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': حُفظت النتيجة الكاملة في التخزين الدائم.');
+                    if (saved) console.log('💾 [MongoDB] ' + label + ' Track ' + trackNum + ': تم حفظ النتيجة دائماً في mongo');
                     if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
                     note('done', r);
                     return;
                 }
-                console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + MAX_BACKGROUND_ROUNDS + '). النتيجة الحالية جاهزة للمستخدم.');
+                console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + MAX_BACKGROUND_ROUNDS + ')');
                 if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
             }
             if (lastR && lastR.missing > 0) note('partial', lastR);
@@ -391,7 +390,7 @@ async function mapKitsuToImdb(targetId) {
     const kitsuId = parts[1];
     const kitsuEp = parseInt(parts[2], 10);
     if (!kitsuId || isNaN(kitsuEp)) return null;
-    console.log('[Anime Mapper] Searching mapping for Kitsu ID: ' + kitsuId + ', Ep: ' + kitsuEp);
+    console.log('[أنمي] أبحث عن ربط ' + targetId);
     const mappers = [
         ['ARM', () => mapKitsuViaArm(kitsuId, kitsuEp)],
         ['Kitsu addon', () => mapKitsuViaKitsuAddon(targetId, kitsuId, kitsuEp)]
@@ -400,7 +399,7 @@ async function mapKitsuToImdb(targetId) {
         try {
             const mapped = await fn();
             if (mapped) {
-                console.log('[Anime Mapper] ' + name + ' mapped ' + targetId + ' -> ' + mapped);
+                notify.titleOf(mapped, 'series').then(t => console.log('[أنمي] ' + name + ': ' + targetId + ' ⟵ ' + mapped + (t ? ' (' + t + ')' : ''))).catch(() => {});
                 return mapped;
             }
             console.log('[Anime Mapper] ' + name + ' returned no IMDb match for ' + targetId);
@@ -812,6 +811,27 @@ const assExtRe = /\.(ass|ssa)$/i;
 const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
 
+function logRequestLine(origId, finalId, finalType, isPrefetch) {
+    const bg = isPrefetch ? ' (خلفية)' : '';
+    const fmtEp = (id, short) => {
+        const m = /^tt\d+:(\d+):(\d+)$/.exec(id);
+        if (!m) return id;
+        return (short && m[1] === '1') ? 'الحلقة ' + m[2] : 'الموسم ' + m[1] + ' الحلقة ' + m[2];
+    };
+    const build = title => {
+        const t = (title || (/^tt\d+/.exec(finalId) || [''])[0]) + ' — ';
+        if (origId.startsWith('kitsu')) {
+            return /^tt/.test(finalId) ? '[أنمي] ' + t + origId + ' ⟵ ' + finalId + bg : '[أنمي] ' + origId + ' ⟵ بدون ربط' + bg;
+        }
+        if (origId.startsWith('cee:')) return '[طلب] ' + t + origId + ' ⟵ ' + finalId + bg;
+        if (origId !== finalId) return '[طلب] ' + t + fmtEp(origId) + ' ⟵ محفوظة باسم ' + fmtEp(finalId, true) + bg;
+        if (/^tt\d+$/.test(finalId)) return '[طلب] ' + (title || finalId) + ' (فيلم)' + bg;
+        return '[طلب] ' + t + fmtEp(finalId) + bg;
+    };
+    if (!/^tt\d+/.test(finalId)) { console.log(build(null)); return; }
+    notify.titleOf(finalId, finalType).then(t => console.log(build(t))).catch(() => console.log(build(null)));
+}
+
 function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched }) {
     const ready = {}, corr = {}, foreign = {};
     const add = (stats, site, isAss, n = 1) => {
@@ -828,11 +848,23 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
     assOnly.forEach(s => add(foreign, s._source === 'os_legacy' ? 'os_legacy' : 'opensubtitles', true));
     subdlSubs.forEach(s => add(foreign, 'subdl', isAssSub(s)));
     subsourceSubs.forEach(s => add(foreign, 'subsource', isAssSub(s)));
-    const fmt = (st, k) => 'SRT=' + (st[k] ? st[k].srt : 0) + ' ASS=' + (st[k] ? st[k].ass : 0);
-    SITE_ORDER.forEach(k => {
-        const foreignTxt = (k === 'opensubtitles.com' || (!extFetched && (k === 'subdl' || k === 'subsource'))) ? '-' : fmt(foreign, k);
-        console.log('[جلب] ' + k + ' | جاهز ' + fmt(ready, k) + ' | مصحح ' + fmt(corr, k) + ' | أجنبي ' + foreignTxt);
-    });
+    const part = (st, k) => {
+        const o = st[k];
+        if (!o || (!o.srt && !o.ass)) return '';
+        const bits = [];
+        if (o.srt) bits.push(o.srt + ' SRT');
+        if (o.ass) bits.push(o.ass + ' ASS');
+        return k + ' ' + bits.join(' + ');
+    };
+    const group = st => SITE_ORDER.map(k => part(st, k)).filter(Boolean).join('، ');
+    const foreignTotal = SITE_ORDER.reduce((n, k) => n + (foreign[k] ? foreign[k].srt + foreign[k].ass : 0), 0);
+    const groups = [];
+    const corrTxt = group(corr);
+    const readyTxt = group(ready);
+    if (corrTxt) groups.push('مصحح: ' + corrTxt);
+    if (readyTxt) groups.push('جاهز: ' + readyTxt);
+    if (foreignTotal) groups.push('أجنبي: ' + foreignTotal);
+    console.log('[جلب 📥] ' + (groups.length ? groups.join(' | ') : 'ما لقيت شي'));
 }
 
 const rawPersistRunning = new Set();
@@ -864,7 +896,6 @@ async function persistRawTracks(targetId, list, subsourceKey, kind = 'srt') {
                     continue;
                 }
                 const ok = await db.saveDoc('rawsrt', rawKey, { text: String(text) });
-                if (ok) console.log(tag + ' Track ' + n + ' انحفظ بالـ db (' + getSourceLabel(item._site || item._source) + ')');
             } catch (e) {
                 console.log(tag + ' Track ' + n + ' ما انحفظ: ' + e.message);
             }
@@ -887,7 +918,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     targetId = targetId.replace(/[.\s]+$/, '');
     const baseUrl = getBaseUrl(req);
     try {
-        console.log('[Request] subtitles type=' + req.params.type + ' id=' + targetId + (isPrefetch ? ' (prefetch)' : ''));
         let subtitlesData = [];
         let finalTargetId = targetId;
         let finalType = req.params.type;
@@ -902,7 +932,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 finalType = ceeInfo.type;
                 console.log('[CEE] ' + targetId + ' -> ' + finalTargetId + (ceeInfo.title ? ' (' + ceeInfo.title + ')' : ''));
             } else {
-                console.log('[CEE] ' + targetId + ': ما انحل لرقم IMDb (' + (ceeInfo.reason || 'no-imdb') + ')' + (ceeInfo.title ? ' | ' + ceeInfo.title + ' ' + (ceeInfo.year || '') : ''));
+                console.log('[CEE] ' + targetId + ' ما انحل (' + (ceeInfo.reason || 'no-imdb') + ')' + (ceeInfo.title ? ' | ' + ceeInfo.title + ' ' + (ceeInfo.year || '') : ''));
                 return res.json({ subtitles: [] });
             }
         }
@@ -913,15 +943,11 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             if (mapped) {
                 finalTargetId = mapped;
                 finalType = 'series';
-                console.log('[Anime Mapper] Successfully mapped! ' + targetId + ' -> ' + finalTargetId);
-            } else {
-                console.log('[Anime Mapper] No mapping found for ' + targetId + ', using it as-is.');
             }
         }
         if (!originalKitsuId && /^tt\d+:\d+:\d+$/.test(finalTargetId)) {
             const alt = await resolveAbsoluteTtId(finalTargetId);
             if (alt) {
-                console.log('[TT Remap] Using absolute numbering: ' + finalTargetId + ' -> ' + alt);
                 finalTargetId = alt;
                 finalType = 'series';
             }
@@ -939,7 +965,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
         const osUrl = 'https://opensubtitles-v3.strem.io/subtitles/' + finalType + '/' + finalTargetId + '.json';
-        console.log('[Fetch] بدء الجلب المتوازي الشامل (الجاهز + المصحح + AI)' + (isPrefetch ? ' [وضع الخلفية العميق]' : '') + ' للعمل: ' + finalTargetId);
+        logRequestLine(targetId, finalTargetId, finalType, isPrefetch);
         const sharedOsPromise = axios.get(osUrl, { timeout: isPrefetch ? 6500 : 3800 })
             .then(res => (res && res.data && Array.isArray(res.data.subtitles)) ? res.data.subtitles : [])
             .catch(e => {
@@ -1096,7 +1122,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
         const hasArabic = !SHOW_AI_ALWAYS && ((arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0);
-        if (hasArabic) console.log('[AI] وُجدت ترجمة عربية للعمل ' + finalTargetId + ' ← تم إخفاء روابط ترجمة AI.');
         if (!hasArabic && srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
@@ -1207,7 +1232,7 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
         if (!translationCache[primaryCacheKey]) {
             if (stored && stored.content) {
                 translationCache[primaryCacheKey] = { status: 'done', content: stored.content, complete: true };
-                console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': الترجمة جاهزة من التخزين الدائم.');
+                console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': جاهز من mongo');
             } else {
                 const cfg = parseConfig(req.params.config);
                 startTranslationJob({
