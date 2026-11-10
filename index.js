@@ -1269,13 +1269,7 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
         });
     }
     if (isReady) {
-        let body = cached.content;
-        if (adjDesc) {
-            const adj = await tgbot.adjustSub(adjDesc, body);
-            body = adj.content;
-            if (adj.touched) res.setHeader('Cache-Control', 'no-store');
-        }
-        return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, body);
+        return sendSub(res, mime, 'Trans-Track' + trackNum + '-' + label + '.' + ext, cached.content);
     }
     if (altWaitBody && cached && cached.status === 'pending' && cached.phase === 'alt') {
         return sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, altWaitBody);
