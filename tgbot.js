@@ -7,6 +7,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./db');
 const adjust = require('./adjust');
+const cacheclear = require('./cacheclear');
+const tgmanual = require('./tgmanual');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 
@@ -164,6 +166,7 @@ function keyboard(h, s, ext) {
     rows.push([b('نزّل ↓', 'lo'), b(midPct(s.up), 'ru'), b('ارفع ↑', 'hi')]);
   }
   rows.push([b(ext === 'ass' ? 'إعادة ضبط الكل' : 'إعادة ضبط', 'ra')]);
+  rows.push([b('🗑 امسح آخر حلقة', 'cl')]);
   return { inline_keyboard: rows };
 }
 
@@ -206,9 +209,58 @@ async function sendPanel(chatId) {
   await tg('sendMessage', { chat_id: chatId, text: panelText(head, s, d.ext), reply_markup: keyboard(h, s, d.ext), disable_web_page_preview: true });
 }
 
+async function askClear(chatId, d, head) {
+  const h = hashOf(d.key);
+  panels.delete(h);
+  panels.set(h, { d, head });
+  while (panels.size > MAX_PANELS) panels.delete(panels.keys().next().value);
+  const text = [rtl('🗑 مسح آخر حلقة'), ...head.slice(0, 2),
+    rtl('راح أمسح كل تراكاتها (SRT وASS) من الذاكرة، وتنترجم من جديد بالضغطة الجاية.'),
+    rtl('الملف الأصلي المحفوظ يبقى. متأكد؟')].join('\n');
+  const b = (t, op) => ({ text: t, callback_data: op + ':' + h });
+  await tg('sendMessage', { chat_id: chatId, text, reply_markup: { inline_keyboard: [[b('✅ نعم، امسح', 'cy'), b('إلغاء', 'cn')]] }, disable_web_page_preview: true });
+}
+
+async function sendAskClear(chatId) {
+  const d = await loadLast();
+  if (!d) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('ما في حلقة شغّلتها بعد حتى أمسحها.') });
+    return;
+  }
+  await askClear(chatId, d, await headOf(d));
+}
+
+async function onClearCallback(cq, op, h, panel) {
+  const msg = cq.message;
+  const edit = text => (msg && msg.chat && msg.message_id)
+    ? tg('editMessageText', { chat_id: msg.chat.id, message_id: msg.message_id, text, disable_web_page_preview: true }).catch(() => {})
+    : Promise.resolve();
+  if (op === 'cl') {
+    await tg('answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+    await askClear(msg.chat.id, panel.d, panel.head);
+    return;
+  }
+  if (op === 'cn') {
+    await tg('answerCallbackQuery', { callback_query_id: cq.id, text: 'تم الإلغاء' }).catch(() => {});
+    await edit(rtl('تم الإلغاء، ما انمسح شي.'));
+    return;
+  }
+  panels.delete(h);
+  await tg('answerCallbackQuery', { callback_query_id: cq.id, text: 'جاري المسح...' }).catch(() => {});
+  const r = await cacheclear.clearEpisode(panel.d.targetId);
+  console.log('[بوت التحكم] مسح الحلقة ' + r.ids.join(' + ') + ': ' + r.tracks + ' تراك، ' + r.lines + ' كاش أسطر' + (r.failed ? ' | ' + r.failed + ' خطوة فشلت' : ''));
+  const out = [rtl('🗑 تم مسح الحلقة'), ...panel.head.slice(0, 2),
+    rtl('🎞 تراكات انمسحت: ' + r.tracks),
+    rtl('📄 كاش أسطر انمسح: ' + r.lines)];
+  if (r.failed) out.push(rtl('⚠️ ' + r.failed + ' خطوة ما انمسحت (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.'));
+  else out.push(rtl('شغّل الحلقة من Nuvio وتنترجم من جديد.'));
+  await edit(out.join('\n'));
+}
+
 async function onCallback(cq) {
   const m = /^([a-z]{2}):([0-9a-f]{8})$/.exec(String(cq.data || ''));
   const panel = m && panels.get(m[2]);
+  if (m && panel && (m[1] === 'cl' || m[1] === 'cy' || m[1] === 'cn')) return onClearCallback(cq, m[1], m[2], panel);
   if (!m || !panel || !OPS[m[1]]) {
     await tg('answerCallbackQuery', { callback_query_id: cq.id, text: 'انتهت صلاحية هذي اللوحة، ابعث /panel' }).catch(() => {});
     return;
@@ -237,6 +289,7 @@ async function onCallback(cq) {
   }
 }
 
+const isClearCmd = t => /^\/clear(@\w+)?$/i.test(t) || /^(امسح|مسح) (آخر|اخر) حلقة$/.test(t);
 const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' || t === 'لوحة التحكم' || /^panel$/i.test(t);
 
 async function handleUpdate(u) {
@@ -245,9 +298,13 @@ async function handleUpdate(u) {
     const msg = cq ? cq.message : (u && u.message);
     const chatId = msg && msg.chat && msg.chat.id;
     if (chatId == null || String(chatId) !== TG_CHAT) return;
+    if (cq && /^go:/.test(String(cq.data || ''))) return await tgmanual.onCallback(cq, tg);
     if (cq) return await onCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
-    if (isPanelCmd(text)) await sendPanel(chatId);
+    const rq = tgmanual.parse(text);
+    if (rq) await tgmanual.onRequest(chatId, rq, tg);
+    else if (isClearCmd(text)) await sendAskClear(chatId);
+    else if (isPanelCmd(text)) await sendPanel(chatId);
   } catch (e) {
     logErr('خطأ بمعالجة أمر', e);
   }
@@ -259,7 +316,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'panel', description: 'لوحة تحكم الترجمة (توقيت، حجم، ارتفاع)' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'panel', description: 'لوحة تحكم الترجمة (توقيت، حجم، ارتفاع)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
@@ -299,4 +356,4 @@ function start() {
 
 function stop() { stopped = true; }
 
-module.exports = { start, stop, noteTrack, adjustSub, enabled: ENABLED, _t: { handleUpdate, keyOf, hashOf, mem, panels, getSettings, sendPanel } };
+module.exports = { start, stop, noteTrack, adjustSub, noteContext: tgmanual.noteContext, enabled: ENABLED, _t: { handleUpdate, keyOf, hashOf, mem, panels, getSettings, sendPanel } };
