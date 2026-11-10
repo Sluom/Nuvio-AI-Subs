@@ -18,6 +18,7 @@ const KIND = { 'ARA-ASS': 'ASS', 'ARA-SRT': 'SRT' };
 const queue = [];
 const recentTexts = new Map();
 const metaCache = new Map();
+const nameCache = new Map();
 let pumping = false;
 let lastSentAt = 0;
 let lastErrLogAt = 0;
@@ -93,6 +94,7 @@ async function getSeasonSizes(imdbId) {
   try {
     const res = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', { timeout: 4000 });
     const videos = (res.data && res.data.meta && Array.isArray(res.data.meta.videos)) ? res.data.meta.videos : [];
+    rememberName('series:' + imdbId, res.data && res.data.meta && res.data.meta.name);
     const m = new Map();
     for (const v of videos) {
       const s = parseInt(v.season, 10);
@@ -110,6 +112,34 @@ async function getSeasonSizes(imdbId) {
     metaCache.set(imdbId, { sizes, at: Date.now() });
   }
   return sizes;
+}
+
+function rememberName(key, name) {
+  const n = String(name || '').trim();
+  if (!n) return;
+  if (nameCache.size >= CINEMETA_MAX) {
+    const oldest = nameCache.keys().next().value;
+    if (oldest) nameCache.delete(oldest);
+  }
+  nameCache.set(key, { name: n, at: Date.now() });
+}
+
+// اسم العمل (مسلسل أو فيلم) من Cinemeta. لا يرمي خطأ أبدا؛ يرجع null إن لم يوجد
+async function titleOf(id, type) {
+  try {
+    const m = /^(tt\d+)/.exec(String(id || ''));
+    if (!m) return null;
+    const kind = type === 'movie' ? 'movie' : 'series';
+    const key = kind + ':' + m[1];
+    const hit = nameCache.get(key);
+    if (hit && Date.now() - hit.at < CINEMETA_TTL_MS) return hit.name;
+    const res = await axios.get('https://v3-cinemeta.strem.io/meta/' + kind + '/' + m[1] + '.json', { timeout: 2500 });
+    const name = res && res.data && res.data.meta && res.data.meta.name;
+    rememberName(key, name);
+    return name ? String(name).trim() : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // وصف الحلقة بكلام مقروء + الاسم البديل لنفس الحلقة (ترقيم المواسم <-> الترقيم المطلق) إن أمكن
@@ -183,6 +213,11 @@ async function report(ev) {
   let ep;
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
   if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
+  try {
+    const isMovie = /^tt\d+$/.test(String(ev.targetId || ''));
+    const title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series');
+    if (title) ep = { text: isMovie ? 'فيلم ' + title : title + ' ' + ep.text, alt: ep.alt };
+  } catch (e) { /* لا شيء */ }
 
   const head = (KIND[ev.label] || ev.label) + ' تراك ' + ev.trackNum;
   const why = ev.isPrefetch ? 'تجهيز تلقائي للحلقة التالية' : 'بضغطة منك';
@@ -242,4 +277,4 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, enabled: ENABLED, describeEpisode, siteOfUrl };
+module.exports = { trackEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf };
