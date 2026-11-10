@@ -88,10 +88,6 @@ async function fetchShow(key) {
     const show = buildShow(videos);
     if (!show.seq.length) throw new Error('aiometadata لم يرجع حلقات عادية');
     show.imdb = String(body.meta._imdbId || body.meta.imdb_id || '');
-    const withFlags = show.seq.some(x => x.filler || x.mixed);
-    console.log('[فلر] ' + key + ': قرأت ' + show.seq.length + ' حلقة من aiometadata ('
-        + show.seq.filter(x => x.filler).length + ' حشو، ' + show.seq.filter(x => x.mixed).length + ' مختلطة'
-        + (withFlags ? '' : ' — لا توجد أي علامة حشو لهذا العمل') + ') خلال ' + (Date.now() - t0) + ' ms');
     return show;
 }
 
