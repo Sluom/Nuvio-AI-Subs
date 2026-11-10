@@ -615,7 +615,7 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
         console.log(`\u200F[طلب احتياطي ✅] (${shortModel(fbModel)}) أنجز الدفعة (${items.length} سطر) قبل (${shortModel(primaryModel)}).`);
       } else if (winner === 'pri') {
         fbHook.cancelled = true;
-        if (fbStarted) console.log(`\u200F[طلب احتياطي] (${shortModel(primaryModel)}) نجح أولاً، ألغيت الاحتياطي.`);
+        if (fbStarted) console.log(`\u200F[طلب احتياطي] (${shortModel(primaryModel)}) فاز أولاً ⟵ ألغيت الاحتياطي.`);
       }
       resolve(map);
     };
@@ -632,7 +632,7 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
     priHook.onFail = () => {
       if (++priHook.fails !== HEDGE_AFTER_FAILS || fbStarted || settled) return;
       fbStarted = true;
-      console.log(`\u200F[طلب احتياطي 🏇] (${shortModel(primaryModel)}) فشل ${HEDGE_AFTER_FAILS} مرات ⟵ أطلق (${shortModel(fbModel)}) بالتوازي لنفس الدفعة (${items.length} سطر).`);
+      console.log(`\u200F[طلب احتياطي 🏇] (${shortModel(primaryModel)}) اختنق ${HEDGE_AFTER_FAILS} مرات ⟵ شغّلت (${shortModel(fbModel)}) بالتوازي لهالدفعة (${items.length} سطر).`);
       correctItemsWithRecovery(items, keysArray, fbModel, ctx, fbHook)
         .catch(() => new Map())
         .then(m => { fbMap = m; check(); });
@@ -644,6 +644,9 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx) {
 }
 const NAMES_PARALLEL = process.env.NAMES_PARALLEL !== '0';
 const secsOf = ms => (ms / 1000).toFixed(1);
+const namesCountOf = book => { try { const m = /\] (\d+):/.exec(describeBook(book) || ''); return m ? Number(m[1]) : null; } catch (e) { return null; } };
+const fileDurOf = cues => { try { const m = /(\d+):(\d{1,2}):(\d{1,2})/.exec(String(cues[cues.length - 1].end)); return m ? Number(m[1]) + ':' + m[2].padStart(2, '0') + ':' + m[3].padStart(2, '0') : ''; } catch (e) { return ''; } };
+const startLineOf = (kind, extraKeys, cues, keysArray) => `\u200F[${kind}${extraKeys && extraKeys.trackNum ? ' ' + extraKeys.trackNum : ''}] ${cues.length} سطر${fileDurOf(cues) ? ' | مدة الملف ' + fileDurOf(cues) : ''} | دفعة ${CORRECTOR_CHUNK} | مفاتيح ${keysArray.length}`;
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
   .filter(Boolean);
@@ -654,7 +657,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const ell = analyzeEllipsis(cues);
   const flipNow = oldFile || (ELLIPSIS_AUTO && ell.reversed);
   if (flipNow) {
-    if (oldFile) console.log('[مصحح] ملف قديم: أقلب مكان الثلاث نقاط (...)');
+    if (oldFile) console.log('\u200F[مصحح 🔃] ملف معكوس: أقلب مكان الثلاث نقاط (...)');
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
   }
   const CHUNK = CORRECTOR_CHUNK;
@@ -701,8 +704,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     toDo.push(item);
   });
   
-  if (fromCache > 0) console.log(`[كاش الأسطر - مصحح] ${fromCache} سطر جاهز من قبل، أصحح الباقي (${toDo.length}) فقط.`);
-  if (namesLoadedFromCache && toDo.length > 0 && opts.round === 1) console.log(`\u200F[كاش الأسماء 💾] تم استرجاع قاموس الأسماء المحفوظ (${book.size} اسم) بدل بنائه من جديد.`);
+  if (fromCache > 0) console.log(`\u200F[كاش الأسطر] ${fromCache} جاهز ⟵ أصحح الباقي (${toDo.length})`);
   
   const namesDeps = {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
@@ -782,7 +784,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
     const fallbackModel = primaryClean === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL;
-    console.log(`\u200F[إنقاذ تلقائي 🚑] بقى (${unprocessed.length}) سطر بسبب اختناق (${shortModel(primaryClean)}). أنتظر ${FALLBACK_WAIT_MS / 1000} ثواني لتبريد المفاتيح وأحول على (${shortModel(fallbackModel)})...`);
+    console.log(`\u200F[إنقاذ تلقائي 🚑] بقى ${unprocessed.length} سطر باختناق (${shortModel(primaryClean)}) ⟵ أنتظر ${FALLBACK_WAIT_MS / 1000} ث وأحوّل إلى (${shortModel(fallbackModel)})`);
     await delay(FALLBACK_WAIT_MS);
     await runBatchWithModel(unprocessed, fallbackModel);
     unprocessed = toDo.filter(it => results[it.id] == null);
@@ -790,7 +792,6 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   
   const missing = unprocessed.length;
   if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من Gemini) | أرجعت ${leakRejected} سطر للأصلي`);
-  console.log(`\u200F[ملخص المصحح 📊] كلي=${cues.length} | مصحح=${toDo.length} | رفض=${rejected} | نواقص=${missing} | مفاتيح=${workerCount} | زمن مرحلة الأسطر=${Math.round((Date.now() - tStart)/1000)} ثانية`);
   spell.flushLog();
   
   const finalTexts = cues.map((c, i) =>
@@ -803,15 +804,20 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   if (toDo.length > 0) {
     const tNames = Date.now();
     let tBookWait = 0, tCls = 0;
+    let dictInfo = '', dictFailed = false, memAdded = 0;
     if (!book) {
       book = bookPromise
         ? await bookPromise
         : await startBook(plainForBook(finalTexts.filter((_, i) => needsCorrection(cues[i].text))));
       tBookWait = Date.now() - tNames;
-      console.log(`\u200F[مرحلة الأسماء - القاموس] ${book ? `جاهز (${book.size} اسم)` : 'فشل بناؤه'} | ${bookPromise ? `كان يعمل بالتوازي مع الأسطر، انتظرته بعدها ${secsOf(tBookWait)} ثانية` : `بنيته بعد الأسطر في ${secsOf(tBookWait)} ثانية`}`);
+      if (book) {
+        const n = namesCountOf(book);
+        const st = book.stats;
+        dictInfo = 'قاموس ' + (n != null ? n + ' اسم' : 'جاهز') + (st && st.total ? ' | ' + st.total + (st.total === 1 ? ' دفعة | ' : ' دفعات | ') + st.secs + ' ث' : '') + (tBookWait >= 1000 ? ' (انتظرته ' + secsOf(tBookWait) + ' ث)' : '');
+      } else dictFailed = true;
     } else {
-      console.log(`\u200F[مرحلة الأسماء - القاموس] من الكاش (${book.size} اسم)`);
-      { const d = describeBook(book); if (d) console.log(d); }
+      const n = namesCountOf(book);
+      dictInfo = 'قاموس من الكاش' + (n != null ? ' (' + n + ' اسم)' : '');
     }
 
     if (seriesKey) {
@@ -822,10 +828,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
         if (book) {
           const r = mergeSeriesNames(book, ser, seriesEp, book.complete !== false);
           if (r.changed) db.saveMap('names', seriesKey, [[1, JSON.stringify(r.ser)]]);
-          console.log(`\u200F[ذاكرة المسلسل 🧠] أسماء من حلقات سابقة أضفتها: ${r.added.length}${r.added.length ? ' (' + r.added.slice(0, 15).join('، ') + ')' : ''} | أسماء محفوظة للمسلسل: ${Object.keys(r.ser).length}${r.changed ? ' | تم تحديث الذاكرة' : ''}`);
+          memAdded = r.added.length;
         }
       } catch (e) { console.log(`[ذاكرة المسلسل] تعذر: ${e && e.message}`); }
     }
+    console.log(`\u200F[الأسماء ${dictFailed ? '⚠' : '📖'}] ${dictFailed ? 'فشل بناء القاموس' : dictInfo}${memAdded ? ` | +${memAdded} من ذاكرة المسلسل` : ''}`);
 
     let tflags = null;
     if (TRANSLATOR_MODE) {
@@ -846,7 +853,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
               [2, JSON.stringify(Array.from(kinds.entries()))]
             ]);
           }
-        } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+        } catch (e) { console.log(`[مصحح - حفظ الأسماء] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
       outTexts = applyNameBook(propagateNamesT(finalTexts, eligible, kinds, book, tflags), eligible, book, tflags);
     } else {
@@ -858,7 +865,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
             [2, JSON.stringify(Array.from(kinds.entries()))]
           ];
           if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
-        } catch (e) { console.log(`[مصحح] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+        } catch (e) { console.log(`[مصحح - حفظ الأسماء (القديم)] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
@@ -874,10 +881,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
     
-    console.log(`\u200F[مرحلة الأسماء بعد الأسطر ⏱] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
+    if (Date.now() - tNames > 20000) console.log(`\u200F[مرحلة الأسماء ⏱ بطيئة] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
   
-  console.log(`\u200F[المصحح كامل ⏱ الزمن الكلي الحقيقي] ${secsOf(Date.now() - tStart)} ثانية (الأسطر + مرحلة الأسماء)`);
+  console.log(`\u200F[المصحح الكلي 📊] نواقص=${missing} ⟵ رفض=${rejected} ⟵ مفاتيح=${workerCount} ⟵ الوقت=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
   return { texts: outTexts, missing, rejected };
 }
 
@@ -893,7 +900,7 @@ async function loadSavedOrFetch(url, subsourceKey, targetId, trackNum) {
   if (targetId && trackNum) {
     const saved = await db.loadDoc('rawsrt', targetId + '_track' + trackNum + TRACKS_TAG);
     if (saved && saved.text) {
-      console.log(`[مصحح Nuvio] Track ${trackNum}: المصدر جاهز من التخزين الدائم، ما أحتاج الموقع.`);
+      console.log(`\u200F[مصحح] Track ${trackNum}: المصدر من التخزين الدائم`);
       return saved.text;
     }
   }
@@ -908,8 +915,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   }
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
-  console.log(`[تشخيص] ${subUrl.slice(0, 120)} | أول سطر: ${String(cues[0].text).slice(0, 50)} | آخر وقت: ${cues[cues.length - 1].end}`);
-  console.log(`[مصحح Nuvio SRT] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length}`);
+  console.log(startLineOf('SRT', extraKeys, cues, keysArray));
   const { texts: finalCorrections, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
   let srtOutput = '';
   let counter = 1;
@@ -1063,8 +1069,6 @@ function applyAssFontSize(lines) {
     }
   }
   const { outline, shadow, bold } = main;
-  const extra = (outline ? ` | Outline ${outline.from}→${outline.to}` : '') + (shadow ? ` | Shadow ${shadow.from}→${shadow.to}` : '') + (bold ? ' | Bold طافي' : '') + (others.length ? ` | معه: ${others.join('، ')}` : '');
-  console.log(`[حجم ASS] الستايل=${top} ${sizeChanged ? `من ${oldSize} إلى ${target}` : `الحجم بقى ${oldSize}`} (PlayResY=${playResY}${usedFallback ? ' افتراضي' : ''})${extra}`);
   return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, bold, others, share: topN / total });
 }
 function rebuildAss(parsed, texts) {
@@ -1089,7 +1093,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const isRealAss = parsed.cues.length > 0;
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
-  console.log(`[مصحح Nuvio ASS] ${cues.length} أسطر عربية -> CHUNK=${CORRECTOR_CHUNK} | مفاتيح=${keysArray.length} | ملف ASS أصلي=${isRealAss}`);
+  console.log(startLineOf('ASS', extraKeys, cues, keysArray) + (isRealAss ? '' : ' | المصدر SRT (حوّلته لـ ASS)'));
   const { texts, missing, rejected } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round });
   if (isRealAss) {
     return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected };
