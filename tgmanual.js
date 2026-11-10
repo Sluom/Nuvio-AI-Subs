@@ -63,10 +63,26 @@ async function fetchTracks(type, targetId) {
   return out;
 }
 
-async function onRequest(chatId, rq, tg) {
+async function startPath(path) {
+  try {
+    const res = await axios.get('http://127.0.0.1:' + PORT + path, {
+      headers: { 'x-forwarded-host': (ctx && ctx.host) || ('127.0.0.1:' + PORT), 'x-forwarded-proto': (ctx && ctx.proto) || 'https' },
+      timeout: START_TIMEOUT_MS, validateStatus: () => true, responseType: 'text'
+    });
+    return /قيد التنفيذ/.test(String(res.data || ''));
+  } catch (e) {
+    return null;
+  }
+}
+
+async function onRequest(chatId, rq, tg, count) {
   const send = text => tg('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
   try {
     const isEp = !!rq.season;
+    if (count && !isEp) {
+      await send(rtl('الدفعة للمسلسلات فقط، اكتب الموسم والحلقة مثل:') + '\n' + latin(rq.imdb + ' 1 5'));
+      return;
+    }
     let title = notify && notify.titleOf ? await notify.titleOf(rq.targetId, isEp ? 'series' : 'movie') : null;
     let type = isEp ? 'series' : 'movie';
     if (!title && !isEp && notify && notify.titleOf) {
@@ -101,7 +117,7 @@ async function onRequest(chatId, rq, tg) {
     if (!tracks) { await finish(head.concat(rtl('⚠️ تعذر جلب قائمة التراكات، جرّب بعد شوي.')).join('\n')); return; }
     if (!tracks.length) { await finish(head.concat(rtl('ما لقيت تراكات عربية لهذا العمل.')).join('\n')); return; }
     const h = crypto.createHash('sha1').update(rq.targetId + ':' + Date.now()).digest('hex').slice(0, 8);
-    reqs.set(h, { targetId: rq.targetId, head, tracks });
+    reqs.set(h, { targetId: rq.targetId, head, tracks, count: count || 0 });
     while (reqs.size > MAX_REQS) reqs.delete(reqs.keys().next().value);
     const rows = [];
     for (const ext of ['srt', 'ass']) {
@@ -110,13 +126,14 @@ async function onRequest(chatId, rq, tg) {
       }));
       for (let k = 0; k < row.length; k += 2) rows.push(row.slice(k, k + 2));
     }
-    await finish(head.concat(rtl('اختر التراك اللي تريد تجهزه:')).join('\n'), { inline_keyboard: rows });
+    if (count) head.push(rtl('📦 دفعة: ' + count + ' حلقات (حلقة كل 5 دقائق، وتتوقف بنهاية الموسم)'));
+    await finish(head.concat(rtl(count ? 'اختر التراك لبدء الدفعة:' : 'اختر التراك اللي تريد تجهزه:')).join('\n'), { inline_keyboard: rows });
   } catch (e) {
     try { await send(rtl('⚠️ صار خطأ أثناء الطلب، جرّب مرة ثانية.')); } catch (e2) { /* لا شيء */ }
   }
 }
 
-async function onCallback(cq, tg) {
+async function onCallback(cq, tg, batch) {
   const m = /^go:([0-9a-f]{8}):(\d+)$/.exec(String(cq.data || ''));
   const r = m && reqs.get(m[1]);
   const t = r && r.tracks[+m[2]];
@@ -124,14 +141,14 @@ async function onCallback(cq, tg) {
   if (!t) { await answer('انتهت صلاحية هذي القائمة، ابعث الرقم من جديد'); return; }
   if (!ctx) { await answer('افتح حلقة من Nuvio مرة وحدة أول'); return; }
   const label = t.ext.toUpperCase() + ' تراك ' + t.track;
-  let started = true;
-  try {
-    const res = await axios.get('http://127.0.0.1:' + PORT + t.path, {
-      headers: { 'x-forwarded-host': ctx.host || ('127.0.0.1:' + PORT), 'x-forwarded-proto': ctx.proto },
-      timeout: START_TIMEOUT_MS, validateStatus: () => true, responseType: 'text'
-    });
-    started = /قيد التنفيذ/.test(String(res.data || ''));
-  } catch (e) {
+  if (r.count && batch) {
+    await answer('بدأت الدفعة');
+    reqs.delete(m[1]);
+    await batch.start({ chat: cq.message && cq.message.chat, messageId: cq.message && cq.message.message_id, tg, targetId: r.targetId, head: r.head, track: t, count: r.count });
+    return;
+  }
+  const started = await startPath(t.path);
+  if (started === null) {
     await answer('تعذر بدء التجهيز، جرّب مرة ثانية');
     return;
   }
@@ -150,4 +167,4 @@ async function onCallback(cq, tg) {
   }
 }
 
-module.exports = { noteContext, parse, onRequest, onCallback, _t: { fetchTracks, reqs, getCtx: () => ctx } };
+module.exports = { noteContext, parse, onRequest, onCallback, fetchTracks, startPath, getCtx: () => ctx, _t: { fetchTracks, reqs, getCtx: () => ctx } };
