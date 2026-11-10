@@ -64,7 +64,6 @@ async function doLogin() {
         }
         const host = String(res.data.base_url || DEFAULT_HOST).replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
         session = { token: res.data.token, host, exp: Date.now() + LOGIN_TTL };
-        console.log('[جلب عربي - opensubtitles.com] تم تسجيل الدخول');
         return session;
     } catch (e) {
         console.log('[جلب عربي - opensubtitles.com] خطأ تسجيل الدخول: ' + e.message);
@@ -92,10 +91,14 @@ function compareRank(x, y) {
     }
     return 0;
 }
+let warnedNoCreds = false;
 async function getOsCom({ imdbId, season, episode }) {
     const { apiKey, username, password } = getCreds();
     if (!apiKey || !username || !password) {
-        console.log('[جلب عربي - opensubtitles.com] غير مفعّل: ناقص مفتاح OS.com أو اسم المستخدم أو كلمة المرور في صفحة الإعداد.');
+        if (!warnedNoCreds) {
+            warnedNoCreds = true;
+            console.log('[جلب عربي - opensubtitles.com] غير مفعّل: ناقص مفتاح OS.com أو اسم المستخدم أو كلمة المرور في صفحة الإعداد.');
+        }
         return [];
     }
     if (!imdbId || !imdbId.startsWith('tt')) return [];
@@ -141,8 +144,7 @@ async function getOsCom({ imdbId, season, episode }) {
                 });
             }
         }
-        const nAss = out.filter(x => x.format === 'ass').length;
-        console.log('[جلب عربي - opensubtitles.com] رجع ' + rows.length + ' | بعد الفلترة: SRT=' + (out.length - nAss) + ' ASS=' + nAss);
+        out._raw = rows.length;
         return out;
     } catch (e) {
         console.log('[جلب عربي - opensubtitles.com] خطأ: ' + e.message);
