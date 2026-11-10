@@ -9,6 +9,7 @@ const db = require('./db');
 const adjust = require('./adjust');
 const cacheclear = require('./cacheclear');
 const tgmanual = require('./tgmanual');
+const tgbatch = require('./tgbatch');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 
@@ -290,6 +291,8 @@ async function onCallback(cq) {
 }
 
 const isClearCmd = t => /^\/clear(@\w+)?$/i.test(t) || /^(امسح|مسح) (آخر|اخر) حلقة$/.test(t);
+const isBatchCmd = t => /^\/batch(@\w+)?$/i.test(t) || t === 'دفعة';
+const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
 const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' || t === 'لوحة التحكم' || /^panel$/i.test(t);
 
 async function handleUpdate(u) {
@@ -298,11 +301,14 @@ async function handleUpdate(u) {
     const msg = cq ? cq.message : (u && u.message);
     const chatId = msg && msg.chat && msg.chat.id;
     if (chatId == null || String(chatId) !== TG_CHAT) return;
-    if (cq && /^go:/.test(String(cq.data || ''))) return await tgmanual.onCallback(cq, tg);
+    if (cq && /^go:/.test(String(cq.data || ''))) return await tgmanual.onCallback(cq, tg, tgbatch);
+    if (cq && /^bn:/.test(String(cq.data || ''))) return await tgbatch.onCount(cq, tg);
     if (cq) return await onCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
     const rq = tgmanual.parse(text);
-    if (rq) await tgmanual.onRequest(chatId, rq, tg);
+    if (rq) await tgmanual.onRequest(chatId, rq, tg, tgbatch.takeCount());
+    else if (isBatchCmd(text)) await tgbatch.askCount(chatId, tg);
+    else if (isStopCmd(text)) await tgbatch.stop(chatId, tg);
     else if (isClearCmd(text)) await sendAskClear(chatId);
     else if (isPanelCmd(text)) await sendPanel(chatId);
   } catch (e) {
@@ -316,7 +322,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'panel', description: 'لوحة تحكم الترجمة (توقيت، حجم، ارتفاع)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'panel', description: 'لوحة تحكم الترجمة (توقيت، حجم، ارتفاع)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
