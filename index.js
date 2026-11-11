@@ -7,6 +7,7 @@ const { getSubSource } = require('./subsource');
 const { getHebHindiSubs } = require('./hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent, verifyArabicSub } = require('./araFetch');
 const { setOsComCreds } = require('./oscom');
+const { setWyzieKey } = require('./wyzie');
 const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
 const {
     cancelNextEpisodePrefetch,
@@ -620,7 +621,7 @@ function getBaseUrl(req) {
 }
 
 function parseConfig(raw, onError) {
-    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '' };
+    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '', wyzieKey: '' };
     if (!raw) return cfg;
     try {
         const d = JSON.parse(decodeURIComponent(raw));
@@ -632,10 +633,12 @@ function parseConfig(raw, onError) {
         if (d.oscomKey) cfg.oscomKey = String(d.oscomKey).trim();
         if (d.oscomUser) cfg.oscomUser = String(d.oscomUser).trim();
         if (d.oscomPass) cfg.oscomPass = String(d.oscomPass);
+        if (d.wyzieKey) cfg.wyzieKey = String(d.wyzieKey).trim();
     } catch (e) {
         if (onError) onError(e);
     }
     if (cfg.oscomKey && cfg.oscomUser && cfg.oscomPass) setOsComCreds({ apiKey: cfg.oscomKey, username: cfg.oscomUser, password: cfg.oscomPass });
+    if (cfg.wyzieKey) setWyzieKey(cfg.wyzieKey);
     return cfg;
 }
 
@@ -655,7 +658,8 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     const {
         keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey,
         subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey,
-        oscomKey: existingOsComKey, oscomUser: existingOsComUser, oscomPass: existingOsComPass
+        oscomKey: existingOsComKey, oscomUser: existingOsComUser, oscomPass: existingOsComPass,
+        wyzieKey: existingWyzieKey
     } = parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
     const keyRowsHtml = existingKeys.length > 0
         ? existingKeys.map((key, i) => {
@@ -724,6 +728,10 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 <label>OpenSubtitles.com - كلمة المرور</label>
 <input type="password" id="oscom-pass" placeholder="كلمة المرور" value="` + attr(existingOsComPass) + `">
 </div>
+<div class="input-group">
+<label>مفتاح Wyzie API (اختياري - ترجمات ASS عربية للأنمي فقط)</label>
+<input type="text" id="wyzie-key" placeholder="wyzie-..." value="` + attr(existingWyzieKey) + `">
+</div>
 <div class="input-group" style="margin-top:20px">
 <label>نموذج الترجمة (Translation Model)</label>
 <select id="model-select" style="width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff">` + modelOptions + `</select>
@@ -752,6 +760,7 @@ const subsourceKey=document.getElementById('subsource-key').value.trim();
 const oscomKey=document.getElementById('oscom-key').value.trim();
 const oscomUser=document.getElementById('oscom-user').value.trim();
 const oscomPass=document.getElementById('oscom-pass').value;
+const wyzieKey=document.getElementById('wyzie-key').value.trim();
 const config={keys:keys,model:document.getElementById('model-select').value};
 if(tmdbKey)config.tmdbKey=tmdbKey;
 if(subdlKey)config.subdlKey=subdlKey;
@@ -759,6 +768,7 @@ if(subsourceKey)config.subsourceKey=subsourceKey;
 if(oscomKey)config.oscomKey=oscomKey;
 if(oscomUser)config.oscomUser=oscomUser;
 if(oscomPass)config.oscomPass=oscomPass;
+if(wyzieKey)config.wyzieKey=wyzieKey;
 return encodeURIComponent(JSON.stringify(config));
 }
 function generateInstallLink(){
@@ -801,11 +811,12 @@ const SOURCE_LABELS = {
     os_legacy: 'opensubtitles.org',
     os_mirror: 'opensubtitles',
     opensubtitles: 'opensubtitles',
-    oscom: 'opensubtitles.com'
+    oscom: 'opensubtitles.com',
+    wyzie: 'wyzie'
 };
 const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
 const assExtRe = /\.(ass|ssa)$/i;
-const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com'];
+const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com', 'wyzie'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
 
 function logRequestLine(origId, finalId, finalType, isPrefetch) {
