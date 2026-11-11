@@ -211,4 +211,19 @@ async function deleteMap(ns, key) {
   }
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap };
+async function stats() {
+  const read = async d => {
+    if (!d) return null;
+    try {
+      const s = await d.command({ dbStats: 1 });
+      return { usedMB: ((s.dataSize || 0) + (s.indexSize || 0)) / 1048576 };
+    } catch (e) {
+      return null;
+    }
+  };
+  const [p, t] = await Promise.all([getPrimaryDb(), getTracksDb()]);
+  const [primary, tracks] = await Promise.all([read(p), read(t)]);
+  return primary || tracks ? { primary, tracks } : null;
+}
+
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats };
