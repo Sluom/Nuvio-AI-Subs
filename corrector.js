@@ -797,7 +797,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   
   const missing = unprocessed.length;
   if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من Gemini) | أرجعت ${leakRejected} سطر للأصلي`);
-  spell.flushLog();
+  const spellInfo = spell.flushLog();
   
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
@@ -907,7 +907,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       all: missing === toDo.length
     };
   }
-  return { texts: outTexts, missing, rejected, failInfo };
+  return { texts: outTexts, missing, rejected, failInfo, spellInfo };
 }
 
 const epInfoOf = id => {
@@ -938,7 +938,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
   console.log(startLineOf('SRT', extraKeys, cues, keysArray));
-  const { texts: finalCorrections, missing, rejected, failInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-SRT', trackNum: extraKeys.trackNum, targetId } });
+  const { texts: finalCorrections, missing, rejected, failInfo, spellInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-SRT', trackNum: extraKeys.trackNum, targetId } });
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -953,7 +953,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
     srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
     counter++;
   });
-  return { content: srtOutput, missing, total: cues.length, failed: false, rejected, failInfo };
+  return { content: srtOutput, missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
 }
 const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
 const ASS_RTL_MARKS = true;
@@ -1116,9 +1116,9 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
   console.log(startLineOf('ASS', extraKeys, cues, keysArray) + (isRealAss ? '' : ' | المصدر SRT (حوّلته لـ ASS)'));
-  const { texts, missing, rejected, failInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-ASS', trackNum: extraKeys.trackNum, targetId } });
+  const { texts, missing, rejected, failInfo, spellInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-ASS', trackNum: extraKeys.trackNum, targetId } });
   if (isRealAss) {
-    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected, failInfo };
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
   }
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -1126,7 +1126,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
     assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
   });
-  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false, rejected, failInfo };
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
 }
 module.exports = {
   handleCorrectionSrt,
