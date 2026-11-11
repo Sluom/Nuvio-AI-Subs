@@ -204,11 +204,13 @@ function createSpellFixer(fixTypoToken) {
     });
   }
   function flushLog(limit = 60) {
-    if (!LOG.size) return;
-    const rows = [...LOG.entries()].sort((x, y) => y[1] - x[1]).slice(0, limit)
+    if (!LOG.size) return null;
+    const sorted = [...LOG.entries()].sort((x, y) => y[1] - x[1]);
+    const rows = sorted.slice(0, limit)
       .map(([k, n]) => (n > 1 ? `${k} ×${n}` : k));
     console.log(`\u200F[إملاء 📝] ${LOG.size} تحويل مختلف: ${rows.join(' | ')}`);
     LOG.clear();
+    return sorted;
   }
   return { fix, restoreFinalYa, flushLog };
 }
