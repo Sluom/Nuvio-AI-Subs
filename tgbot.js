@@ -8,6 +8,7 @@ const db = require('./db');
 const cacheclear = require('./cacheclear');
 const tgmanual = require('./tgmanual');
 const tgbatch = require('./tgbatch');
+const tgretry = require('./tgretry');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 
@@ -201,6 +202,7 @@ async function handleUpdate(u) {
     if (chatId == null || String(chatId) !== TG_CHAT) return;
     if (cq && /^go:/.test(String(cq.data || ''))) return await tgmanual.onCallback(cq, tg, tgbatch);
     if (cq && /^bn:/.test(String(cq.data || ''))) return await tgbatch.onCount(cq, tg);
+    if (cq && /^rt:/.test(String(cq.data || ''))) return await tgretry.onCallback(cq, tg);
     if (cq) return await onCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
     const rq = tgmanual.parse(text);
