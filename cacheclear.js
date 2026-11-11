@@ -72,4 +72,24 @@ async function clearEpisode(targetId) {
   return res;
 }
 
-module.exports = { clearEpisode, onDrop, idsOf };
+async function clearTrack(targetId, ext, track, withLines) {
+  const label = ext === 'ass' ? 'ARA-ASS' : 'ARA-SRT';
+  const key = trackKey(label, targetId, track);
+  for (const fn of memDrops) { try { fn(key); } catch (e) { /* لا شيء */ } }
+  const res = { tracks: 0, lines: 0, failed: 0 };
+  const d = await withTimeout(db.deleteDoc('job', key), STEP_TIMEOUT_MS);
+  if (typeof d !== 'number' || d < 0) res.failed++; else res.tracks += d;
+  if (withLines) {
+    const doc = await withTimeout(db.loadDoc('job', 'corr_pins_' + targetId + TRACKS_TAG), STEP_TIMEOUT_MS);
+    const it = doc && Array.isArray(doc[ext]) ? doc[ext][track - 1] : null;
+    if (it && it.url) {
+      const lk = lineKey(targetId, String(it.url));
+      try { if (shared && shared.getLineCache) shared.getLineCache(lk).clear(); } catch (e) { /* لا شيء */ }
+      const m = await withTimeout(db.deleteMap('line', lk), STEP_TIMEOUT_MS);
+      if (typeof m !== 'number' || m < 0) res.failed++; else res.lines += m;
+    }
+  }
+  return res;
+}
+
+module.exports = { clearEpisode, clearTrack, onDrop, idsOf };
