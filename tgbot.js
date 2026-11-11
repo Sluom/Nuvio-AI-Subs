@@ -702,6 +702,237 @@ function startDbWatch() {
   }, DB_FIRST_CHECK_MS);
 }
 
+const FIND_MAX_RESULTS = 8;
+const MAX_FINDS = 50;
+const GEMINI_TITLE_TIMEOUT_MS = 15000;
+const CINEMETA_SEARCH_TIMEOUT_MS = 8000;
+const finds = new Map();
+let pendingEp = null;
+
+const latinDigits = s => String(s == null ? '' : s).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660));
+const hasArabic = s => /[\u0600-\u06FF]/.test(String(s || ''));
+const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+const KIND_AR = { 'فلم': 'movie', 'فيلم': 'movie', 'افلام': 'movie', 'أفلام': 'movie', 'مسلسل': 'series', 'مسلسلات': 'series', 'انمي': 'anime', 'أنمي': 'anime' };
+const KIND_EN = { movie: 'movie', film: 'movie', series: 'series', anime: 'anime' };
+
+function parseFind(text) {
+  const t = String(text || '').trim();
+  const m = /^\/find(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t) || /^(?:بحث|ابحث)(?:\s+([\s\S]*))?$/.exec(t);
+  return m ? { q: String(m[1] || '').trim() } : null;
+}
+
+function parseQuery(raw) {
+  const s = latinDigits(raw).replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+  let kind = '';
+  const rest = [];
+  for (const w of s.split(' ').filter(Boolean)) {
+    const k = KIND_AR[w];
+    if (k && !kind) kind = k; else rest.push(w);
+  }
+  if (!kind && rest.length > 1 && KIND_EN[rest[0].toLowerCase()]) kind = KIND_EN[rest.shift().toLowerCase()];
+  let year = 0;
+  if (rest.length > 1) {
+    const maxYear = new Date().getFullYear() + 2;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      const ym = /^[(\[]?((?:19|20)\d{2})[)\]]?$/.exec(rest[i]);
+      if (ym && +ym[1] <= maxYear) { year = +ym[1]; rest.splice(i, 1); break; }
+    }
+  }
+  return { name: rest.join(' ').trim(), year, kind };
+}
+
+function parseEpisode(text) {
+  const m = /^(?:s\s*)?(\d{1,3})\s*(?:[:,\-xXeE]|\s)\s*(?:e\s*)?(\d{1,4})$/i.exec(latinDigits(text).trim());
+  if (!m) return null;
+  const season = +m[1];
+  const episode = +m[2];
+  return season >= 1 && episode >= 1 ? { season, episode } : null;
+}
+
+function geminiCfg() {
+  try {
+    const d = JSON.parse(decodeURIComponent(ctx.rawConfig));
+    return { keys: Array.isArray(d.keys) ? d.keys.filter(k => k && String(k).trim()) : [], model: d.model || 'gemini-3.1-flash-lite' };
+  } catch (e) {
+    return { keys: [], model: '' };
+  }
+}
+
+function cleanTitle(t) {
+  let s = String(t || '').split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
+  s = s.replace(/[`*"“”]/g, '').replace(/\s*\((?:19|20)\d{2}\)\s*$/, '').replace(/\.$/, '').trim();
+  return s && s.length <= 80 && !hasArabic(s) ? s : '';
+}
+
+async function translateTitle(name) {
+  const S = shared;
+  if (!S || !S.acquireKey || !S.axios || !ctx || !ctx.rawConfig) return { err: 'nocfg' };
+  const cfg = geminiCfg();
+  if (!cfg.keys.length) return { err: 'nokeys' };
+  const model = S.normalizeGeminiModelId(cfg.model);
+  const generationConfig = { temperature: 0 };
+  if (/^gemini-3/i.test(model) || /^gemini-(flash|flash-lite|pro)-latest$/i.test(model)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
+  const prompt = 'Give the official English title (as listed on IMDb) of the movie, TV series or anime whose name is written below in Arabic. '
+    + 'Reply with the English title only: one line, no quotes, no year, no explanation.\nName: ' + name;
+  const url = S.DEFAULT_GEMINI_API_URL + '/models/' + model + ':generateContent';
+  for (let a = 0; a < 3; a++) {
+    const key = await S.acquireKey(cfg.keys, 8000);
+    if (!key) return { err: 'busy' };
+    try {
+      const r = await S.axios.post(url, {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig,
+        safetySettings: S.SAFETY_SETTINGS_OFF
+      }, {
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': String(key).trim(), 'x-goog-api-client': S.GEMINI_CLIENT_HEADER },
+        timeout: GEMINI_TITLE_TIMEOUT_MS, httpAgent: S.httpAgent, httpsAgent: S.httpsAgent
+      });
+      const parts = (r && r.data && r.data.candidates && r.data.candidates[0] && r.data.candidates[0].content && r.data.candidates[0].content.parts) || [];
+      const title = cleanTitle(parts.map(p => (p && p.text) || '').join(''));
+      return title ? { title } : { err: 'empty' };
+    } catch (e) {
+      const st = (e && e.response && e.response.status) || 0;
+      if (S.isGeminiAuthFailure(e)) { S.deadKeys.add(key); continue; }
+      if (st === 400 || st === 404) return { err: 'config' };
+      S.keyCooldowns.set(key, Date.now() + S.cooldownForStatus(st));
+      await sleep(800);
+    }
+  }
+  return { err: 'busy' };
+}
+
+async function cinemetaSearch(type, q) {
+  try {
+    const r = await axios.get('https://v3-cinemeta.strem.io/catalog/' + type + '/top/search=' + encodeURIComponent(q) + '.json', { timeout: CINEMETA_SEARCH_TIMEOUT_MS });
+    const metas = r && r.data && Array.isArray(r.data.metas) ? r.data.metas : [];
+    return metas.filter(x => x && /^tt\d+$/.test(String(x.id || ''))).map(x => ({
+      id: String(x.id), type, name: String(x.name || x.id), year: parseInt(String(x.releaseInfo || x.year || '').slice(0, 4), 10) || 0
+    }));
+  } catch (e) {
+    return null;
+  }
+}
+
+function mergeResults(lists, year) {
+  const seen = new Set();
+  const all = [];
+  const max = Math.max(0, ...lists.map(l => (l || []).length));
+  for (let i = 0; i < max; i++) {
+    for (const l of lists) {
+      const x = l && l[i];
+      if (x && !seen.has(x.id)) { seen.add(x.id); all.push(x); }
+    }
+  }
+  if (!year) return { items: all.slice(0, FIND_MAX_RESULTS), yearMiss: false };
+  const exact = all.filter(x => x.year === year);
+  if (!exact.length) return { items: all.slice(0, FIND_MAX_RESULTS), yearMiss: true };
+  return { items: exact.concat(all.filter(x => x.year !== year)).slice(0, FIND_MAX_RESULTS), yearMiss: false };
+}
+
+const TRANSLATE_FAIL = {
+  nokeys: 'ما لقيت مفاتيح جمناي بإعداداتك، اكتب الاسم بالإنجليزي.',
+  busy: 'مفاتيح جمناي مشغولة حالياً، اكتب الاسم بالإنجليزي أو جرّب بعد شوي.',
+  config: 'الموديل المحفوظ بإعداداتك ما قبل الطلب، اكتب الاسم بالإنجليزي.',
+  empty: 'ما كدرت أترجم الاسم، اكتب الاسم بالإنجليزي.',
+  nocfg: 'ما كدرت أترجم الاسم، اكتب الاسم بالإنجليزي.'
+};
+
+async function onFind(chatId, raw) {
+  const send = (text, markup) => tg('sendMessage', { chat_id: chatId, text, reply_markup: markup, disable_web_page_preview: true });
+  try {
+    pendingEp = null;
+    const p = parseQuery(raw);
+    if (!p.name) {
+      await send([rtl('🔎 البحث بالاسم'), rtl('اكتب الاسم بعد الأمر، مثل:'), latin('/find spider man 2026'), rtl('أو بالعربي:'), rtl('بحث فلم سبايدر مان 2026')].join('\n'));
+      return;
+    }
+    let name = p.name;
+    const notes = [];
+    if (hasArabic(name)) {
+      if (!ctx) await loadCtx();
+      if (!ctx) {
+        await send([rtl('ما عندي إعداداتك بالذاكرة (السيرفر تو اشتغل)، فما أكدر أترجم الاسم.'), rtl('اكتب الاسم بالإنجليزي، أو افتح أي حلقة من Nuvio مرة وحدة وارجع.')].join('\n'));
+        return;
+      }
+      const tr = await translateTitle(name);
+      if (!tr.title) {
+        console.log('[بحث] فشلت ترجمة الاسم: ' + (tr.err || 'unknown'));
+        await send(rtl('⚠️ ' + (TRANSLATE_FAIL[tr.err] || TRANSLATE_FAIL.empty)));
+        return;
+      }
+      notes.push(rtl('🌐 ' + name + ' ← ' + latin(tr.title)));
+      name = tr.title;
+    }
+    const types = p.kind === 'movie' ? ['movie'] : p.kind === 'series' ? ['series'] : ['movie', 'series'];
+    const lists = await Promise.all(types.map(t => cinemetaSearch(t, name)));
+    if (lists.every(l => l === null)) {
+      await send(rtl('⚠️ تعذر الاتصال بمصدر البحث (Cinemeta)، جرّب بعد شوي.'));
+      return;
+    }
+    const { items, yearMiss } = mergeResults(lists, p.year);
+    if (!items.length) {
+      await send(rtl('ما لقيت نتائج لـ ' + latin('«' + name + '»')) + '\n' + rtl('جرّب اسم ثاني أو اكتبه بالإنجليزي.'));
+      return;
+    }
+    const tags = [{ movie: 'فلم', series: 'مسلسل', anime: 'أنمي' }[p.kind] || '', p.year ? String(p.year) : ''].filter(Boolean);
+    const out = [rtl('🔎 نتائج ' + latin('«' + name + '»') + (tags.length ? ' (' + tags.join(' · ') + ')' : '')), ...notes];
+    if (yearMiss) out.push(rtl('ما لقيت بسنة ' + p.year + '، هذي أقرب النتائج:'));
+    out.push(rtl('🎬 فلم · 📺 مسلسل. اختر العمل الصحيح:'));
+    const h = crypto.createHash('sha1').update(name + ':' + Date.now()).digest('hex').slice(0, 8);
+    finds.set(h, { items, at: Date.now() });
+    while (finds.size > MAX_FINDS) finds.delete(finds.keys().next().value);
+    const rows = items.map((x, i) => [{ text: (x.type === 'movie' ? '🎬 ' : '📺 ') + trunc(x.name, 40) + (x.year ? ' · ' + x.year : ''), callback_data: 'fd:' + h + ':' + i }]);
+    await send(out.join('\n'), { inline_keyboard: rows });
+  } catch (e) {
+    logErr('خطأ بالبحث بالاسم', e);
+    try { await send(rtl('⚠️ صار خطأ أثناء البحث، جرّب مرة ثانية.')); } catch (e2) {}
+  }
+}
+
+async function askEpisode(chatId, it) {
+  pendingEp = { imdb: it.id, name: it.name, at: Date.now() };
+  const lines = [rtl('📺 ' + latin(it.name) + (it.year ? ' ' + latin('(' + it.year + ')') : '') + ' ' + latin('(' + it.id + ')')),
+    rtl('هذا مسلسل، ابعث الموسم والحلقة مثل:'), latin('1 5')];
+  const meta = await getMeta(it.id);
+  if (meta && meta.all.size) {
+    const ss = [...meta.all.keys()].sort((a, b) => a - b);
+    lines.push(rtl('المواسم المتوفرة (موسم:حلقات):'));
+    lines.push(latin(ss.slice(0, 15).map(s => s + ':' + meta.all.get(s)).join('  ') + (ss.length > 15 ? '  …' : '')));
+  }
+  await tg('sendMessage', { chat_id: chatId, text: lines.join('\n'), disable_web_page_preview: true });
+}
+
+async function onFindCallback(cq) {
+  const m = /^fd:([0-9a-f]{8}):(\d+)$/.exec(String(cq.data || ''));
+  const f = m && finds.get(m[1]);
+  const it = f && f.items[+m[2]];
+  if (!it) { await answerCb(cq, 'انتهت صلاحية هذي القائمة، ابعث البحث من جديد'); return; }
+  if (!ctx) await loadCtx();
+  if (!ctx) { await answerCb(cq, 'افتح حلقة من Nuvio مرة وحدة أول'); return; }
+  const chatId = cq.message.chat.id;
+  if (it.type === 'movie') {
+    await answerCb(cq, 'جاري جلب التراكات...');
+    await onRequest(chatId, { imdb: it.id, targetId: it.id }, takeCount());
+    return;
+  }
+  await answerCb(cq);
+  await askEpisode(chatId, it);
+}
+
+async function onEpisodeReply(chatId, er) {
+  const p = pendingEp;
+  if (!p) return;
+  const meta = await getMeta(p.imdb);
+  if (meta && meta.all.size && !meta.all.has(er.season)) {
+    const ss = [...meta.all.keys()].sort((a, b) => a - b);
+    await tg('sendMessage', { chat_id: chatId, text: [rtl('الموسم ' + er.season + ' مو موجود لهذا المسلسل.'), rtl('المواسم المتوفرة: ' + latin(ss.join(', '))), rtl('ابعث الموسم والحلقة من جديد.')].join('\n') }).catch(() => {});
+    return;
+  }
+  pendingEp = null;
+  await onRequest(chatId, { imdb: p.imdb, season: er.season, episode: er.episode, targetId: p.imdb + ':' + er.season + ':' + er.episode }, takeCount());
+}
+
 const isClearCmd = t => /^\/clear(@\w+)?$/i.test(t) || /^(امسح|مسح) (آخر|اخر) حلقة$/.test(t);
 const isBatchCmd = t => /^\/batch(@\w+)?$/i.test(t) || t === 'دفعة';
 const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
@@ -715,12 +946,17 @@ async function handleUpdate(u) {
     if (chatId == null || String(chatId) !== TG_CHAT) return;
     const data = String((cq && cq.data) || '');
     if (cq && /^go:/.test(data)) return await onGoCallback(cq);
+    if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
     if (cq) return await onPanelCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
     const rq = parseRequest(text);
-    if (rq) await onRequest(chatId, rq, takeCount());
+    const fq = rq ? null : parseFind(text);
+    const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
+    if (rq) { pendingEp = null; await onRequest(chatId, rq, takeCount()); }
+    else if (fq) await onFind(chatId, fq.q);
+    else if (er) await onEpisodeReply(chatId, er);
     else if (isBatchCmd(text)) await askCount(chatId);
     else if (isStopCmd(text)) await stopBatch(chatId);
     else if (isClearCmd(text)) await sendAskClear(chatId);
@@ -735,7 +971,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'panel', description: 'لوحة التحكم' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
@@ -768,7 +1004,7 @@ function start() {
   if (!ENABLED || running) return;
   running = true;
   stopped = false;
-  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /panel أو /clear.');
+  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /find أو /panel أو /clear.');
   startDbWatch();
   loop().catch(() => { running = false; });
 }
@@ -779,5 +1015,5 @@ loadCtx().catch(() => {});
 
 module.exports = {
   start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, cinemetaSearch, mergeResults, translateTitle, onFind, getPendingEp: () => pendingEp, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
 };
