@@ -1251,7 +1251,7 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
     const isReady = !!(cached && cached.status === 'done');
     const adjDesc = (isPinnedCorrector && !isPrefetch) ? { label, targetId, trackNum, ext, tracksTag: TRACKS_TAG } : null;
     if (adjDesc) tgbot.noteTrack(adjDesc);
-    if (targetId && !isPrefetch) {
+    if (targetId && !isPrefetch && String(req.query.nopf || '') !== '1') {
         const proto = req.headers['x-forwarded-proto'] || 'https';
         const host = req.headers['x-forwarded-host'] || req.headers.host;
         scheduleNextEpisodePrefetch({
