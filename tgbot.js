@@ -703,18 +703,36 @@ function startDbWatch() {
 }
 
 const FIND_MAX_RESULTS = 8;
+const SMART_MAX = 7;
 const MAX_FINDS = 50;
-const GEMINI_TITLE_TIMEOUT_MS = 15000;
+const MAX_RAW = 400;
+const SMART_DEADLINE_MS = 45000;
+const GEMINI_STEP_TIMEOUT_MS = 20000;
 const CINEMETA_SEARCH_TIMEOUT_MS = 8000;
+const CINEMETA_META_TIMEOUT_MS = 6000;
+const ESCALATE_SIM = 0.72;
+const RESOLVE_MIN_SIM = 0.6;
+const POSTERS_MAX = 4;
+const DEFAULT_SEARCH_MODEL = 'gemini-3.1-flash-lite';
 const finds = new Map();
 let pendingEp = null;
+
+const envList = v => String(v || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+const searchEnv = () => ({
+  keys: envList(process.env.SEARCH_GEMINI_KEYS),
+  model: String(process.env.SEARCH_GEMINI_MODEL || '').trim(),
+  grounding: /^(1|true|yes|on)$/i.test(String(process.env.SEARCH_GROUNDING || '').trim())
+});
 
 const latinDigits = s => String(s == null ? '' : s).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660));
 const hasArabic = s => /[\u0600-\u06FF]/.test(String(s || ''));
 const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
 const KIND_AR = { 'فلم': 'movie', 'فيلم': 'movie', 'افلام': 'movie', 'أفلام': 'movie', 'مسلسل': 'series', 'مسلسلات': 'series', 'انمي': 'anime', 'أنمي': 'anime' };
 const KIND_EN = { movie: 'movie', film: 'movie', series: 'series', anime: 'anime' };
+const DESC_CUE = /(اتذكر|أتذكر|ما اعرف|ما أعرف|نسيت|احداث|أحداث|قصة|قصته|قصتها|يحكي|يتحدث|تدور|بطولة|بطله|مشهد|ممثل|about a |about the |starring|plot|remember|forgot|scene)/i;
+const IDLE_TEXT = /^(شكرا|شكراً|شكرًا|تمام|ok|okay|thanks|thx|هلا|هلو|مرحبا|اهلا|أهلا|سلام|السلام عليكم)$/i;
 
 function parseFind(text) {
   const t = String(text || '').trim();
@@ -722,8 +740,13 @@ function parseFind(text) {
   return m ? { q: String(m[1] || '').trim() } : null;
 }
 
-function parseQuery(raw) {
-  const s = latinDigits(raw).replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+function isPlainSearchText(text) {
+  const t = String(text || '').trim();
+  return !!t && t.length <= 600 && !t.startsWith('/') && /\p{L}/u.test(t) && !IDLE_TEXT.test(t);
+}
+
+function parseQuery(raw, max) {
+  const s = latinDigits(raw).replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 100);
   let kind = '';
   const rest = [];
   for (const w of s.split(' ').filter(Boolean)) {
@@ -750,13 +773,101 @@ function parseEpisode(text) {
   return season >= 1 && episode >= 1 ? { season, episode } : null;
 }
 
+function foldText(s) {
+  return String(s || '').normalize('NFKD')
+    .replace(/[\u0300-\u036f\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي')
+    .toLowerCase().replace(/&/g, ' and ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ').replace(/^the /, '');
+}
+
+function osaDistance(a, b) {
+  const n = a.length, m = b.length;
+  if (!n) return m;
+  if (!m) return n;
+  const d = [];
+  for (let i = 0; i <= n; i++) { d[i] = new Array(m + 1); d[i][0] = i; }
+  for (let j = 0; j <= m; j++) d[0][j] = j;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[n][m];
+}
+const levSim = (a, b) => { const m = Math.max(a.length, b.length); return m ? 1 - osaDistance(a, b) / m : 1; };
+
+function jaroWinkler(a, b) {
+  if (a === b) return 1;
+  const la = a.length, lb = b.length;
+  if (!la || !lb) return 0;
+  const range = Math.max(0, Math.floor(Math.max(la, lb) / 2) - 1);
+  const ma = new Array(la).fill(false), mb = new Array(lb).fill(false);
+  let m = 0;
+  for (let i = 0; i < la; i++) {
+    const lo = Math.max(0, i - range), hi = Math.min(lb - 1, i + range);
+    for (let j = lo; j <= hi; j++) if (!mb[j] && a[i] === b[j]) { ma[i] = mb[j] = true; m++; break; }
+  }
+  if (!m) return 0;
+  let t = 0, k = 0;
+  for (let i = 0; i < la; i++) if (ma[i]) { while (!mb[k]) k++; if (a[i] !== b[k]) t++; k++; }
+  const jaro = (m / la + m / lb + (m - t / 2) / m) / 3;
+  let l = 0;
+  while (l < 4 && l < la && l < lb && a[l] === b[l]) l++;
+  return jaro + l * 0.1 * (1 - jaro);
+}
+
+function trigramSim(a, b) {
+  const grams = s => {
+    const p = '  ' + s + ' ';
+    const m = new Map();
+    for (let i = 0; i + 3 <= p.length; i++) { const g = p.slice(i, i + 3); m.set(g, (m.get(g) || 0) + 1); }
+    return m;
+  };
+  const A = grams(a), B = grams(b);
+  let inter = 0, sa = 0, sb = 0;
+  for (const [g, c] of A) { sa += c; inter += Math.min(c, B.get(g) || 0); }
+  for (const c of B.values()) sb += c;
+  return sa + sb ? 2 * inter / (sa + sb) : 0;
+}
+
+const tokSim = (x, y) => (x === y ? 1 : Math.max(levSim(x, y), jaroWinkler(x, y)));
+
+function nameSim(q, t) {
+  const a = foldText(q), b = foldText(t);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const full = 0.4 * levSim(a, b) + 0.3 * jaroWinkler(a, b) + 0.3 * trigramSim(a, b);
+  const bt = b.split(' ');
+  let cover = 0;
+  const at = a.split(' ');
+  for (const x of at) { let best = 0; for (const y of bt) best = Math.max(best, tokSim(x, y)); cover += best; }
+  cover /= at.length;
+  return Math.min(1, 0.6 * full + 0.4 * cover);
+}
+const titleSim = (a, b) => Math.max(nameSim(a, b), 0.9 * nameSim(b, a));
+
 function geminiCfg() {
   try {
     const d = JSON.parse(decodeURIComponent(ctx.rawConfig));
-    return { keys: Array.isArray(d.keys) ? d.keys.filter(k => k && String(k).trim()) : [], model: d.model || 'gemini-3.1-flash-lite' };
+    return { keys: Array.isArray(d.keys) ? d.keys.filter(k => k && String(k).trim()) : [], model: d.model || DEFAULT_SEARCH_MODEL };
   } catch (e) {
     return { keys: [], model: '' };
   }
+}
+
+async function searchKeys() {
+  const env = searchEnv();
+  if (env.keys.length) {
+    const cfgModel = (ctx && ctx.rawConfig) ? geminiCfg().model : '';
+    return { keys: env.keys, model: env.model || cfgModel || DEFAULT_SEARCH_MODEL, src: 'env' };
+  }
+  if (!ctx) await loadCtx();
+  if (!ctx || !ctx.rawConfig) return { keys: [], err: 'nocfg' };
+  const c = geminiCfg();
+  return { keys: c.keys, model: env.model || c.model || DEFAULT_SEARCH_MODEL, src: 'cfg', err: c.keys.length ? '' : 'nokeys' };
 }
 
 function cleanTitle(t) {
@@ -765,38 +876,66 @@ function cleanTitle(t) {
   return s && s.length <= 80 && !hasArabic(s) ? s : '';
 }
 
-async function translateTitle(name) {
+function extractJson(text) {
+  const s = String(text || '').replace(/```(?:json)?/gi, '').trim();
+  try { return JSON.parse(s); } catch (e) {}
+  const i = s.search(/[\[{]/);
+  if (i < 0) return null;
+  const close = s[i] === '{' ? '}' : ']';
+  const j = s.lastIndexOf(close);
+  if (j <= i) return null;
+  try { return JSON.parse(s.slice(i, j + 1)); } catch (e) { return null; }
+}
+
+const isGemini3Id = m => /^gemini-3/i.test(m) || /^gemini-(flash|flash-lite|pro)-latest$/i.test(m);
+
+function genVariants(model, wantJson, grounded, temperature) {
+  const base = { temperature };
+  if (wantJson && !grounded) base.responseMimeType = 'application/json';
+  if (!isGemini3Id(model)) return [base];
+  return [
+    Object.assign({}, base, { thinkingConfig: { thinkingLevel: 'low' } }),
+    Object.assign({}, base, { thinkingConfig: { thinkingLevel: 'minimal' } }),
+    base
+  ];
+}
+
+async function searchGemini({ prompt, deadline, wantJson, grounding, temperature }) {
   const S = shared;
-  if (!S || !S.acquireKey || !S.axios || !ctx || !ctx.rawConfig) return { err: 'nocfg' };
-  const cfg = geminiCfg();
-  if (!cfg.keys.length) return { err: 'nokeys' };
-  const model = S.normalizeGeminiModelId(cfg.model);
-  const generationConfig = { temperature: 0 };
-  if (/^gemini-3/i.test(model) || /^gemini-(flash|flash-lite|pro)-latest$/i.test(model)) generationConfig.thinkingConfig = { thinkingLevel: 'minimal' };
-  const prompt = 'Give the official English title (as listed on IMDb) of the movie, TV series or anime whose name is written below in Arabic. '
-    + 'Reply with the English title only: one line, no quotes, no year, no explanation.\nName: ' + name;
+  if (!S || !S.acquireKey || !S.axios) return { err: 'nocfg' };
+  const ks = await searchKeys();
+  if (!ks.keys.length) return { err: ks.err || 'nokeys' };
+  const model = S.normalizeGeminiModelId(ks.model);
   const url = S.DEFAULT_GEMINI_API_URL + '/models/' + model + ':generateContent';
-  for (let a = 0; a < 3; a++) {
-    const key = await S.acquireKey(cfg.keys, 8000);
+  let vi = 0;
+  let grounded = !!grounding;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining < 3000) return { err: 'busy' };
+    const key = await S.acquireKey(ks.keys, Math.min(8000, remaining));
     if (!key) return { err: 'busy' };
+    const variants = genVariants(model, wantJson, grounded, temperature == null ? 0.2 : temperature);
+    const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: variants[Math.min(vi, variants.length - 1)], safetySettings: S.SAFETY_SETTINGS_OFF };
+    if (grounded) body.tools = [{ google_search: {} }];
     try {
-      const r = await S.axios.post(url, {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig,
-        safetySettings: S.SAFETY_SETTINGS_OFF
-      }, {
+      const r = await S.axios.post(url, body, {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': String(key).trim(), 'x-goog-api-client': S.GEMINI_CLIENT_HEADER },
-        timeout: GEMINI_TITLE_TIMEOUT_MS, httpAgent: S.httpAgent, httpsAgent: S.httpsAgent
+        timeout: Math.min(GEMINI_STEP_TIMEOUT_MS, Math.max(remaining, 3000)), httpAgent: S.httpAgent, httpsAgent: S.httpsAgent
       });
       const parts = (r && r.data && r.data.candidates && r.data.candidates[0] && r.data.candidates[0].content && r.data.candidates[0].content.parts) || [];
-      const title = cleanTitle(parts.map(p => (p && p.text) || '').join(''));
-      return title ? { title } : { err: 'empty' };
+      const text = parts.map(p => (p && p.text) || '').join('');
+      return text.trim() ? { text, grounded } : { err: 'empty' };
     } catch (e) {
       const st = (e && e.response && e.response.status) || 0;
       if (S.isGeminiAuthFailure(e)) { S.deadKeys.add(key); continue; }
-      if (st === 400 || st === 404) return { err: 'config' };
+      if (st === 404) return { err: 'config' };
+      if (st === 400) {
+        if (grounded) { grounded = false; console.log('[بحث ذكي] الموديل رفض البحث بجوجل (grounding)، أكمل بدونه.'); continue; }
+        if (vi < variants.length - 1) { vi++; continue; }
+        return { err: 'config' };
+      }
       S.keyCooldowns.set(key, Date.now() + S.cooldownForStatus(st));
-      await sleep(800);
+      await sleep(600);
     }
   }
   return { err: 'busy' };
@@ -807,8 +946,21 @@ async function cinemetaSearch(type, q) {
     const r = await axios.get('https://v3-cinemeta.strem.io/catalog/' + type + '/top/search=' + encodeURIComponent(q) + '.json', { timeout: CINEMETA_SEARCH_TIMEOUT_MS });
     const metas = r && r.data && Array.isArray(r.data.metas) ? r.data.metas : [];
     return metas.filter(x => x && /^tt\d+$/.test(String(x.id || ''))).map(x => ({
-      id: String(x.id), type, name: String(x.name || x.id), year: parseInt(String(x.releaseInfo || x.year || '').slice(0, 4), 10) || 0
+      id: String(x.id), type, name: String(x.name || x.id), year: parseInt(String(x.releaseInfo || x.year || '').slice(0, 4), 10) || 0,
+      poster: /^https:\/\//.test(String(x.poster || '')) ? String(x.poster) : ''
     }));
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchMetaBrief(type, id) {
+  try {
+    const r = await axios.get('https://v3-cinemeta.strem.io/meta/' + type + '/' + id + '.json', { timeout: CINEMETA_META_TIMEOUT_MS });
+    const m = r && r.data && r.data.meta;
+    if (!m) return null;
+    const arr = v => (Array.isArray(v) ? v : v ? [v] : []).map(String);
+    return { genres: arr(m.genres).slice(0, 4), cast: arr(m.cast).slice(0, 8), director: arr(m.director).slice(0, 2), country: String(m.country || ''), description: String(m.description || '').slice(0, 350) };
   } catch (e) {
     return null;
   }
@@ -830,65 +982,253 @@ function mergeResults(lists, year) {
   return { items: exact.concat(all.filter(x => x.year !== year)).slice(0, FIND_MAX_RESULTS), yearMiss: false };
 }
 
-const TRANSLATE_FAIL = {
-  nokeys: 'ما لقيت مفاتيح جمناي بإعداداتك، اكتب الاسم بالإنجليزي.',
-  busy: 'مفاتيح جمناي مشغولة حالياً، اكتب الاسم بالإنجليزي أو جرّب بعد شوي.',
-  config: 'الموديل المحفوظ بإعداداتك ما قبل الطلب، اكتب الاسم بالإنجليزي.',
-  empty: 'ما كدرت أترجم الاسم، اكتب الاسم بالإنجليزي.',
-  nocfg: 'ما كدرت أترجم الاسم، اكتب الاسم بالإنجليزي.'
+async function freeSearch(p) {
+  const types = p.kind === 'movie' ? ['movie'] : p.kind === 'series' ? ['series'] : ['movie', 'series'];
+  const lists = await Promise.all(types.map(t => cinemetaSearch(t, p.name)));
+  return lists.every(l => l === null) ? null : mergeResults(lists, p.year);
+}
+
+async function understand(raw, p, deadline) {
+  const env = searchEnv();
+  const curYear = new Date().getFullYear();
+  const hints = [p.kind ? 'type=' + p.kind : '', p.year ? 'year=' + p.year : ''].filter(Boolean).join(', ');
+  const prompt = [
+    'You are the search engine of a movie / TV series / anime lookup bot. The user wrote the message below in Arabic or English. It may contain typos, a partial title, a transliterated title, or a description from memory (plot, scenes, characters, actors, country, era).',
+    'Task: identify up to ' + SMART_MAX + ' movies, TV series or anime this message most likely refers to, best match first.',
+    'Rules:',
+    '- Return REAL works only. Never invent a title. If you are not sure a work exists, leave it out or give it a low confidence.',
+    '- "title" is the official English title as listed on IMDb (never a translation or transliteration of your own). For non-English works use the English release title on IMDb and put the original-language title in "original_title".',
+    '- "year" is the first release year as an integer, or null if unsure. "type" is "movie" or "series" (anime TV = "series", anime film = "movie").',
+    '- "confidence" is an integer 0-100: how likely this is the work the user means.',
+    '- If the message names a work (even misspelled or incomplete), put that work first; add other works of the same franchise only if the name is ambiguous.',
+    '- If it describes plot / actors / scenes, rank by how well each work fits ALL the clues together, not just one clue.',
+    '- Respect the user hints (type, year) when given.',
+    '- If the message holds too little information to identify anything (for example just "an action movie"), return vague=true and an empty list.',
+    '- "mode" is "title" when the user is trying to type a name, or "description" when they describe the work.',
+    'Output ONLY JSON, no commentary: {"mode":"title","vague":false,"candidates":[{"title":"","original_title":"","year":2020,"type":"movie","confidence":90}]}',
+    'Today\'s date: ' + new Date().toISOString().slice(0, 10),
+    hints ? 'User hints: ' + hints : '',
+    'User message: <<<' + raw + '>>>'
+  ].filter(Boolean).join('\n');
+  const r = await searchGemini({ prompt, deadline, wantJson: true, grounding: env.grounding, temperature: 0.2 });
+  if (!r.text) return { err: r.err || 'empty' };
+  const j = extractJson(r.text);
+  if (!j || typeof j !== 'object') return { err: 'empty' };
+  const arr = Array.isArray(j) ? j : (Array.isArray(j.candidates) ? j.candidates : []);
+  const seen = new Set();
+  const cands = [];
+  for (const c of arr) {
+    const title = cleanTitle(c && c.title);
+    if (!title) continue;
+    const y = Math.round(Number(c.year));
+    const year = y >= 1880 && y <= curYear + 2 ? y : 0;
+    const key = foldText(title) + '|' + year;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const conf = Number(c.confidence);
+    cands.push({ title, original: cleanTitle(c.original_title), year, type: c.type === 'movie' || c.type === 'series' ? c.type : '', confidence: Number.isFinite(conf) ? clamp(conf, 0, 100) : 50 });
+  }
+  cands.sort((a, b) => b.confidence - a.confidence);
+  return { mode: j.mode === 'description' ? 'description' : 'title', vague: !!j.vague || !cands.length, cands: cands.slice(0, SMART_MAX), grounded: !!r.grounded };
+}
+
+async function resolveCandidate(c) {
+  const types = c.type ? [c.type] : ['movie', 'series'];
+  const qs = [c.title];
+  const main = c.title.split(/\s*[:\-–—]\s*/)[0].trim();
+  if (main.length >= 3 && main !== c.title) qs.push(main);
+  if (c.original && c.original !== c.title) qs.push(c.original);
+  for (const q of qs) {
+    const lists = await Promise.all(types.map(t => cinemetaSearch(t, q)));
+    let best = null;
+    for (const l of lists) {
+      for (const x of (l || [])) {
+        const sim = titleSim(c.title, x.name);
+        if (sim < RESOLVE_MIN_SIM) continue;
+        const yd = c.year && x.year ? Math.abs(c.year - x.year) : null;
+        if (yd !== null && yd > 2 && sim < 0.9) continue;
+        const score = sim * 0.75 + (yd === null ? 0.5 : yd === 0 ? 1 : yd === 1 ? 0.5 : 0) * 0.25;
+        if (!best || score > best.score) best = { x, score };
+      }
+    }
+    if (best) return Object.assign({}, best.x, { c1: c.confidence });
+  }
+  return null;
+}
+
+async function compareByDescription(raw, items, deadline) {
+  const metas = await Promise.all(items.map(x => fetchMetaBrief(x.type, x.id)));
+  const pack = items.map((x, i) => Object.assign({ id: x.id, type: x.type, title: x.name, year: x.year || null }, metas[i] || {}));
+  const prompt = [
+    'A user is trying to remember a movie / TV series / anime. Their description (Arabic or English):',
+    '<<<' + raw + '>>>',
+    'Below are candidate works with data from a database (JSON). For EACH candidate, score 0-100 how well it matches ALL the clues in the description (plot, characters, actors, year, country, genre). Use the data given plus your own knowledge. A clue that contradicts the work (wrong actor, wrong era, wrong country) is a strong negative; a clue that fits is a positive. Do not reward a candidate just for being famous.',
+    'Output ONLY JSON, no commentary: [{"id":"tt...","score":85,"why":"<= 12 words in Arabic"}]',
+    'Candidates: ' + JSON.stringify(pack)
+  ].join('\n');
+  const r = await searchGemini({ prompt, deadline, wantJson: true, grounding: false, temperature: 0 });
+  if (!r.text) return null;
+  const j = extractJson(r.text);
+  const arr = Array.isArray(j) ? j : (j && Array.isArray(j.results) ? j.results : null);
+  if (!arr) return null;
+  const ids = new Set(items.map(x => x.id));
+  const out = new Map();
+  for (const e of arr) {
+    const id = String(e && e.id || '');
+    const sc = Number(e && e.score);
+    if (ids.has(id) && Number.isFinite(sc)) out.set(id, { score: clamp(sc, 0, 100), why: trunc(String(e.why || '').replace(/\s+/g, ' ').trim(), 70) });
+  }
+  return out.size ? out : null;
+}
+
+function rankItems(resolved, cmp, p, mode) {
+  const latinQ = mode === 'title' && !hasArabic(p.name) ? p.name : '';
+  const scored = resolved.map(x => {
+    const c3 = cmp && cmp.has(x.id) ? cmp.get(x.id).score : null;
+    const sim = latinQ ? nameSim(latinQ, x.name) : null;
+    const parts = [[c3 != null ? 0.35 : 0.65, x.c1]];
+    if (c3 != null) parts.push([0.5, c3]);
+    if (sim != null) parts.push([c3 != null ? 0.15 : 0.35, sim * 100]);
+    let s = parts.reduce((a, q) => a + q[0] * q[1], 0) / parts.reduce((a, q) => a + q[0], 0);
+    if (p.year && x.year) { const d = Math.abs(p.year - x.year); s += d === 0 ? 8 : d === 1 ? 3 : -12; }
+    if ((p.kind === 'movie' || p.kind === 'series') && x.type !== p.kind) s -= 40;
+    return Object.assign({}, x, { score: clamp(Math.round(s), 0, 100), why: c3 != null ? cmp.get(x.id).why : '' });
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, SMART_MAX);
+}
+
+const SMART_FAIL = {
+  nokeys: 'ما لقيت مفاتيح جمناي للبحث (لا بمتغير SEARCH_GEMINI_KEYS ولا بإعداداتك). اكتب الاسم بالإنجليزي.',
+  nocfg: 'ما عندي إعداداتك بالذاكرة (السيرفر تو اشتغل). افتح أي حلقة من Nuvio مرة وحدة، أو اكتب الاسم بالإنجليزي.',
+  busy: 'مفاتيح جمناي مشغولة حالياً، جرّب بعد شوي أو اكتب الاسم بالإنجليزي.',
+  config: 'الموديل المحفوظ ما قبل الطلب، غيّره أو اكتب الاسم بالإنجليزي.',
+  empty: 'ما كدرت أفهم الطلب، جرّب صياغة ثانية أو اكتب الاسم بالإنجليزي.'
 };
 
-async function onFind(chatId, raw) {
+async function sendPosters(chatId, items) {
+  const pics = items.map((x, i) => ({ x, i })).filter(o => o.x.poster).slice(0, POSTERS_MAX);
+  if (!pics.length) return;
+  const cap = o => (o.i + 1) + '. ' + trunc(o.x.name, 80) + (o.x.year ? ' (' + o.x.year + ')' : '');
+  try {
+    if (pics.length === 1) await tg('sendPhoto', { chat_id: chatId, photo: pics[0].x.poster, caption: cap(pics[0]) }, 20000, false);
+    else await tg('sendMediaGroup', { chat_id: chatId, media: pics.map(o => ({ type: 'photo', media: o.x.poster, caption: cap(o) })) }, 25000, false);
+  } catch (e) {
+    for (const o of pics) await tg('sendPhoto', { chat_id: chatId, photo: o.x.poster, caption: cap(o) }, 15000, false).catch(() => {});
+  }
+}
+
+async function showResults(chatId, o) {
+  const { items, p, raw, smart, canSmart, mode } = o;
+  const desc = smart && mode === 'description';
+  const tags = [{ movie: 'فلم', series: 'مسلسل', anime: 'أنمي' }[p.kind] || '', p.year ? String(p.year) : ''].filter(Boolean);
+  const out = [];
+  if (desc) out.push(rtl('🧠 رشحت لك حسب وصفك (الأقرب أول):'));
+  else out.push(rtl('🔎 نتائج ' + latin('«' + (smart && hasArabic(p.name) ? items[0].name : p.name) + '»') + (tags.length ? ' (' + tags.join(' · ') + ')' : '')));
+  if (smart && !desc && hasArabic(p.name) && p.name.length <= 40) out.push(rtl('🌐 ' + p.name + ' ← ' + latin(items[0].name)));
+  if (o.yearMiss) out.push(rtl('ما لقيت بسنة ' + p.year + '، هذي أقرب النتائج:'));
+  if (o.note) out.push(rtl(o.note));
+  if (desc) {
+    items.forEach((x, i) => out.push(rtl((i + 1) + '. ' + (x.score >= 75 ? '✅' : x.score >= 50 ? '🔸' : '▫️') + ' ' + latin(x.name + (x.year ? ' (' + x.year + ')' : '')) + (x.why ? ' — ' + x.why : ''))));
+    out.push(rtl('✅ قوي · 🔸 محتمل · ▫️ ضعيف'));
+  }
+  out.push(rtl('🎬 فلم · 📺 مسلسل. اختر العمل الصحيح:'));
+  const h = crypto.createHash('sha1').update(raw + ':' + Date.now()).digest('hex').slice(0, 8);
+  finds.set(h, { items, at: Date.now(), raw });
+  while (finds.size > MAX_FINDS) finds.delete(finds.keys().next().value);
+  const rows = items.map((x, i) => [{ text: (i + 1) + '· ' + (x.type === 'movie' ? '🎬 ' : '📺 ') + trunc(x.name, 34) + (x.year ? ' · ' + x.year : ''), callback_data: 'fd:' + h + ':' + i }]);
+  if (canSmart && !smart) rows.push([{ text: '🧠 بحث أذكى (وصف/تصحيح أخطاء)', callback_data: 'fs:' + h }]);
+  await withTimeout(sendPosters(chatId, items), 40000);
+  await tg('sendMessage', { chat_id: chatId, text: out.join('\n'), reply_markup: { inline_keyboard: rows }, disable_web_page_preview: true });
+}
+
+async function runSearch(chatId, rawIn, opts) {
+  opts = opts || {};
   const send = (text, markup) => tg('sendMessage', { chat_id: chatId, text, reply_markup: markup, disable_web_page_preview: true });
+  let waitId = 0;
+  const clearWait = async () => {
+    if (!waitId) return;
+    const id = waitId;
+    waitId = 0;
+    await tg('deleteMessage', { chat_id: chatId, message_id: id }).catch(() => {});
+  };
   try {
     pendingEp = null;
-    const p = parseQuery(raw);
+    const raw = String(rawIn || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_RAW);
+    const p = parseQuery(raw, MAX_RAW);
     if (!p.name) {
-      await send([rtl('🔎 البحث بالاسم'), rtl('اكتب الاسم بعد الأمر، مثل:'), latin('/find spider man 2026'), rtl('أو بالعربي:'), rtl('بحث فلم سبايدر مان 2026')].join('\n'));
+      await send([rtl('🔎 البحث بالاسم أو بالوصف'), rtl('اكتب اسم الفلم أو المسلسل، أو وصفاً لما تتذكره، مثل:'), latin('spider man 2026'), rtl('فلم سبايدر مان 2026'), rtl('اتذكر فلم عن شاب يعضه عنكبوت ويتسلق الجدران')].join('\n'));
       return;
     }
-    let name = p.name;
-    const notes = [];
-    if (hasArabic(name)) {
-      if (!ctx) await loadCtx();
-      if (!ctx) {
-        await send([rtl('ما عندي إعداداتك بالذاكرة (السيرفر تو اشتغل)، فما أكدر أترجم الاسم.'), rtl('اكتب الاسم بالإنجليزي، أو افتح أي حلقة من Nuvio مرة وحدة وارجع.')].join('\n'));
+    const deadline = Date.now() + SMART_DEADLINE_MS;
+    const ks = (await withTimeout(searchKeys(), 4000)) || { keys: [], err: 'nocfg' };
+    const canSmart = ks.keys.length > 0;
+    const words = p.name.split(' ').length;
+    const wantSmart = !!opts.forceSmart || hasArabic(raw) || words >= 7 || DESC_CUE.test(raw);
+    let free = null;
+    if (!wantSmart) {
+      free = await freeSearch(p);
+      if (free && free.items.length) {
+        const best = Math.max(...free.items.map(x => nameSim(p.name, x.name)));
+        if (best >= ESCALATE_SIM || !canSmart) {
+          console.log('[بحث] مباشر من Cinemeta (' + free.items.length + ' نتيجة، أفضل تشابه ' + best.toFixed(2) + ')');
+          await showResults(chatId, { items: free.items, p, raw, smart: false, canSmart, yearMiss: free.yearMiss });
+          return;
+        }
+        console.log('[بحث] التشابه ضعيف (' + best.toFixed(2) + ') ⟵ أنتقل للبحث الذكي');
+      } else if (!canSmart) {
+        await send(free === null ? rtl('⚠️ تعذر الاتصال بمصدر البحث (Cinemeta)، جرّب بعد شوي.') : rtl('ما لقيت نتائج لـ ' + latin('«' + p.name + '»')) + '\n' + rtl('جرّب اسم ثاني، أو أضف مفاتيح جمناي للبحث حتى يفهم الوصف والأخطاء.'));
         return;
       }
-      const tr = await translateTitle(name);
-      if (!tr.title) {
-        console.log('[بحث] فشلت ترجمة الاسم: ' + (tr.err || 'unknown'));
-        await send(rtl('⚠️ ' + (TRANSLATE_FAIL[tr.err] || TRANSLATE_FAIL.empty)));
-        return;
-      }
-      notes.push(rtl('🌐 ' + name + ' ← ' + latin(tr.title)));
-      name = tr.title;
     }
-    const types = p.kind === 'movie' ? ['movie'] : p.kind === 'series' ? ['series'] : ['movie', 'series'];
-    const lists = await Promise.all(types.map(t => cinemetaSearch(t, name)));
-    if (lists.every(l => l === null)) {
-      await send(rtl('⚠️ تعذر الاتصال بمصدر البحث (Cinemeta)، جرّب بعد شوي.'));
+    if (!canSmart) { await send(rtl('⚠️ ' + SMART_FAIL[ks.err === 'nocfg' ? 'nocfg' : 'nokeys'])); return; }
+
+    const wait = await send(rtl('🧠 جاري البحث الذكي...'));
+    waitId = (wait && wait.message_id) || 0;
+    const fallbackFree = async note => {
+      await clearWait();
+      await showResults(chatId, { items: free.items, p, raw, smart: false, canSmart: false, yearMiss: free.yearMiss, note });
+    };
+    const u = await understand(raw, p, deadline);
+    if (u.err) {
+      console.log('[بحث ذكي] فشل الفهم: ' + u.err);
+      if (free && free.items.length) { await fallbackFree('تعذر البحث الذكي، هذي نتائج البحث العادي:'); return; }
+      await clearWait();
+      await send(rtl('⚠️ ' + (SMART_FAIL[u.err] || SMART_FAIL.empty)));
       return;
     }
-    const { items, yearMiss } = mergeResults(lists, p.year);
-    if (!items.length) {
-      await send(rtl('ما لقيت نتائج لـ ' + latin('«' + name + '»')) + '\n' + rtl('جرّب اسم ثاني أو اكتبه بالإنجليزي.'));
+    if (u.vague) {
+      console.log('[بحث ذكي] الطلب عام/غير محدد');
+      if (free && free.items.length) { await fallbackFree('ما كدرت أفهم الطلب أكثر، هذي نتائج البحث العادي:'); return; }
+      await clearWait();
+      await send([rtl('🧠 ما كدرت أحدد العمل، المعلومات قليلة.'), rtl('أضف أي من هذي: اسم ممثل، سنة تقريبية، حدث أو مشهد مميز، بلد أو لغة، أو نوعه (فلم / مسلسل / أنمي).')].join('\n'));
       return;
     }
-    const tags = [{ movie: 'فلم', series: 'مسلسل', anime: 'أنمي' }[p.kind] || '', p.year ? String(p.year) : ''].filter(Boolean);
-    const out = [rtl('🔎 نتائج ' + latin('«' + name + '»') + (tags.length ? ' (' + tags.join(' · ') + ')' : '')), ...notes];
-    if (yearMiss) out.push(rtl('ما لقيت بسنة ' + p.year + '، هذي أقرب النتائج:'));
-    out.push(rtl('🎬 فلم · 📺 مسلسل. اختر العمل الصحيح:'));
-    const h = crypto.createHash('sha1').update(name + ':' + Date.now()).digest('hex').slice(0, 8);
-    finds.set(h, { items, at: Date.now() });
-    while (finds.size > MAX_FINDS) finds.delete(finds.keys().next().value);
-    const rows = items.map((x, i) => [{ text: (x.type === 'movie' ? '🎬 ' : '📺 ') + trunc(x.name, 40) + (x.year ? ' · ' + x.year : ''), callback_data: 'fd:' + h + ':' + i }]);
-    await send(out.join('\n'), { inline_keyboard: rows });
+    const resolvedAll = (await Promise.all(u.cands.map(c => resolveCandidate(c)))).filter(Boolean);
+    const byId = new Map();
+    for (const x of resolvedAll) if (!byId.has(x.id) || byId.get(x.id).c1 < x.c1) byId.set(x.id, x);
+    const resolved = [...byId.values()];
+    console.log('[بحث ذكي] الوضع=' + u.mode + ' | مرشحين=' + u.cands.length + ' | تحقق منهم=' + resolved.length + (u.grounded ? ' | grounding' : ''));
+    if (!resolved.length) {
+      if (free && free.items.length) { await fallbackFree('جمناي ما لقى شي أدق، هذي نتائج البحث العادي:'); return; }
+      await clearWait();
+      await send([rtl('جمناي رجّح هذي الأعمال، بس ما لقيتها بـ Cinemeta:'), ...u.cands.map(c => rtl('• ' + latin(c.title + (c.year ? ' (' + c.year + ')' : '')))), rtl('جرّب تكتب الاسم بالإنجليزي أو أضف تفاصيل.')].join('\n'));
+      return;
+    }
+    let cmp = null;
+    if (u.mode === 'description' && resolved.length >= 2 && deadline - Date.now() > 8000) cmp = await compareByDescription(raw, resolved, deadline).catch(() => null);
+    if (u.mode === 'description') console.log('[بحث ذكي] مقارنة الأوصاف: ' + (cmp ? cmp.size + ' نتيجة' : 'تعذرت (أكمل بترتيب جمناي الأول)'));
+    const items = rankItems(resolved, cmp, p, u.mode);
+    await clearWait();
+    await showResults(chatId, { items, p, raw, smart: true, canSmart, mode: u.mode });
   } catch (e) {
-    logErr('خطأ بالبحث بالاسم', e);
+    logErr('خطأ بالبحث', e);
+    await clearWait();
     try { await send(rtl('⚠️ صار خطأ أثناء البحث، جرّب مرة ثانية.')); } catch (e2) {}
   }
 }
+
+const onFind = runSearch;
 
 async function askEpisode(chatId, it) {
   pendingEp = { imdb: it.id, name: it.name, at: Date.now() };
@@ -920,6 +1260,14 @@ async function onFindCallback(cq) {
   await askEpisode(chatId, it);
 }
 
+async function onSmartCallback(cq) {
+  const m = /^fs:([0-9a-f]{8})$/.exec(String(cq.data || ''));
+  const f = m && finds.get(m[1]);
+  if (!f) { await answerCb(cq, 'انتهت صلاحية هذي القائمة، ابعث البحث من جديد'); return; }
+  await answerCb(cq, 'جاري البحث الذكي...');
+  await runSearch(cq.message.chat.id, f.raw, { forceSmart: true });
+}
+
 async function onEpisodeReply(chatId, er) {
   const p = pendingEp;
   if (!p) return;
@@ -947,6 +1295,7 @@ async function handleUpdate(u) {
     const data = String((cq && cq.data) || '');
     if (cq && /^go:/.test(data)) return await onGoCallback(cq);
     if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
+    if (cq && /^fs:/.test(data)) return await onSmartCallback(cq);
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
     if (cq) return await onPanelCallback(cq);
@@ -961,6 +1310,7 @@ async function handleUpdate(u) {
     else if (isStopCmd(text)) await stopBatch(chatId);
     else if (isClearCmd(text)) await sendAskClear(chatId);
     else if (isPanelCmd(text)) await sendPanel(chatId);
+    else if (isPlainSearchText(text)) await onFind(chatId, text);
   } catch (e) {
     logErr('خطأ بمعالجة أمر', e);
   }
@@ -1015,5 +1365,5 @@ loadCtx().catch(() => {});
 
 module.exports = {
   start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, cinemetaSearch, mergeResults, translateTitle, onFind, getPendingEp: () => pendingEp, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
 };
