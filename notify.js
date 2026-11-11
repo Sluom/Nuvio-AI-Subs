@@ -197,6 +197,7 @@ function siteOfUrl(url) {
   const site = host.includes('subsource') ? 'subsource'
     : host.includes('subdl') ? 'subdl'
     : host.includes('opensubtitles') ? 'opensubtitles'
+    : host.includes('wyzie') ? 'wyzie'
     : (host || 'مصدر');
   let pack = '';
   const segs = path.split('/').filter(Boolean);
@@ -239,6 +240,7 @@ function spellDetail(spell) {
 }
 
 async function report(ev) {
+  statTrack(ev);
   let ep;
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
   if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
@@ -363,6 +365,7 @@ const MODEL_EVENT_GAP_MS = 5 * 60 * 1000;
 async function modelReport(ev) {
   if (!ENABLED) return;
   const kind = String(ev && ev.kind || '');
+  statModel(kind);
   const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
   const now = Date.now();
   const last = modelSeen.get(key);
@@ -409,6 +412,170 @@ function modelEvent(ev) {
   try { modelReport(ev || {}).catch(() => {}); } catch (e) { /* لا شيء */ }
 }
 
+
+const STATS_TZ_MS = 3 * 3600 * 1000;
+const DAY_MS = 24 * 3600 * 1000;
+const STATS_SAVE_DELAY_MS = 3000;
+const SUMMARY_FIRST_CHECK_MS = 90 * 1000;
+const SUMMARY_FIRE_DELAY_MS = 5000;
+const STATS_MAX_EPS = 500;
+const SOURCES_EVENT_GAP_MS = 3 * 60 * 1000;
+
+const getDb = () => { try { return require('./db'); } catch (e) { return null; } };
+const baghdadDay = (t = Date.now()) => new Date(t + STATS_TZ_MS).toISOString().slice(0, 10);
+const emptyStats = day => ({ day, tracks: { ASS: 0, SRT: 0 }, eps: [], lines: 0, partial: 0, failed: 0, error: 0, src: {}, choke: 0, fbwon: 0, rescue: 0, bothFailed: 0 });
+
+let statsPromise = null;
+let statsPromiseDay = '';
+let statsDirty = null;
+let statsTimer = null;
+
+function statsFor(day) {
+  if (statsPromise && statsPromiseDay === day) return statsPromise;
+  statsPromiseDay = day;
+  statsPromise = (async () => {
+    let data = null;
+    try { const db = getDb(); data = db ? await db.loadDoc('dailystats', day) : null; } catch (e) { data = null; }
+    const base = emptyStats(day);
+    if (data && typeof data === 'object') {
+      Object.assign(base, data, { tracks: Object.assign(base.tracks, data.tracks || {}), src: Object.assign({}, data.src || {}), eps: Array.isArray(data.eps) ? data.eps : [] });
+    }
+    return base;
+  })();
+  return statsPromise;
+}
+
+function flushStats() {
+  statsTimer = null;
+  const s = statsDirty;
+  statsDirty = null;
+  if (!s) return;
+  try {
+    const db = getDb();
+    if (db) Promise.resolve(db.saveDoc('dailystats', s.day, s)).catch(() => {});
+  } catch (e) { /* لا شيء */ }
+}
+
+function statBump(fn) {
+  if (!ENABLED) return;
+  try {
+    statsFor(baghdadDay()).then(s => {
+      fn(s);
+      if (statsDirty && statsDirty !== s) flushStats();
+      statsDirty = s;
+      if (!statsTimer) {
+        statsTimer = setTimeout(flushStats, STATS_SAVE_DELAY_MS);
+        if (statsTimer.unref) statsTimer.unref();
+      }
+    }).catch(() => {});
+  } catch (e) { /* لا شيء */ }
+}
+
+function statTrack(ev) {
+  try {
+    const kind = String(ev && ev.kind || '');
+    statBump(s => {
+      if (kind === 'done') {
+        const k = ev.label === 'ARA-ASS' ? 'ASS' : 'SRT';
+        s.tracks[k] = (s.tracks[k] || 0) + 1;
+        s.lines += Number(ev.total) || 0;
+        const id = String(ev.targetId || '');
+        if (id && !s.eps.includes(id) && s.eps.length < STATS_MAX_EPS) s.eps.push(id);
+        const name = siteOfUrl(ev.url).split(' ')[0] || 'مصدر';
+        s.src[name] = (s.src[name] || 0) + 1;
+      } else if (kind === 'partial') s.partial++;
+      else if (kind === 'failed') s.failed++;
+      else s.error++;
+    });
+  } catch (e) { /* لا شيء */ }
+}
+
+function statModel(kind) {
+  const field = { choke: 'choke', 'fallback-won': 'fbwon', rescue: 'rescue', 'both-failed': 'bothFailed' }[kind];
+  if (field) statBump(s => { s[field] = (s[field] || 0) + 1; });
+}
+
+function summaryText(s) {
+  const done = (s.tracks.ASS || 0) + (s.tracks.SRT || 0);
+  const [, mm, dd] = String(s.day).split('-');
+  const lines = [rtl('📊 ملخص يوم ' + latin(dd + '/' + mm))];
+  lines.push(rtl('🎞 الحلقات: ' + s.eps.length + ' | التراكات المكتملة: ' + done + ' (' + latin('ASS ' + (s.tracks.ASS || 0) + ' · SRT ' + (s.tracks.SRT || 0)) + ')'));
+  lines.push(rtl('📄 الأسطر: ' + (s.lines || 0)));
+  lines.push(rtl('⚠️ جزئي: ' + s.partial + ' | ❌ فشل: ' + s.failed + ' | 💥 خطأ: ' + s.error));
+  if (s.choke || s.bothFailed) lines.push(rtl('🧠 اختناق الموديل: ' + s.choke + (s.bothFailed ? ' | فشل الموديلين: ' + s.bothFailed : '')));
+  const top = Object.entries(s.src || {}).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  if (top.length) lines.push(rtl('🏆 أكثر المصادر: ' + top.map(([n, c]) => latin(n) + ' (' + c + ')').join(' · ')));
+  return lines.join('\n');
+}
+
+let lastSummaryDay = '';
+
+async function sendDailySummary(day) {
+  if (!ENABLED || !day || lastSummaryDay >= day) return;
+  const db = getDb();
+  let sent = null;
+  try { sent = db ? await db.loadDoc('dailystats', '_sent') : null; } catch (e) { sent = null; }
+  if (sent && sent.day && String(sent.day) >= day) { lastSummaryDay = String(sent.day); return; }
+  let s = null;
+  if (statsPromise && statsPromiseDay === day) s = await statsPromise;
+  else {
+    try { s = db ? await db.loadDoc('dailystats', day) : null; } catch (e) { s = null; }
+  }
+  lastSummaryDay = day;
+  try { if (db) await db.saveDoc('dailystats', '_sent', { day }); } catch (e) { /* لا شيء */ }
+  if (!s || typeof s !== 'object') return;
+  s = Object.assign(emptyStats(day), s, { tracks: Object.assign({ ASS: 0, SRT: 0 }, s.tracks || {}), src: s.src || {}, eps: Array.isArray(s.eps) ? s.eps : [] });
+  const total = (s.tracks.ASS || 0) + (s.tracks.SRT || 0) + s.partial + s.failed + s.error + (s.choke || 0);
+  if (!total) return;
+  enqueue(summaryText(s));
+}
+
+function msToNextBaghdadMidnight() {
+  const local = Date.now() + STATS_TZ_MS;
+  return (Math.floor(local / DAY_MS) + 1) * DAY_MS - local;
+}
+
+function startDailySummary() {
+  if (!ENABLED) return;
+  const arm = () => {
+    const t = setTimeout(() => {
+      sendDailySummary(baghdadDay(Date.now() - 3600 * 1000)).catch(() => {}).finally(arm);
+    }, msToNextBaghdadMidnight() + SUMMARY_FIRE_DELAY_MS);
+    if (t.unref) t.unref();
+  };
+  const first = setTimeout(() => { sendDailySummary(baghdadDay(Date.now() - DAY_MS)).catch(() => {}); }, SUMMARY_FIRST_CHECK_MS);
+  if (first.unref) first.unref();
+  arm();
+}
+
+const sourcesSeen = new Map();
+
+async function sourcesReport(ev) {
+  if (!ENABLED || !ev || !/^tt\d+$/.test(String(ev.imdbId || ''))) return;
+  const isSeries = ev.season != null && ev.episode != null;
+  const targetId = isSeries ? ev.imdbId + ':' + ev.season + ':' + ev.episode : ev.imdbId;
+  const now = Date.now();
+  const last = sourcesSeen.get(targetId);
+  if (last && now - last < SOURCES_EVENT_GAP_MS) return;
+  sourcesSeen.set(targetId, now);
+  if (sourcesSeen.size > 200) sourcesSeen.clear();
+  let ep = null;
+  try { ep = await describeEpisode(targetId); } catch (e) { ep = null; }
+  let title = null;
+  try { title = await titleOf(targetId, isSeries ? 'series' : 'movie'); } catch (e) { title = null; }
+  const wyzieText = ev.wyzieState === 'off' ? 'غير مفعّل' : ev.wyzieState === 'paused' ? 'متوقف مؤقتاً' : ev.wyzie > 0 ? ev.wyzie + ' ASS' : 'ما لقى';
+  const orgText = ev.org > 0 ? ev.org + (ev.orgAss > 0 ? ' (' + ev.orgAss + ' ASS)' : '') : 'ما لقى';
+  const out = [rtl('📡 مصادر الأنمي' + (ev.isPrefetch ? ' (تجهيز تلقائي)' : ''))];
+  out.push(rtl('🎬 ' + latin(title ? title + ' (' + ev.imdbId + ')' : ev.imdbId)));
+  if (isSeries && ep) out.push(rtl('📺 ' + ep.text));
+  out.push(rtl('🔹 ' + latin('Wyzie') + ': ' + wyzieText + ' | ' + latin('org') + ': ' + orgText));
+  enqueue(out.join('\n'));
+}
+
+function sourcesEvent(ev) {
+  try { sourcesReport(ev).catch(() => {}); } catch (e) { /* لا شيء */ }
+}
+
 // الواجهة الوحيدة: ترجع فورا ولا ترمي خطأ أبدا
 function trackEvent(ev) {
   try {
@@ -420,8 +587,9 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام مفعّل ⟵ يصلك ملخص كل تراك يُصحَّح وتنبيهات المشاكل.');
   const t = setTimeout(() => enqueue(rtl('🟢 ' + latin('Nuvio AI') + ' اشتغل') + '\n' + rtl('🔔 إشعارات التصحيح مفعّلة')), 8000);
   if (t && t.unref) t.unref();
+  startDailySummary();
 } else {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, modelEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds };
+module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
