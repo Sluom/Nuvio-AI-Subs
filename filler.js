@@ -1,232 +1,427 @@
+// إشعارات التصحيح: سطر ملخص في اللوغ لكل تراك مصحح، ونفس السطر يُرسل إلى تيليغرام إن وُجد المتغيران
+// TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID. كل شيء هنا محمي: أي فشل يُبلع بصمت ولا يؤثر على الإضافة.
 const axios = require('axios');
 
-// ============================================================================
-//  تجاوز حلقات الحشو (Filler) في التجهيز التلقائي للحلقة القادمة.
-//  المصدر الوحيد: إضافة aiometadata الخاصة بك (علامات isFiller / isMixedFiller).
-//
-//  الإعداد من Render (لا يوضع أي رابط داخل الكود لأن المستودع عام):
-//    AIOMETADATA_URL = رابط تثبيت إضافتك (نفس رابط manifest.json) — يقبل مع أو بدون /manifest.json
-//    FILLER_SKIP=0   ← يطفئ الميزة بالكامل
-//
-//  مصدر الترقيم:
-//    - طلب جاء بصيغة tt:S:E  ← نقرأ meta/series/<tt>.json ونطابق موسم:حلقة (أو الترقيم المطلق tt:1:N).
-//    - طلب أصله Kitsu (kitsu:ID:N) ← نقرأ meta/series/kitsu:ID.json ونعتمد ترقيم Kitsu نفسه (kitsu:ID:N)،
-//      ولا نمر عبر tt أبداً لأن تحويل ARM قد يعطي موسماً فارغاً فيصير الرقم غير دقيق.
-//
-//  القاعدة:
-//    - يُتجاوز فقط من علامته isFiller=true (ولم تُعلَّم Mixed).
-//    - Mixed وأي حلقة غير حشو تُجهَّز دائماً كما هي.
-//    - أي خطأ/تعذّر اتصال ⟵ يرجع null فيكمل التجهيز بالحلقة التالية العادية (الميزة لا تعطّل شيئاً أبداً).
-// ============================================================================
+const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TG_CHAT = String(process.env.TELEGRAM_CHAT_ID || '').trim();
+const ENABLED = !!(TG_TOKEN && TG_CHAT);
 
-const ENABLED = process.env.FILLER_SKIP !== '0';
+const SEND_GAP_MS = 1200;
+const MAX_QUEUE = 30;
+const SAME_TEXT_GAP_MS = 60 * 1000;
+const ERR_LOG_GAP_MS = 10 * 60 * 1000;
+const CINEMETA_TTL_MS = 6 * 3600 * 1000;
+const CINEMETA_MAX = 100;
+const RLM = '‏';
+const KIND = { 'ARA-ASS': 'ASS', 'ARA-SRT': 'SRT' };
 
-// يقبل: https://host/…/manifest.json أو stremio://host/…/manifest.json أو الرابط بدون manifest.json
-function normalizeBase(raw) {
-    let u = String(raw || '').trim();
-    if (!u) return '';
-    u = u.replace(/^stremio:\/\//i, 'https://');
-    if (!/^https?:\/\//i.test(u)) return '';
-    u = u.replace(/[?#].*$/, '').replace(/\/manifest\.json\/?$/i, '').replace(/\/+$/, '');
-    return u;
+const queue = [];
+const recentTexts = new Map();
+const metaCache = new Map();
+const nameCache = new Map();
+let pumping = false;
+let lastSentAt = 0;
+let lastErrLogAt = 0;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// لا يظهر الرمز أبدا في أي سطر لوغ
+function scrub(s) {
+  let out = String(s == null ? '' : s);
+  if (TG_TOKEN) out = out.split(TG_TOKEN).join('***');
+  return out;
 }
-const BASE = normalizeBase(process.env.AIOMETADATA_URL);
-let BASE_HOST = '';
-try { BASE_HOST = BASE ? new URL(BASE).host : ''; } catch { BASE_HOST = ''; }
 
-const FETCH_TIMEOUT_MS = 20000;
-const CACHE_TTL_MS = 6 * 3600 * 1000;
-const FAIL_RETRY_MS = 5 * 60 * 1000;
-const MAX_SHOWS = 100;
-const MAX_SCAN = 1000;
+async function sendOne(text, markup) {
+  try {
+    await axios.post(
+      'https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage',
+      { chat_id: TG_CHAT, text: String(text).slice(0, 3500), disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) },
+      { timeout: 8000 }
+    );
+  } catch (e) {
+    const now = Date.now();
+    if (now - lastErrLogAt < ERR_LOG_GAP_MS) return;
+    lastErrLogAt = now;
+    const status = e && e.response && e.response.status;
+    const desc = e && e.response && e.response.data && e.response.data.description;
+    let hint = '';
+    if (status === 401) hint = ' | الرمز غير صحيح';
+    else if (status === 400 || status === 403) hint = ' | تأكد أنك ضغطت Start عند بوتك وأن رقم المحادثة صحيح';
+    console.log('[إشعار] تعذر إرسال رسالة تيليغرام' + (status ? ' (HTTP ' + status + ')' : '') + ': ' + scrub(desc || (e && e.message)) + hint + ' ⟵ عمل الإضافة لم يتأثر.');
+  }
+}
 
-const showCache = new Map();   // مفتاح (tt… أو kitsu:ID) → { at, ok, seq, index, maxS1, imdb }
-const inflight = new Map();    // مفتاح → Promise
-let warnedNoUrl = false;
-
-const posInt = v => {
-    const n = Number(v);
-    return Number.isInteger(n) && n > 0 ? n : null;
-};
-
-// يبني من videos تسلسلاً مرتباً للحلقات العادية فقط (الموسم 0 / الخاصة مستبعدة)
-function buildShow(videos) {
-    const seq = [];
-    for (const v of videos || []) {
-        if (!v) continue;
-        const s = posInt(v.season);
-        const e = posInt(v.episode != null ? v.episode : v.number);
-        if (!s || !e) continue;
-        const mixed = v.isMixedFiller === true;
-        const filler = v.isFiller === true && !mixed;   // Mixed لا يُتجاوز أبداً
-        seq.push({ s, e, id: String(v.id || ''), filler, mixed });
+// رسالة وحدة كل ثانية وزيادة (حد تيليغرام للمحادثة الواحدة) مهما تتابعت الأحداث
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    while (queue.length) {
+      const wait = SEND_GAP_MS - (Date.now() - lastSentAt);
+      if (wait > 0) await sleep(wait);
+      const item = queue.shift();
+      lastSentAt = Date.now();
+      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup);
     }
-    seq.sort((a, b) => a.s - b.s || a.e - b.e);
-    const index = new Map();
-    const uniq = [];
-    for (const x of seq) {
-        const key = x.s + ':' + x.e;
-        if (index.has(key)) continue;
-        index.set(key, uniq.length);
-        uniq.push(x);
+  } finally {
+    pumping = false;
+  }
+}
+
+function enqueue(text, markup) {
+  if (!ENABLED) return;
+  try {
+    const now = Date.now();
+    const last = recentTexts.get(text);
+    if (last && now - last < SAME_TEXT_GAP_MS) return;
+    recentTexts.set(text, now);
+    if (recentTexts.size > 200) {
+      for (const [k, t] of recentTexts) if (now - t > SAME_TEXT_GAP_MS) recentTexts.delete(k);
+      if (recentTexts.size > 200) recentTexts.clear();
     }
-    let maxS1 = 0;
-    for (const x of uniq) if (x.s === 1 && x.e > maxS1) maxS1 = x.e;
-    return { seq: uniq, index, maxS1 };
+    if (queue.length >= MAX_QUEUE) queue.shift();
+    queue.push(markup ? { text, markup } : text);
+    pump().catch(() => {});
+  } catch (e) { /* لا شيء */ }
 }
 
-async function fetchShow(key) {
-    const t0 = Date.now();
-    const r = await axios.get(BASE + '/meta/series/' + (key.startsWith('kitsu:') ? key : encodeURIComponent(key)) + '.json', {
-        timeout: FETCH_TIMEOUT_MS,
-        responseType: 'json',
-        headers: { 'User-Agent': 'Nuvio-AI-Subs', 'Accept': 'application/json' }
-    });
-    const body = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
-    const videos = body && body.meta && Array.isArray(body.meta.videos) ? body.meta.videos : null;
-    if (!videos) throw new Error('رد aiometadata بلا قائمة حلقات');
-    const show = buildShow(videos);
-    if (!show.seq.length) throw new Error('aiometadata لم يرجع حلقات عادية');
-    show.imdb = String(body.meta._imdbId || body.meta.imdb_id || '');
-    return show;
-}
-
-async function getShow(key) {
-    const hit = showCache.get(key);
-    if (hit && Date.now() - hit.at < (hit.ok ? CACHE_TTL_MS : FAIL_RETRY_MS)) return hit.ok ? hit : null;
-    if (inflight.has(key)) return inflight.get(key);
-    const p = fetchShow(key)
-        .then(show => {
-            if (showCache.size >= MAX_SHOWS) {
-                const oldest = showCache.keys().next().value;
-                if (oldest) showCache.delete(oldest);
-            }
-            const entry = { at: Date.now(), ok: true, seq: show.seq, index: show.index, maxS1: show.maxS1, imdb: show.imdb };
-            showCache.set(key, entry);
-            return entry;
-        })
-        .catch(e => {
-            // لا نطبع الرابط أبداً (فيه إعدادك الخاص) — الرسالة فقط
-            console.error('[فلر] تعذّر قراءة aiometadata لـ ' + key + (BASE_HOST ? ' (' + BASE_HOST + ')' : '') + ': ' + e.message);
-            showCache.set(key, { at: Date.now(), ok: false });
-            return null;
-        })
-        .finally(() => { inflight.delete(key); });
-    inflight.set(key, p);
-    return p;
-}
-
-// طلب أصله Kitsu: الترقيم هو ترقيم Kitsu نفسه (kitsu:ID:N) كما يرسله Nuvio، بدون أي تحويل عبر tt.
-async function skipKitsu(targetId, kid, kepRaw, detail) {
-    if (!/^\d+$/.test(kid)) return null;
-    const kep = posInt(kepRaw);
-    if (!kep) return null;                      // رقم حلقة Kitsu الأصلي لم يصل ⟵ لا نخمّن
-    const t0 = Date.now();
-    const show = await getShow('kitsu:' + kid);
-    if (!show) return null;
-
-    // حارس: إن عرّف الطرفان رقم IMDb وكانا مختلفين فهذا ليس العمل نفسه ⟵ لا تخطي
-    const tm = /^(tt\d+):/.exec(String(targetId));
-    if (tm && /^tt\d+$/.test(show.imdb || '') && show.imdb !== tm[1]) {
-        console.log('[فلر] kitsu:' + kid + ': رقم IMDb عند aiometadata (' + show.imdb + ') لا يطابق ' + tm[1] + ' ⟵ تجاوز الحشو متوقف لهذه الحلقة.');
-        return null;
+// أحجام المواسم من Cinemeta (عدد الحلقات بكل موسم) لحساب الرقم المطلق والاسم البديل للحلقة
+async function getSeasonSizes(imdbId) {
+  const hit = metaCache.get(imdbId);
+  if (hit && Date.now() - hit.at < CINEMETA_TTL_MS) return hit.sizes;
+  let sizes = null;
+  try {
+    const res = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', { timeout: 4000 });
+    const videos = (res.data && res.data.meta && Array.isArray(res.data.meta.videos)) ? res.data.meta.videos : [];
+    rememberName('series:' + imdbId, res.data && res.data.meta && res.data.meta.name);
+    const m = new Map();
+    for (const v of videos) {
+      const s = parseInt(v.season, 10);
+      if (!isNaN(s) && s > 0) m.set(s, (m.get(s) || 0) + 1);
     }
-
-    const cur = show.seq.findIndex(x => x.id === 'kitsu:' + kid + ':' + kep);
-    if (cur < 0) return null;
-
-    const nextIdx = cur + 1;
-    const nextItem = show.seq[nextIdx];
-    if (!nextItem || !nextItem.filler) return null;     // التالية ليست حشواً ⟵ لا شيء يتغير
-
-    let to = nextIdx;
-    while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
-    const target = show.seq[to];
-    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى الموسم ⟵ المنطق المعتاد
-    const tmk = /^kitsu:(\d+):(\d+)$/.exec(target.id);
-    if (!tmk || tmk[1] !== kid) return null;
-
-    return {
-        targetId: target.id,
-        from: String(nextItem.e),
-        to: String(target.e),
-        skipped: to - nextIdx,
-        kind: target.mixed ? 'mixed' : 'canon',
-        ms: Date.now() - t0
-    };
+    if (m.size) sizes = m;
+  } catch (e) {
+    sizes = null;
+  }
+  if (sizes) {
+    if (metaCache.size >= CINEMETA_MAX) {
+      const oldest = metaCache.keys().next().value;
+      if (oldest) metaCache.delete(oldest);
+    }
+    metaCache.set(imdbId, { sizes, at: Date.now() });
+  }
+  return sizes;
 }
 
-/**
- * يُستدعى من الخلفية فقط (تجهيز الحلقة القادمة).
- * يرجع null  ← لا تغيير، يكمل prefetch.js بمنطقه المعتاد.
- * يرجع كائن  ← { targetId, from, to, skipped, kind, ms } أقرب حلقة غير حشو بعد الحلقة الحالية.
- * kitsuId/kitsuEp: يوصلان فقط إذا كان الطلب الأصلي من Kitsu (index.js يمرّرهما)، وعندها يرجع targetId بصيغة kitsu:ID:N.
- */
-async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
-    if (!ENABLED || !targetId) return null;
-    if (!BASE) {
-        if (!warnedNoUrl) {
-            warnedNoUrl = true;
-            console.log('[فلر] AIOMETADATA_URL غير مضبوط في Render ⟵ تجاوز الحشو متوقف (التجهيز يعمل بالحلقة التالية العادية).');
-        }
-        return null;
-    }
-    if (kitsuId) return skipKitsu(targetId, String(kitsuId).trim(), kitsuEp, detail);
-    const m = /^(tt\d+):(\d+):(\d+)$/.exec(String(targetId));
+function rememberName(key, name) {
+  const n = String(name || '').trim();
+  if (!n) return;
+  if (nameCache.size >= CINEMETA_MAX) {
+    const oldest = nameCache.keys().next().value;
+    if (oldest) nameCache.delete(oldest);
+  }
+  nameCache.set(key, { name: n, at: Date.now() });
+}
+
+// اسم العمل (مسلسل أو فيلم) من Cinemeta. لا يرمي خطأ أبدا؛ يرجع null إن لم يوجد
+async function titleOf(id, type) {
+  try {
+    const m = /^(tt\d+)/.exec(String(id || ''));
     if (!m) return null;
-    const imdbId = m[1];
-    const season = parseInt(m[2], 10);
-    const ep = parseInt(m[3], 10);
-    if (!(season >= 1) || !(ep >= 1)) return null;
-
-    const t0 = Date.now();
-    const show = await getShow(imdbId);
-    if (!show) return null;
-
-    // موضع الحلقة الحالية بالتسلسل:
-    //  1) ترقيم aiometadata نفسه (موسم:حلقة)  ← الحالة المعتادة
-    //  2) ترقيم مطلق tt:1:N الذي تنتجه إعادة الترقيم داخل الإضافة (N أكبر من آخر حلقة بالموسم 1 عند aiometadata)
-    let absolute = false;
-    let cur = show.index.get(season + ':' + ep);
-    if (cur === undefined) {
-        if (season === 1 && ep > show.maxS1 && ep <= show.seq.length) {
-            cur = ep - 1;
-            absolute = true;
-        } else {
-            return null;
-        }
-    }
-
-    const nextIdx = cur + 1;
-    const nextItem = show.seq[nextIdx];
-    if (!nextItem || !nextItem.filler) return null;     // التالية ليست حشواً ⟵ لا شيء يتغير
-
-    let to = nextIdx;
-    while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
-    const target = show.seq[to];
-    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى المسلسل ⟵ المنطق المعتاد
-
-    const idOf = i => absolute ? (imdbId + ':1:' + (i + 1)) : (imdbId + ':' + show.seq[i].s + ':' + show.seq[i].e);
-    const labelOf = i => {
-        const x = show.seq[i];
-        return (absolute || x.s === season) ? String(absolute ? i + 1 : x.e) : x.s + 'x' + x.e;
-    };
-
-    return {
-        targetId: idOf(to),
-        from: labelOf(nextIdx),
-        to: labelOf(to),
-        skipped: to - nextIdx,
-        kind: target.mixed ? 'mixed' : 'canon',
-        ms: Date.now() - t0
-    };
+    const kind = type === 'movie' ? 'movie' : 'series';
+    const key = kind + ':' + m[1];
+    const hit = nameCache.get(key);
+    if (hit && Date.now() - hit.at < CINEMETA_TTL_MS) return hit.name;
+    const res = await axios.get('https://v3-cinemeta.strem.io/meta/' + kind + '/' + m[1] + '.json', { timeout: 2500 });
+    const name = res && res.data && res.data.meta && res.data.meta.name;
+    rememberName(key, name);
+    return name ? String(name).trim() : null;
+  } catch (e) {
+    return null;
+  }
 }
 
-module.exports = {
-    skipFillerAhead,
-    _test: {
-        normalizeBase,
-        buildShow,
-        reset() { showCache.clear(); inflight.clear(); warnedNoUrl = false; }
+// وصف الحلقة بكلام مقروء + الاسم البديل لنفس الحلقة (ترقيم المواسم <-> الترقيم المطلق) إن أمكن
+async function describeEpisode(targetId) {
+  const id = String(targetId || '');
+  let m = /^(tt\d+):(\d+):(\d+)$/.exec(id);
+  if (m) {
+    const imdb = m[1];
+    const s = parseInt(m[2], 10);
+    const e = parseInt(m[3], 10);
+    const base = 'الموسم ' + s + ' الحلقة ' + e;
+    const sizes = await getSeasonSizes(imdb);
+    if (!sizes) return { text: base, alt: null };
+    if (s > 1) {
+      let before = 0;
+      for (const [k, n] of sizes) if (k < s) before += n;
+      if (before > 0) {
+        const abs = before + e;
+        return { text: base + ' (= ' + abs + ')', alt: { id: imdb + ':1:' + abs, text: 'الحلقة ' + abs } };
+      }
+    } else if (s === 1) {
+      const n1 = sizes.get(1) || 0;
+      if (n1 && e > n1) {
+        let cum = 0;
+        for (const k of [...sizes.keys()].sort((a, b) => a - b)) {
+          const n = sizes.get(k);
+          if (e <= cum + n) {
+            const se = e - cum;
+            return { text: 'الحلقة ' + e + ' (= الموسم ' + k + ' الحلقة ' + se + ')', alt: { id: imdb + ':' + k + ':' + se, text: 'الموسم ' + k + ' الحلقة ' + se } };
+          }
+          cum += n;
+        }
+      }
     }
-};
+    return { text: base, alt: null };
+  }
+  m = /^kitsu:(\d+):(\d+)$/.exec(id);
+  if (m) return { text: 'الحلقة ' + m[2] + ' (kitsu ' + m[1] + ')', alt: null };
+  if (/^tt\d+$/.test(id)) return { text: 'فيلم ' + id, alt: null };
+  return { text: id || '؟', alt: null };
+}
+
+// اسم الموقع + معرّف الحزمة من رابط التراك (بدون أي مفاتيح)
+function siteOfUrl(url) {
+  const u = String(url || '');
+  let host = '';
+  let path = '';
+  try {
+    const p = new URL(u);
+    host = p.hostname.toLowerCase();
+    path = p.pathname;
+  } catch (e) {
+    host = u.toLowerCase().slice(0, 30);
+  }
+  const site = host.includes('subsource') ? 'subsource'
+    : host.includes('subdl') ? 'subdl'
+    : host.includes('opensubtitles') ? 'opensubtitles'
+    : (host || 'مصدر');
+  let pack = '';
+  const segs = path.split('/').filter(Boolean);
+  if (segs.length) {
+    let last = segs[segs.length - 1].toLowerCase();
+    if (last === 'download' && segs.length > 1) last = segs[segs.length - 2];
+    last = last.replace(/\.(zip|srt|ass|ssa|gz|rar|7z)$/i, '');
+    pack = last.slice(0, 24);
+  }
+  return site + (pack ? ' ' + pack : '');
+}
+
+const LRI = '⁦';
+const PDI = '⁩';
+// سطر كامل يُقرأ من اليمين لليسار؛ الأجزاء اللاتينية (اسم، رقم، ASS) تُعزل حتى لا تنقلب
+const rtl = t => RLM + t;
+const latin = t => LRI + t + PDI;
+
+// الثواني بالعربي الصحيح: ثانية، ثانيتان، 3 ثوانٍ، 12 ثانية، دقيقة و12 ثانية
+function arSeconds(n) {
+  const x = Math.max(0, Math.round(Number(n) || 0));
+  const secWord = k => (k === 1 ? 'ثانية واحدة' : k === 2 ? 'ثانيتان' : k <= 10 ? k + ' ثوانٍ' : k + ' ثانية');
+  const minWord = k => (k === 1 ? 'دقيقة' : k === 2 ? 'دقيقتان' : k <= 10 ? k + ' دقائق' : k + ' دقيقة');
+  if (x === 0) return 'أقل من ثانية';
+  if (x < 60) return secWord(x);
+  const m = Math.floor(x / 60);
+  const sec = x % 60;
+  return minWord(m) + (sec ? ' و' + secWord(sec) : '');
+}
+
+function spellDetail(spell) {
+  if (!Array.isArray(spell) || !spell.length) return [];
+  const MAX = 15;
+  const items = spell.slice(0, MAX).map(([k, n]) => String(k).replace(' → ', ' ← ') + (n > 1 ? ' ×' + n : ''));
+  const rest = spell.length - MAX;
+  return [
+    '📝 الإملاء: ' + spell.length + ' تحويل مختلف',
+    items.join(' | ') + (rest > 0 ? ' | +' + rest + ' أخرى (الباقي في لوغ ريندر)' : '')
+  ];
+}
+
+async function report(ev) {
+  let ep;
+  try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
+  if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
+
+  // اسم العمل (لا يرمي خطأ أبدا)
+  const idStr = String(ev.targetId || '');
+  const isMovie = /^tt\d+$/.test(idStr);
+  let title = null;
+  try { title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series'); } catch (e) { title = null; }
+  const ttMatch = /^(tt\d+)/.exec(idStr);
+  const workId = ttMatch ? ttMatch[1] : idStr;
+
+  const kindName = KIND[ev.label] || ev.label;
+  const head = kindName + ' تراك ' + ev.trackNum;
+  const why = ev.isPrefetch ? 'تجهيز تلقائي للحلقة التالية' : 'بضغطة منك';
+  const src = siteOfUrl(ev.url);
+  const secs = Math.max(0, Math.round((ev.ms || 0) / 1000));
+  let line = '';
+  let warn = false;
+  let badge = '✅';
+  let title1 = '';
+  let detail = [];
+  let retryKinds = null;
+
+  // رأس الرسالة بتيليغرام: "تراك 1 ASS" بترتيب يُقرأ صح من اليمين لليسار
+  const tgHead = 'تراك ' + ev.trackNum + ' ' + latin(kindName);
+
+  if (ev.kind === 'done') {
+    line = head + ' | ' + ep.text + ' | ' + src + ' | ' + secs + ' ثانية | ' + (ev.total || 0) + ' سطر'
+      + (ev.rejected > 0 ? ' | ' + ev.rejected + ' مرفوض' : '')
+      + (ev.healed ? ' | ملف بديل (الأصلي فشل)' : '')
+      + ' | ' + why;
+    title1 = 'اكتمل: ' + tgHead;
+    detail = ['work', 'ep', 'src',
+      '📄 الأسطر: ' + (ev.total || 0) + (ev.rejected > 0 ? ' — مرفوض: ' + ev.rejected : ''),
+      '⏱ الوقت: ' + arSeconds(secs), ...spellDetail(ev.spell)];
+    if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
+    detail.push('🔔 ' + why);
+  } else if (ev.kind === 'partial') {
+    warn = true; badge = '⚠️';
+    line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
+    const fi = ev.failInfo;
+    const allFailed = !!(fi && fi.all);
+    title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
+    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...spellDetail(ev.spell)];
+    if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
+      detail.push('🧩 الأسطر الناقصة: ' + fi.ranges.slice(0, 6).map(r => latin(r[0] === r[1] ? String(r[0]) : r[0] + '–' + r[1])).join('، ') + (fi.ranges.length > 6 ? ' ...' : ''));
+      if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
+    }
+    detail.push('🔔 ' + why);
+    retryKinds = allFailed ? ['z'] : ['m', 'z'];
+  } else if (ev.kind === 'failed') {
+    warn = true; badge = '❌';
+    line = 'فشل ' + head + ' | ' + ep.text + ' | ' + src + ' | الملف الأصلي لم يُحمَّل أو لم يُستخرج'
+      + (ev.healTried ? ' (وجرّبت بديلا فلم أنجح)' : '')
+      + ' | ستُعاد المحاولة عند الضغطة القادمة | ' + why;
+    title1 = 'فشل: ' + tgHead;
+    detail = ['src', 'work', 'ep',
+      '💬 الملف الأصلي لم يُحمَّل أو لم يُستخرج' + (ev.healTried ? ' (وجرّبت بديلاً فلم أنجح)' : ''),
+      '🔁 ستُعاد المحاولة عند الضغطة القادمة', '🔔 ' + why];
+    retryKinds = ['z'];
+  } else {
+    warn = true; badge = '⚠️';
+    const msg = scrub(ev.error).slice(0, 150);
+    line = 'خطأ غير متوقع في ' + head + ' | ' + ep.text + ' | ' + msg + ' | ' + why;
+    title1 = 'خطأ غير متوقع: ' + tgHead;
+    detail = ['src', 'work', 'ep', '💬 ' + msg, '🔔 ' + why];
+    retryKinds = ['z'];
+  }
+
+  // تنبيه التكرار: نفس الحلقة ونفس التراك محفوظان أيضا تحت الاسم الآخر (الموسم/المطلق)
+  let dupText = '';
+  if (ev.kind === 'done' && ep.alt && typeof ev.loadDoc === 'function' && ev.cacheKey && ev.cacheKey.includes('_' + ev.targetId + '_track')) {
+    try {
+      const altKey = ev.cacheKey.replace('_' + ev.targetId + '_track', '_' + ep.alt.id + '_track');
+      const other = await ev.loadDoc(altKey);
+      if (other && other.content) {
+        warn = true; badge = '⚠️';
+        dupText = 'نفس الحلقة محفوظة أيضا باسم (' + ep.alt.text + ') لنفس التراك ⟵ صُحّحت مرتين بسبب اختلاف الاسم.';
+      }
+    } catch (e) { /* لا شيء */ }
+  }
+
+  // سطر اللوغ (مضغوط كما كان) — بدون رموز اتجاه
+  const epLog = title ? (isMovie ? 'فيلم ' + title : title + ' ' + ep.text) : ep.text;
+  console.log('[ملخص التراك] ' + (warn ? '⚠️ ' : '✅ ') + line.replace(ep.text, epLog) + (dupText ? '\n⚠️ ' + dupText : ''));
+
+  // رسالة تيليغرام: كل معلومة بسطر
+  const workLine = '🎬 ' + latin((title ? title + ' (' + workId + ')' : workId));
+  const epLine = isMovie ? null : '📺 ' + ep.text;
+  const lines = [rtl(badge + ' ' + title1)];
+  for (const d of detail) {
+    if (d === 'src') {
+      lines.push(rtl('📦 المصدر: ' + latin(src)));
+    } else if (d === 'work') {
+      lines.push(rtl(workLine));
+    } else if (d === 'ep') {
+      if (epLine) lines.push(rtl(epLine));
+    } else {
+      lines.push(rtl(d));
+    }
+  }
+  if (dupText) {
+    lines.push('');
+    lines.push(rtl('⚠️ نفس الحلقة محفوظة باسمين'));
+    lines.push(rtl('📺 ' + ep.text));
+    lines.push(rtl('💬 صُحّحت مرتين بسبب اختلاف الاسم'));
+  }
+  let markup = null;
+  const slot = ev.label === 'ARA-ASS' ? 'a' : ev.label === 'ARA-SRT' ? 's' : '';
+  if (retryKinds && slot && ev.targetId && ev.trackNum && /^\d+$/.test(String(ev.trackNum))) {
+    const cb = k => 'rt:' + k + ':' + slot + ':' + ev.trackNum + ':' + ev.targetId;
+    const row = retryKinds.map(k => ({ text: k === 'm' ? '🔁 أكمل الناقص فقط' : (retryKinds.length === 1 ? '🔁 أعد المحاولة' : '🗑 من الصفر'), callback_data: cb(k) }));
+    if (row.every(b => Buffer.byteLength(b.callback_data) <= 64)) markup = { inline_keyboard: [row] };
+  }
+  enqueue(lines.join('\n'), markup);
+}
+
+// أحداث الموديل (اختناق، تشغيل الاحتياطي...). للتيليغرام فقط، ولا يرمي خطأ أبدا.
+const modelSeen = new Map();
+const MODEL_EVENT_GAP_MS = 5 * 60 * 1000;
+async function modelReport(ev) {
+  if (!ENABLED) return;
+  const kind = String(ev && ev.kind || '');
+  const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
+  const now = Date.now();
+  const last = modelSeen.get(key);
+  if (last && now - last < MODEL_EVENT_GAP_MS) return;
+  modelSeen.set(key, now);
+  if (modelSeen.size > 200) modelSeen.clear();
+
+  let ep = null;
+  try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
+  const idStr = String(ev.targetId || '');
+  const isMovie = /^tt\d+$/.test(idStr);
+  let title = null;
+  try { title = await titleOf(ev.targetId, isMovie ? 'movie' : 'series'); } catch (e) { title = null; }
+  const ttMatch = /^(tt\d+)/.exec(idStr);
+  const workId = ttMatch ? ttMatch[1] : idStr;
+  const m1 = ev.model ? latin(String(ev.model)) : '؟';
+  const m2 = ev.other ? latin(String(ev.other)) : '؟';
+  const trk = (KIND[ev.label] || ev.label || '') ? 'تراك ' + (ev.trackNum || '؟') + ' ' + latin(KIND[ev.label] || ev.label) : '';
+
+  const out = [];
+  if (kind === 'choke') {
+    out.push('⚠️ اختناق الموديل');
+    const f = ev.fails || 2;
+    out.push('🧠 الموديل ' + m1 + ' فشل ' + (f === 2 ? 'مرتين' : f <= 10 ? f + ' مرات' : f + ' مرة') + ' على نفس الدفعة');
+  } else if (kind === 'fallback-won') {
+    out.push('✅ الاحتياطي ' + m1 + ' سبق وأنجز الدفعة');
+  } else if (kind === 'both-failed') {
+    out.push('❌ الموديلان ' + m1 + ' و' + m2 + ' فشلا');
+  } else if (kind === 'rescue') {
+    out.push('🚑 إنقاذ تلقائي');
+    out.push('🧠 حوّلت الباقي من الموديل ' + m1 + ' إلى ' + m2);
+  } else {
+    return;
+  }
+  out.push('🎬 ' + latin(title ? title + ' (' + workId + ')' : workId));
+  if (!isMovie && ep) out.push('📺 ' + ep.text + (trk ? ' — ' + trk : ''));
+  else if (trk) out.push('📺 ' + trk);
+  if (kind === 'choke') out.push('↪️ شغّلت الموديل ' + m2 + ' جنبه، والأسرع يفوز');
+  if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
+  enqueue(out.map(rtl).join('\n'));
+}
+
+function modelEvent(ev) {
+  try { modelReport(ev || {}).catch(() => {}); } catch (e) { /* لا شيء */ }
+}
+
+// الواجهة الوحيدة: ترجع فورا ولا ترمي خطأ أبدا
+function trackEvent(ev) {
+  try {
+    report(ev).catch(() => {});
+  } catch (e) { /* لا شيء */ }
+}
+
+if (ENABLED) {
+  console.log('[إشعار] تيليغرام مفعّل ⟵ يصلك ملخص كل تراك يُصحَّح وتنبيهات المشاكل.');
+  const t = setTimeout(() => enqueue(rtl('🟢 ' + latin('Nuvio AI') + ' اشتغل') + '\n' + rtl('🔔 إشعارات التصحيح مفعّلة')), 8000);
+  if (t && t.unref) t.unref();
+} else {
+  console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
+}
+
+module.exports = { trackEvent, modelEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds };
