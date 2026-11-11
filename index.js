@@ -29,7 +29,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const translationCache = {};
 const pinnedCorrectorMemCache = new Map();
-require('./cacheclear').onDrop(k => { const c = translationCache[k]; if (c && c.status !== 'pending') delete translationCache[k]; });
+tgbot.onDrop(k => { const c = translationCache[k]; if (c && c.status !== 'pending') delete translationCache[k]; });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -67,11 +67,10 @@ const MAX_BACKGROUND_ROUNDS = 3;
 const ROUND_PAUSE_MS = 45000;
 
 
-// ===== إصلاح التراك الفاشل أثناء الضغطة: لو الملف الأصلي فشل تحميله، نفس الشغلة تبحث عن بديل لنفس الحلقة =====
-const ALT_SEARCH_MS = 15000;       // أقصى مدة كلية لمرحلة البحث عن بديل
-const ALT_BATCH_SIZE = 3;          // عدد المرشحين الذين نفحصهم بالتوازي
-const ALT_MAX_CANDIDATES = 15;     // أقصى عدد مرشحين نجرّبهم
-const ALT_ITEM_TIMEOUT_MS = 5000;  // مهلة فحص المرشح الواحد (تُقصّ بما تبقى من الـ 15 ثانية)
+const ALT_SEARCH_MS = 15000;
+const ALT_BATCH_SIZE = 3;
+const ALT_MAX_CANDIDATES = 15;
+const ALT_ITEM_TIMEOUT_MS = 5000;
 const FAILED_KEEP_MS = 5 * 60 * 1000;
 const ALT_TIMEOUT = Symbol('alt-timeout');
 const HEAL_KINDS = { 'ARA-SRT': 'srt', 'ARA-ASS': 'ass' };
@@ -97,7 +96,6 @@ async function loadPinsDoc(targetId) {
     return { pinKey, doc: doc || null };
 }
 
-// يثبّت البديل مكان التراك الفاشل (نفس الرقم) بدون ما يمس بقية التراكات
 async function repinFailedSlot(targetId, kind, slot, item) {
     const { pinKey, doc } = await loadPinsDoc(targetId);
     const next = {
@@ -111,7 +109,6 @@ async function repinFailedSlot(targetId, kind, slot, item) {
     return true;
 }
 
-// يبحث بقائمة نفس الحلقة (من أي موقع) عن ملف يشتغل. نفس فاحص الجودة المستخدم عند بناء القوائم (عربي نظيف، ≥10 أسطر، ترميز سليم)
 async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extraKeys }) {
     const slot = parseInt(trackNum, 10);
     const parts = String(targetId || '').split(':');
@@ -154,7 +151,6 @@ async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extr
         seen.add(k);
         cands.push(it);
     }
-    // الأفضل أولا: إملاء سليم ثم غير SDH ثم المفحوص مسبقا ثم من موقع غير الموقع الفاشل
     const rank = it => (it._badSpelling ? 8 : 0) + ((it.hearingImpaired || it._isSdh) ? 4 : 0) + (it._verified ? 0 : 2) + ((failedSite && siteOfItem(it) === failedSite) ? 1 : 0);
     cands.sort((a, b) => rank(a) - rank(b));
     const list = cands.slice(0, ALT_MAX_CANDIDATES);
@@ -182,7 +178,6 @@ async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extr
     return { item: null, tried, ms: Date.now() - startedAt, reason: 'none' };
 }
 
-// يُستدعى لما يفشل الملف الأصلي. يرجّع {url,text} للبديل أو null. أثناء البحث يضع علامة phase='alt' ليظهر "جاري البحث عن بديل".
 async function healFailedTrack({ label, kind, targetId, trackNum, failedUrl, extraKeys, cacheKey }) {
     if (!canHealTrack(targetId, trackNum)) return null;
     const slot = parseInt(trackNum, 10);
@@ -215,7 +210,6 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         if (!cur || cur.status !== 'done') delete translationCache[cacheKey];
     };
     const healKind = HEAL_KINDS[label] || null;
-    // فشل نهائي: بالمصحح (ضغطة مستخدم) نحتفظ برسالة الفشل لتنعرض مرة وحدة بالضغطة الجاية، وبعدها ينعاد التشغيل من الصفر
     const failNow = result => {
         const cur = translationCache[cacheKey];
         if (cur && cur.status === 'done') return;
@@ -232,7 +226,6 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         let lastR = null;
         let healTried = false;
         let healed = false;
-        // ملخص التراك + إشعار تيليغرام (للمصحح فقط). يرجع فورا ولا يرمي خطأ أبدا.
         const note = (kind, r, extra) => {
             if (!healKind) return;
             try {
@@ -302,7 +295,6 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
         }
     }
 
-    // في حال كان الطلب Prefetch بالخلفية ولم يكن هناك تثبيت كامل سابق، نعتمد القائمة العميقة المصفاة مباشرة
     let changed = false;
     const finalSrt = [];
     const finalAss = [];
@@ -1216,7 +1208,6 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
     const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag + revTag;
     let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
     if (cached && cached.status === 'failed') {
-        // فشل نهائي سابق (الأصلي + البحث عن بديل): نعرض رسالة الفشل مرة وحدة ثم ينعاد التشغيل من الصفر بالضغطة التالية
         delete translationCache[primaryCacheKey];
         delete translationCache[legacyUrlCacheKey];
         const failedContent = cached.content;
@@ -1280,7 +1271,6 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
 const SRT_WAIT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
 const ASS_WAIT = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,1:00:00.00,Default,,0,0,0,,الترجمة قيد التنفيذ ⏳ انقر لإعادة التحميل بمجرد جاهزيتها.';
 
-// نسخة الانتظار أثناء البحث عن بديل (تظهر بالطلب التالي من Nuvio)
 const SRT_WAIT_ALT = '1\n00:00:01,000 --> 01:00:00,000\nالترجمة قيد التنفيذ ⏳ | جاري البحث عن بديل\nانقر لإعادة التحميل بمجرد جاهزيتها.\n\n';
 const ASS_WAIT_ALT = ASS_WAIT.replace('⏳ انقر', '⏳ | جاري البحث عن بديل | انقر');
 
