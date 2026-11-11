@@ -32,11 +32,11 @@ function scrub(s) {
   return out;
 }
 
-async function sendOne(text) {
+async function sendOne(text, markup) {
   try {
     await axios.post(
       'https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage',
-      { chat_id: TG_CHAT, text: String(text).slice(0, 3500), disable_web_page_preview: true },
+      { chat_id: TG_CHAT, text: String(text).slice(0, 3500), disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) },
       { timeout: 8000 }
     );
   } catch (e) {
@@ -60,16 +60,16 @@ async function pump() {
     while (queue.length) {
       const wait = SEND_GAP_MS - (Date.now() - lastSentAt);
       if (wait > 0) await sleep(wait);
-      const text = queue.shift();
+      const item = queue.shift();
       lastSentAt = Date.now();
-      await sendOne(text);
+      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup);
     }
   } finally {
     pumping = false;
   }
 }
 
-function enqueue(text) {
+function enqueue(text, markup) {
   if (!ENABLED) return;
   try {
     const now = Date.now();
@@ -81,7 +81,7 @@ function enqueue(text) {
       if (recentTexts.size > 200) recentTexts.clear();
     }
     if (queue.length >= MAX_QUEUE) queue.shift();
-    queue.push(text);
+    queue.push(markup ? { text, markup } : text);
     pump().catch(() => {});
   } catch (e) { /* لا شيء */ }
 }
@@ -250,6 +250,7 @@ async function report(ev) {
   let badge = '✅';
   let title1 = '';
   let detail = [];
+  let retryKinds = null;
 
   // رأس الرسالة بتيليغرام: "تراك 1 ASS" بترتيب يُقرأ صح من اليمين لليسار
   const tgHead = 'تراك ' + ev.trackNum + ' ' + latin(kindName);
@@ -268,8 +269,16 @@ async function report(ev) {
   } else if (ev.kind === 'partial') {
     warn = true; badge = '⚠️';
     line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
-    title1 = 'اكتمل جزئياً: ' + tgHead;
-    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', '🔔 ' + why];
+    const fi = ev.failInfo;
+    const allFailed = !!(fi && fi.all);
+    title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
+    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات'];
+    if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
+      detail.push('🧩 الأسطر الناقصة: ' + fi.ranges.slice(0, 6).map(r => latin(r[0] === r[1] ? String(r[0]) : r[0] + '–' + r[1])).join('، ') + (fi.ranges.length > 6 ? ' ...' : ''));
+      if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
+    }
+    detail.push('🔔 ' + why);
+    retryKinds = allFailed ? ['z'] : ['m', 'z'];
   } else if (ev.kind === 'failed') {
     warn = true; badge = '❌';
     line = 'فشل ' + head + ' | ' + ep.text + ' | ' + src + ' | الملف الأصلي لم يُحمَّل أو لم يُستخرج'
@@ -279,12 +288,14 @@ async function report(ev) {
     detail = ['src', 'work', 'ep',
       '💬 الملف الأصلي لم يُحمَّل أو لم يُستخرج' + (ev.healTried ? ' (وجرّبت بديلاً فلم أنجح)' : ''),
       '🔁 ستُعاد المحاولة عند الضغطة القادمة', '🔔 ' + why];
+    retryKinds = ['z'];
   } else {
     warn = true; badge = '⚠️';
     const msg = scrub(ev.error).slice(0, 150);
     line = 'خطأ غير متوقع في ' + head + ' | ' + ep.text + ' | ' + msg + ' | ' + why;
     title1 = 'خطأ غير متوقع: ' + tgHead;
     detail = ['src', 'work', 'ep', '💬 ' + msg, '🔔 ' + why];
+    retryKinds = ['z'];
   }
 
   // تنبيه التكرار: نفس الحلقة ونفس التراك محفوظان أيضا تحت الاسم الآخر (الموسم/المطلق)
@@ -325,7 +336,14 @@ async function report(ev) {
     lines.push(rtl('📺 ' + ep.text));
     lines.push(rtl('💬 صُحّحت مرتين بسبب اختلاف الاسم'));
   }
-  enqueue(lines.join('\n'));
+  let markup = null;
+  const slot = ev.label === 'ARA-ASS' ? 'a' : ev.label === 'ARA-SRT' ? 's' : '';
+  if (retryKinds && slot && ev.targetId && ev.trackNum && /^\d+$/.test(String(ev.trackNum))) {
+    const cb = k => 'rt:' + k + ':' + slot + ':' + ev.trackNum + ':' + ev.targetId;
+    const row = retryKinds.map(k => ({ text: k === 'm' ? '🔁 أكمل الناقص فقط' : (retryKinds.length === 1 ? '🔁 أعد المحاولة' : '🗑 من الصفر'), callback_data: cb(k) }));
+    if (row.every(b => Buffer.byteLength(b.callback_data) <= 64)) markup = { inline_keyboard: [row] };
+  }
+  enqueue(lines.join('\n'), markup);
 }
 
 // أحداث الموديل (اختناق، تشغيل الاحتياطي...). للتيليغرام فقط، ولا يرمي خطأ أبدا.
