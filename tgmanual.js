@@ -63,9 +63,9 @@ async function fetchTracks(type, targetId) {
   return out;
 }
 
-async function startPath(path) {
+async function startPath(path, nopf) {
   try {
-    const res = await axios.get('http://127.0.0.1:' + PORT + path, {
+    const res = await axios.get('http://127.0.0.1:' + PORT + path + (nopf ? '&nopf=1' : ''), {
       headers: { 'x-forwarded-host': (ctx && ctx.host) || ('127.0.0.1:' + PORT), 'x-forwarded-proto': (ctx && ctx.proto) || 'https' },
       timeout: START_TIMEOUT_MS, validateStatus: () => true, responseType: 'text'
     });
