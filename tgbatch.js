@@ -97,6 +97,8 @@ async function leftInSeason(targetId) {
   return Math.max(0, (meta.aired.get(season) || 0) - ep);
 }
 
+const arCount = (n, one, two, few, many) => (n === 1 ? one : n === 2 ? two : n >= 3 && n <= 10 ? n + ' ' + few : n + ' ' + many);
+
 async function nextOf(cur, left) {
   if (!(left >= 1)) return { end: 'انتهت حلقات الموسم المتوفرة' };
   const m = /^(tt\d+):(\d+):(\d+)$/.exec(String(cur));
@@ -105,9 +107,12 @@ async function nextOf(cur, left) {
   let id = m[1] + ':' + season + ':' + (ep + 1);
   let consumed = 1;
   let skipped = 0;
+  let from = '';
+  let to = '';
   if (filler && filler.skipFillerAhead) {
     try {
-      const sk = await filler.skipFillerAhead(cur, null, null);
+      const sk = await filler.skipFillerAhead(cur, null, null, true);
+      if (sk && sk.allFiller) return { end: 'باقي الموسم حشو، توقفت حتى ما أحرق مفاتيح' };
       const sm = sk && sk.targetId ? /^(tt\d+):(\d+):(\d+)$/.exec(sk.targetId) : null;
       if (sm) {
         const delta = +sm[3] - ep;
@@ -115,10 +120,12 @@ async function nextOf(cur, left) {
         id = sk.targetId;
         consumed = delta;
         skipped = sk.skipped || (delta - 1);
+        from = sk.from || '';
+        to = sk.to || '';
       }
     } catch (e) { /* لا شيء */ }
   }
-  return { id, consumed, skipped };
+  return { id, consumed, skipped, from, to };
 }
 
 function sleepFor(b, ms) {
@@ -144,6 +151,11 @@ function render(b) {
   return out.join('\n');
 }
 
+function notice(b, lines) {
+  if (!b.chat) return Promise.resolve();
+  return b.tg('sendMessage', { chat_id: b.chat.id, text: lines.map(rtl).join('\n'), disable_web_page_preview: true }).catch(() => {});
+}
+
 function push(b) {
   if (!b.chat) return Promise.resolve();
   return b.tg('editMessageText', { chat_id: b.chat.id, message_id: b.messageId, text: render(b), disable_web_page_preview: true }).catch(() => {});
@@ -167,9 +179,13 @@ async function run(b) {
         path = t.path;
         left -= nx.consumed;
         cur = nx.id;
-        if (nx.skipped > 0) b.lines.push('⏭ تجاوزت ' + nx.skipped + ' حلقة حشو');
+        if (nx.skipped > 0) {
+          b.lines.push('⏭ تجاوزت ' + arCount(nx.skipped, 'حلقة حشو', 'حلقتين حشو', 'حلقات حشو', 'حلقة حشو'));
+          const nxText = await epText(nx.id);
+          notice(b, ['⏭ تجاوز حلقات الحشو', ...b.head.slice(0, 1), 'تجاوزت ' + arCount(nx.skipped, 'حلقة حشو', 'حلقتين حشو', 'حلقات حشو', 'حلقة حشو') + (nx.skipped > 1 && nx.from && nx.to ? ' (من ' + nx.from + ' إلى ' + (/^\d+$/.test(nx.to) ? +nx.to - 1 : nx.to) + ')' : ''), '➡️ التالية: ' + nxText]);
+        }
       }
-      const res = await manual.startPath(path);
+      const res = await manual.startPath(path, true);
       const txt = await epText(cur);
       if (res === null) { b.final = '⏹ توقفت: تعذر بدء ' + txt + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
       started++;
@@ -188,6 +204,7 @@ async function run(b) {
   b.nextAt = 0;
   if (active === b) active = null;
   await push(b);
+  await notice(b, ['📦 انتهت الدفعة', ...b.head.slice(0, 1), b.final.replace(/^[^ ]+ /, '')]);
 }
 
 async function start({ chat, messageId, tg, targetId, head, track, count }) {
