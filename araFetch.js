@@ -3,12 +3,28 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
-const { getWyzieAss } = require('./wyzie');
+const { getWyzieAss, isAnimeTitle, hasWyzieKey, isPaused: isWyziePaused } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub };
 
 const cleanPath = p => String(p || '').split('?')[0];
+
+function reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieList, orgList }) {
+    try {
+        const isSeries = season != null && episode != null;
+        Promise.resolve(isAnimeTitle(imdbId, type, isSeries)).then(anime => {
+            if (!anime) return;
+            const wyzieState = !hasWyzieKey() ? 'off' : isWyziePaused() ? 'paused' : 'on';
+            require('./notify').sourcesEvent({
+                imdbId, season, episode, isPrefetch, wyzieState,
+                wyzie: wyzieList.length,
+                org: orgList.length,
+                orgAss: orgList.filter(x => x && x.format === 'ass').length
+            });
+        }).catch(() => {});
+    } catch (e) { }
+}
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
 let legacyPreferredIdx = 0;
 let legacyPreferredUntil = 0;
@@ -848,6 +864,8 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
             wyzieRawList = [...wyzieRawList, ...tagAbs(absRes.wyzieRawList)];
         }
     }
+
+    reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieList: wyzieRawList, orgList: osLegacyList });
 
     const legacyPre = lightweightPreFilter(osLegacyList, 'os_legacy');
     const osPre = lightweightPreFilter(osMirrorList, 'opensubtitles');
