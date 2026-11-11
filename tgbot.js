@@ -713,6 +713,9 @@ const CINEMETA_META_TIMEOUT_MS = 6000;
 const ESCALATE_SIM = 0.72;
 const RESOLVE_MIN_SIM = 0.6;
 const POSTERS_MAX = 4;
+const POSTERS_TIMEOUT_MS = 10000;
+const POSTER_ALBUM_TIMEOUT_MS = 9000;
+const POSTER_SINGLE_TIMEOUT_MS = 6000;
 const DEFAULT_SEARCH_MODEL = 'gemini-3.1-flash-lite';
 const finds = new Map();
 let pendingEp = null;
@@ -900,14 +903,14 @@ function genVariants(model, wantJson, grounded, temperature) {
   ];
 }
 
-async function searchGemini({ prompt, deadline, wantJson, grounding, temperature }) {
+async function searchGemini({ prompt, deadline, wantJson, grounding, temperature, thinking }) {
   const S = shared;
   if (!S || !S.acquireKey || !S.axios) return { err: 'nocfg' };
   const ks = await searchKeys();
   if (!ks.keys.length) return { err: ks.err || 'nokeys' };
   const model = S.normalizeGeminiModelId(ks.model);
   const url = S.DEFAULT_GEMINI_API_URL + '/models/' + model + ':generateContent';
-  let vi = 0;
+  let vi = thinking === 'minimal' ? 1 : 0;
   let grounded = !!grounding;
   for (let attempt = 0; attempt < 6; attempt++) {
     const remaining = deadline - Date.now();
@@ -1010,7 +1013,8 @@ async function understand(raw, p, deadline) {
     hints ? 'User hints: ' + hints : '',
     'User message: <<<' + raw + '>>>'
   ].filter(Boolean).join('\n');
-  const r = await searchGemini({ prompt, deadline, wantJson: true, grounding: env.grounding, temperature: 0.2 });
+  const descLike = DESC_CUE.test(raw) || String(raw).split(/\s+/).filter(Boolean).length >= 7;
+  const r = await searchGemini({ prompt, deadline, wantJson: true, grounding: env.grounding, temperature: 0.2, thinking: descLike ? '' : 'minimal' });
   if (!r.text) return { err: r.err || 'empty' };
   const j = extractJson(r.text);
   if (!j || typeof j !== 'object') return { err: 'empty' };
@@ -1111,10 +1115,11 @@ async function sendPosters(chatId, items) {
   if (!pics.length) return;
   const cap = o => (o.i + 1) + '. ' + trunc(o.x.name, 80) + (o.x.year ? ' (' + o.x.year + ')' : '');
   try {
-    if (pics.length === 1) await tg('sendPhoto', { chat_id: chatId, photo: pics[0].x.poster, caption: cap(pics[0]) }, 20000, false);
-    else await tg('sendMediaGroup', { chat_id: chatId, media: pics.map(o => ({ type: 'photo', media: o.x.poster, caption: cap(o) })) }, 25000, false);
+    if (pics.length === 1) await tg('sendPhoto', { chat_id: chatId, photo: pics[0].x.poster, caption: cap(pics[0]) }, POSTER_ALBUM_TIMEOUT_MS, false);
+    else await tg('sendMediaGroup', { chat_id: chatId, media: pics.map(o => ({ type: 'photo', media: o.x.poster, caption: cap(o) })) }, POSTER_ALBUM_TIMEOUT_MS, false);
   } catch (e) {
-    for (const o of pics) await tg('sendPhoto', { chat_id: chatId, photo: o.x.poster, caption: cap(o) }, 15000, false).catch(() => {});
+    if (/timeout|ECONNABORTED/i.test(String(e && e.message))) return;
+    for (const o of pics) await tg('sendPhoto', { chat_id: chatId, photo: o.x.poster, caption: cap(o) }, POSTER_SINGLE_TIMEOUT_MS, false).catch(() => {});
   }
 }
 
@@ -1138,7 +1143,7 @@ async function showResults(chatId, o) {
   while (finds.size > MAX_FINDS) finds.delete(finds.keys().next().value);
   const rows = items.map((x, i) => [{ text: (i + 1) + '· ' + (x.type === 'movie' ? '🎬 ' : '📺 ') + trunc(x.name, 34) + (x.year ? ' · ' + x.year : ''), callback_data: 'fd:' + h + ':' + i }]);
   if (canSmart && !smart) rows.push([{ text: '🧠 بحث أذكى (وصف/تصحيح أخطاء)', callback_data: 'fs:' + h }]);
-  await withTimeout(sendPosters(chatId, items), 40000);
+  await withTimeout(sendPosters(chatId, items), POSTERS_TIMEOUT_MS);
   await tg('sendMessage', { chat_id: chatId, text: out.join('\n'), reply_markup: { inline_keyboard: rows }, disable_web_page_preview: true });
 }
 
@@ -1286,6 +1291,18 @@ const isBatchCmd = t => /^\/batch(@\w+)?$/i.test(t) || t === 'دفعة';
 const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
 const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' || t === 'لوحة التحكم' || /^panel$/i.test(t);
 
+let searchBusy = false;
+let lastSearch = Promise.resolve();
+
+function startSearch(fn) {
+  if (searchBusy) return false;
+  searchBusy = true;
+  lastSearch = Promise.resolve().then(fn).catch(e => logErr('خطأ بالبحث', e)).finally(() => { searchBusy = false; });
+  return true;
+}
+
+const SEARCH_BUSY_TEXT = '⏳ في بحث شغال هسة، انتظر ينتهي وبعدها ابعث الجديد.';
+
 async function handleUpdate(u) {
   try {
     const cq = u && u.callback_query;
@@ -1295,7 +1312,10 @@ async function handleUpdate(u) {
     const data = String((cq && cq.data) || '');
     if (cq && /^go:/.test(data)) return await onGoCallback(cq);
     if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
-    if (cq && /^fs:/.test(data)) return await onSmartCallback(cq);
+    if (cq && /^fs:/.test(data)) {
+      if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);
+      return;
+    }
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
     if (cq) return await onPanelCallback(cq);
@@ -1304,13 +1324,13 @@ async function handleUpdate(u) {
     const fq = rq ? null : parseFind(text);
     const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
     if (rq) { pendingEp = null; await onRequest(chatId, rq, takeCount()); }
-    else if (fq) await onFind(chatId, fq.q);
+    else if (fq) { if (!startSearch(() => onFind(chatId, fq.q))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
     else if (er) await onEpisodeReply(chatId, er);
     else if (isBatchCmd(text)) await askCount(chatId);
     else if (isStopCmd(text)) await stopBatch(chatId);
     else if (isClearCmd(text)) await sendAskClear(chatId);
     else if (isPanelCmd(text)) await sendPanel(chatId);
-    else if (isPlainSearchText(text)) await onFind(chatId, text);
+    else if (isPlainSearchText(text)) { if (!startSearch(() => onFind(chatId, text))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
   } catch (e) {
     logErr('خطأ بمعالجة أمر', e);
   }
@@ -1365,5 +1385,5 @@ loadCtx().catch(() => {});
 
 module.exports = {
   start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
 };
