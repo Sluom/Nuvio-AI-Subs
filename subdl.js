@@ -85,9 +85,65 @@ async function getJson(url, timeout) {
   }
   throw lastErr;
 }
+const NOT_FOUND_RE = /can'?t find movie or tv/i;
+const CINEMETA = 'https://v3-cinemeta.strem.io';
+const ID_OK_TTL_MS = 24 * 3600 * 1000;
+const ID_FAIL_TTL_MS = 30 * 60 * 1000;
+const ID_RETRY_TTL_MS = 2 * 60 * 1000;
+const MAX_ID_CACHE = 500;
+const MAX_RANGE_PACKS = 3;
+const idCache = new Map();
+const idPending = new Map();
+const loggedOnce = new Set();
+function logOnce(k, msg) {
+  if (loggedOnce.has(k)) return;
+  if (loggedOnce.size >= 1000) loggedOnce.clear();
+  loggedOnce.add(k);
+  console.log(msg);
+}
+function setIdCache(imdbId, rec) {
+  if (idCache.size >= MAX_ID_CACHE && !idCache.has(imdbId)) idCache.delete(idCache.keys().next().value);
+  idCache.set(imdbId, rec);
+}
+async function subdlRequest(key, params) {
+  const qs = new URLSearchParams({ api_key: key, ...params });
+  return (await getJson(`${SUBDL_API}?${qs.toString()}`, 10000)) || {};
+}
+const isNotFound = d => !!d && !d.status && NOT_FOUND_RE.test(String(d.error || ''));
+function resolveTmdb(key, imdbId, isSeries, baseParams) {
+  const hit = idCache.get(imdbId);
+  if (hit && hit.until > Date.now()) return Promise.resolve(hit);
+  if (idPending.has(imdbId)) return idPending.get(imdbId);
+  const p = (async () => {
+    const rec = { tmdbId: null, name: null, until: Date.now() + ID_RETRY_TTL_MS };
+    try {
+      const meta = await axios.get(`${CINEMETA}/meta/${isSeries ? 'series' : 'movie'}/${imdbId}.json`, { timeout: 4000 });
+      const nm = meta && meta.data && meta.data.meta && meta.data.meta.name;
+      rec.name = nm ? String(nm).trim() : null;
+    } catch (e) {
+      rec.name = null;
+    }
+    if (rec.name) {
+      rec.until = Date.now() + ID_FAIL_TTL_MS;
+      try {
+        const data = await subdlRequest(key, { ...baseParams, film_name: rec.name });
+        const found = Array.isArray(data.results) ? data.results.find(r => r && r.imdb_id === imdbId && r.tmdb_id) : null;
+        if (found) {
+          rec.tmdbId = String(found.tmdb_id);
+          rec.until = Date.now() + ID_OK_TTL_MS;
+        }
+      } catch (e) {
+        rec.until = Date.now() + ID_RETRY_TTL_MS;
+      }
+    }
+    setIdCache(imdbId, rec);
+    return rec;
+  })().finally(() => idPending.delete(imdbId));
+  idPending.set(imdbId, p);
+  return p;
+}
 async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted, includePacks }) {
   const baseParams = {
-    imdb_id: imdbId,
     languages: wanted.join(','),
     type: isSeries ? 'tv' : 'movie',
     subs_per_page: '30'
@@ -98,40 +154,74 @@ async function fetchOfficial({ key, imdbId, season, episode, isSeries, wanted, i
     baseParams.season = String(season);
     baseParams.episode = String(episode);
   }
-  const query = async extra => {
-    const params = new URLSearchParams({ api_key: key, ...baseParams, ...extra });
-    const data = (await getJson(`${SUBDL_API}?${params.toString()}`, 10000)) || {};
-    if (!data.status || !Array.isArray(data.subtitles)) {
-      console.log(`[SubDL] رد غير متوقع: ${data.error || 'بدون تفاصيل'}`);
+  const runBoth = idParams => Promise.allSettled([
+    subdlRequest(key, { ...idParams, ...baseParams }),
+    subdlRequest(key, { ...idParams, ...baseParams, hi: '1' })
+  ]);
+  const bothMissing = r => r[0].status === 'fulfilled' && r[1].status === 'fulfilled' && isNotFound(r[0].value) && isNotFound(r[1].value);
+  const cached = idCache.get(imdbId);
+  const tmdbFirst = !!(cached && cached.tmdbId && cached.until > Date.now());
+  let res = await runBoth(tmdbFirst ? { tmdb_id: cached.tmdbId } : { imdb_id: imdbId });
+  if (bothMissing(res)) {
+    if (tmdbFirst) {
+      idCache.delete(imdbId);
+      res = await runBoth({ imdb_id: imdbId });
+    } else {
+      const rec = await resolveTmdb(key, imdbId, isSeries, baseParams);
+      if (rec.tmdbId) {
+        const res2 = await runBoth({ tmdb_id: rec.tmdbId });
+        if (!bothMissing(res2)) {
+          res = res2;
+          logOnce('ok:' + imdbId, `[SubDL] ${imdbId}: بحث IMDb ما لقى العنوان ⟵ لقيته بالاسم "${rec.name}" (TMDB ${rec.tmdbId}) ⟵ أستخدمه لهذا العنوان`);
+        }
+      } else {
+        logOnce('no:' + imdbId, `[SubDL] ${imdbId}: بحث IMDb ما لقى العنوان وبحث الاسم${rec.name ? ' "' + rec.name + '"' : ''} ما أكد نفس العنوان`);
+      }
+    }
+  }
+  const normalRes = res[0], hiRes = res[1];
+  if (normalRes.status === 'rejected' && hiRes.status === 'rejected') throw normalRes.reason;
+  if (bothMissing(res)) console.log(`[SubDL] ${imdbId}: رد غير متوقع: ${normalRes.value.error}`);
+  const take = r => {
+    if (r.status !== 'fulfilled') return [];
+    const d = r.value;
+    if (!d.status || !Array.isArray(d.subtitles)) {
+      if (!isNotFound(d)) console.log(`[SubDL] رد غير متوقع: ${d.error || 'بدون تفاصيل'}`);
       return [];
     }
-    return data.subtitles;
+    return d.subtitles;
   };
-  const [normalRes, hiRes] = await Promise.allSettled([query({}), query({ hi: '1' })]);
-  if (normalRes.status === 'rejected' && hiRes.status === 'rejected') throw normalRes.reason;
-  const normal = normalRes.status === 'fulfilled' ? normalRes.value : [];
-  const hiList = hiRes.status === 'fulfilled' ? hiRes.value : [];
+  const normal = take(normalRes);
+  const hiList = take(hiRes);
   const hiPaths = new Set(hiList.filter(s => s && s.url && s.hi === true).map(s => cleanPath(s.url)));
   const wantedSet = new Set(wanted);
+  const epNum = Number(episode);
   const out = [];
+  const rangeOut = [];
   for (const s of [...normal, ...hiList]) {
     if (!s || !s.url) continue;
+    let isRange = false;
     if (s.full_season) {
       if (!includePacks) continue;
       if (isSeries && s.season != null && Number(s.season) !== Number(season)) continue;
-    } else if (isSeries && s.episode != null && Number(s.episode) !== Number(episode)) continue;
+    } else if (isSeries && s.episode != null && Number(s.episode) !== epNum) {
+      const ef = Number(s.episode_from), ee = Number(s.episode_end);
+      if (!(includePacks && ef > 0 && ee > ef && ee <= 5000 && epNum >= ef && epNum <= ee)) continue;
+      isRange = true;
+    }
     const langCode = detectLang(s.language) || detectLang(s.lang);
     if (!langCode || !wantedSet.has(langCode)) continue;
     const path = cleanPath(s.url);
-    out.push(makeSub({
+    (isRange ? rangeOut : out).push(makeSub({
       url: absUrl(path),
       name: s.release_name || s.name,
       langCode,
       hi: hiPaths.has(path) || looksHearingImpaired(s, langCode),
       format: guessFormat(s, path),
-      route: 'official'
+      route: isRange ? 'official-range' : 'official'
     }));
   }
+  if (out.length < 2) out.push(...rangeOut.slice(0, MAX_RANGE_PACKS));
   return out;
 }
 function mapStremioList(list, route, wantedSet, fallbackLang) {
