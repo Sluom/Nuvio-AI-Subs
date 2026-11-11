@@ -280,4 +280,4 @@ async function getWyzieAss({ imdbId, season, episode, type, isPrefetch = false }
     return pending;
 }
 
-module.exports = { getWyzieAss, setWyzieKey, hasWyzieKey };
+module.exports = { getWyzieAss, setWyzieKey, hasWyzieKey, isAnimeTitle, isPaused };
