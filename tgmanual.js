@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
+let db = null;
+try { db = require('./db'); } catch (e) { db = null; }
 
 const PORT = process.env.PORT || 7000;
 const LIST_TIMEOUT_MS = 120000;
@@ -18,6 +20,34 @@ const latin = t => LRI + t + PDI;
 
 let ctx = null;
 const reqs = new Map();
+const CTX_NS = 'tgctx';
+const CTX_RESAVE_MS = 12 * 60 * 60 * 1000;
+let ctxSavedRaw = '';
+let ctxSavedAt = 0;
+
+function saveCtx() {
+  try {
+    if (!db || !ctx) return;
+    if (ctx.rawConfig === ctxSavedRaw && Date.now() - ctxSavedAt < CTX_RESAVE_MS) return;
+    ctxSavedRaw = ctx.rawConfig;
+    ctxSavedAt = Date.now();
+    Promise.resolve(db.saveDoc(CTX_NS, 'ctx', ctx)).catch(() => {});
+  } catch (e) { /* لا شيء */ }
+}
+
+async function loadCtx() {
+  if (ctx || !db) return ctx;
+  try {
+    const d = await db.loadDoc(CTX_NS, 'ctx');
+    if (!ctx && d && d.rawConfig) {
+      ctx = { rawConfig: String(d.rawConfig), host: d.host || '', proto: d.proto || 'https' };
+      ctxSavedRaw = ctx.rawConfig;
+      ctxSavedAt = Date.now();
+      console.log('[طلب يدوي] تم استرجاع الإعدادات من قاعدة البيانات');
+    }
+  } catch (e) { /* لا شيء */ }
+  return ctx;
+}
 
 function noteContext(req) {
   try {
@@ -28,6 +58,7 @@ function noteContext(req) {
       host: (req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) || '',
       proto: (req.headers && req.headers['x-forwarded-proto']) || 'https'
     };
+    saveCtx();
   } catch (e) { /* لا شيء */ }
 }
 
@@ -96,6 +127,7 @@ async function onRequest(chatId, rq, tg, count) {
       await send(rtl('❌ ما لقيت عمل بهذا الرقم ') + latin(rq.imdb) + '\n' + rtl('تأكد من الرقم وجرّب مرة ثانية.'));
       return;
     }
+    if (!ctx) await loadCtx();
     if (!ctx) {
       await send([rtl('🎬 ' + latin(title) + ' ' + latin('(' + rq.imdb + ')')),
         rtl('الرقم صحيح، بس ما عندي إعداداتك بالذاكرة (السيرفر تو اشتغل).'),
@@ -139,6 +171,7 @@ async function onCallback(cq, tg, batch) {
   const t = r && r.tracks[+m[2]];
   const answer = text => tg('answerCallbackQuery', { callback_query_id: cq.id, text }).catch(() => {});
   if (!t) { await answer('انتهت صلاحية هذي القائمة، ابعث الرقم من جديد'); return; }
+  if (!ctx) await loadCtx();
   if (!ctx) { await answer('افتح حلقة من Nuvio مرة وحدة أول'); return; }
   const label = t.ext.toUpperCase() + ' تراك ' + t.track;
   if (r.count && batch) {
@@ -167,4 +200,6 @@ async function onCallback(cq, tg, batch) {
   }
 }
 
-module.exports = { noteContext, parse, onRequest, onCallback, fetchTracks, startPath, getCtx: () => ctx, _t: { fetchTracks, reqs, getCtx: () => ctx } };
+loadCtx().catch(() => {});
+
+module.exports = { noteContext, loadCtx, parse, onRequest, onCallback, fetchTracks, startPath, getCtx: () => ctx, _t: { fetchTracks, reqs, getCtx: () => ctx } };
