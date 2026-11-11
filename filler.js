@@ -117,7 +117,7 @@ async function getShow(key) {
 }
 
 // طلب أصله Kitsu: الترقيم هو ترقيم Kitsu نفسه (kitsu:ID:N) كما يرسله Nuvio، بدون أي تحويل عبر tt.
-async function skipKitsu(targetId, kid, kepRaw) {
+async function skipKitsu(targetId, kid, kepRaw, detail) {
     if (!/^\d+$/.test(kid)) return null;
     const kep = posInt(kepRaw);
     if (!kep) return null;                      // رقم حلقة Kitsu الأصلي لم يصل ⟵ لا نخمّن
@@ -142,7 +142,7 @@ async function skipKitsu(targetId, kid, kepRaw) {
     let to = nextIdx;
     while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
     const target = show.seq[to];
-    if (!target || target.filler) return null;          // ما بعدها كله حشو/انتهى الموسم ⟵ المنطق المعتاد
+    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى الموسم ⟵ المنطق المعتاد
     const tmk = /^kitsu:(\d+):(\d+)$/.exec(target.id);
     if (!tmk || tmk[1] !== kid) return null;
 
@@ -162,7 +162,7 @@ async function skipKitsu(targetId, kid, kepRaw) {
  * يرجع كائن  ← { targetId, from, to, skipped, kind, ms } أقرب حلقة غير حشو بعد الحلقة الحالية.
  * kitsuId/kitsuEp: يوصلان فقط إذا كان الطلب الأصلي من Kitsu (index.js يمرّرهما)، وعندها يرجع targetId بصيغة kitsu:ID:N.
  */
-async function skipFillerAhead(targetId, kitsuId, kitsuEp) {
+async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
     if (!ENABLED || !targetId) return null;
     if (!BASE) {
         if (!warnedNoUrl) {
@@ -171,7 +171,7 @@ async function skipFillerAhead(targetId, kitsuId, kitsuEp) {
         }
         return null;
     }
-    if (kitsuId) return skipKitsu(targetId, String(kitsuId).trim(), kitsuEp);
+    if (kitsuId) return skipKitsu(targetId, String(kitsuId).trim(), kitsuEp, detail);
     const m = /^(tt\d+):(\d+):(\d+)$/.exec(String(targetId));
     if (!m) return null;
     const imdbId = m[1];
@@ -204,7 +204,7 @@ async function skipFillerAhead(targetId, kitsuId, kitsuEp) {
     let to = nextIdx;
     while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
     const target = show.seq[to];
-    if (!target || target.filler) return null;          // ما بعدها كله حشو/انتهى المسلسل ⟵ المنطق المعتاد
+    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى المسلسل ⟵ المنطق المعتاد
 
     const idOf = i => absolute ? (imdbId + ':1:' + (i + 1)) : (imdbId + ':' + show.seq[i].s + ':' + show.seq[i].e);
     const labelOf = i => {
