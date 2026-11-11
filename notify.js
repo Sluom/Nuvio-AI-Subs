@@ -227,6 +227,17 @@ function arSeconds(n) {
   return minWord(m) + (sec ? ' و' + secWord(sec) : '');
 }
 
+function spellDetail(spell) {
+  if (!Array.isArray(spell) || !spell.length) return [];
+  const MAX = 15;
+  const items = spell.slice(0, MAX).map(([k, n]) => String(k).replace(' → ', ' ← ') + (n > 1 ? ' ×' + n : ''));
+  const rest = spell.length - MAX;
+  return [
+    '📝 الإملاء: ' + spell.length + ' تحويل مختلف',
+    items.join(' | ') + (rest > 0 ? ' | +' + rest + ' أخرى (الباقي في لوغ ريندر)' : '')
+  ];
+}
+
 async function report(ev) {
   let ep;
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
@@ -263,7 +274,7 @@ async function report(ev) {
     title1 = 'اكتمل: ' + tgHead;
     detail = ['work', 'ep', 'src',
       '📄 الأسطر: ' + (ev.total || 0) + (ev.rejected > 0 ? ' — مرفوض: ' + ev.rejected : ''),
-      '⏱ الوقت: ' + arSeconds(secs)];
+      '⏱ الوقت: ' + arSeconds(secs), ...spellDetail(ev.spell)];
     if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
     detail.push('🔔 ' + why);
   } else if (ev.kind === 'partial') {
@@ -272,7 +283,7 @@ async function report(ev) {
     const fi = ev.failInfo;
     const allFailed = !!(fi && fi.all);
     title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
-    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات'];
+    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...spellDetail(ev.spell)];
     if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
       detail.push('🧩 الأسطر الناقصة: ' + fi.ranges.slice(0, 6).map(r => latin(r[0] === r[1] ? String(r[0]) : r[0] + '–' + r[1])).join('، ') + (fi.ranges.length > 6 ? ' ...' : ''));
       if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
