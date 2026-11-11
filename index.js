@@ -226,12 +226,14 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         let lastR = null;
         let healTried = false;
         let healed = false;
+        const spellAcc = new Map();
         const note = (kind, r, extra) => {
             if (!healKind) return;
             try {
                 notify.trackEvent({
                     kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey,
-                    ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, rejected: r && r.rejected,
+                    ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, rejected: r && r.rejected, failInfo: r && r.failInfo,
+                    spell: spellAcc.size ? [...spellAcc.entries()].sort((a, b) => b[1] - a[1]) : null,
                     healTried, healed, rounds: MAX_BACKGROUND_ROUNDS,
                     loadDoc: k => db.loadDoc('job', k),
                     ...(extra || {})
@@ -252,6 +254,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                     }
                 }
                 lastR = r;
+                if (r && Array.isArray(r.spellInfo)) for (const [k, n] of r.spellInfo) spellAcc.set(k, Math.max(spellAcc.get(k) || 0, n));
                 if (r.failed) {
                     failNow(r);
                     note('failed', r);
