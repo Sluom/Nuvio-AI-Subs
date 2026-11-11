@@ -745,7 +745,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             }
         }
     };
-    pickInto([...subdlSrt, ...subsourceSrt]);
+    const isStremLink = c => String(c.url || '').includes('strem.top');
+    pickInto([...subdlSrt.filter(c => !isStremLink(c)), ...subsourceSrt, ...subdlSrt.filter(isStremLink)]);
     if (correctorSrt.length < CORRECTOR_MAX) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
 
     return {
