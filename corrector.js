@@ -904,7 +904,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       ranges,
       chunks: [...new Set(ids.map(i => Math.floor(i / CHUNK) + 1))],
       totalChunks: Math.max(1, Math.ceil(cues.length / CHUNK)),
-      all: missing === toDo.length
+      all: missing === toDo.length && fromCache === 0   // "فشل كلي" فقط اذا ما في اي سطر محفوظ؛ غير هيج يظهر زر "أكمل الناقص فقط"
     };
   }
   return { texts: outTexts, missing, rejected, failInfo, spellInfo };
