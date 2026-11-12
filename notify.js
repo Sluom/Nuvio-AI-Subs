@@ -563,12 +563,13 @@ async function sourcesReport(ev) {
   try { ep = await describeEpisode(targetId); } catch (e) { ep = null; }
   let title = null;
   try { title = await titleOf(targetId, isSeries ? 'series' : 'movie'); } catch (e) { title = null; }
-  const wyzieText = ev.wyzieState === 'off' ? 'غير مفعّل' : ev.wyzieState === 'paused' ? 'متوقف مؤقتاً' : ev.wyzie > 0 ? ev.wyzie + ' ASS' : 'ما لقى';
-  const orgText = ev.org > 0 ? ev.org + (ev.orgAss > 0 ? ' (' + ev.orgAss + ' ASS)' : '') : 'ما لقى';
+  const wyzieText = ev.wyzieState === 'off' ? 'غير مفعّل' : ev.wyzieState === 'paused' ? 'متوقف مؤقتاً' : ev.wyzie > 0 ? latin(ev.wyzie + ' ASS') : 'ما لقى';
+  const orgText = ev.org > 0 ? latin(ev.org + (ev.orgAss > 0 ? ' (' + ev.orgAss + ' ASS)' : '')) : 'ما لقى';
   const out = [rtl('📡 مصادر الأنمي' + (ev.isPrefetch ? ' (تجهيز تلقائي)' : ''))];
   out.push(rtl('🎬 ' + latin(title ? title + ' (' + ev.imdbId + ')' : ev.imdbId)));
   if (isSeries && ep) out.push(rtl('📺 ' + ep.text));
-  out.push(rtl('🔹 ' + latin('Wyzie') + ': ' + wyzieText + ' | ' + latin('org') + ': ' + orgText));
+  out.push(rtl('🔹 ' + latin('Wyzie') + ': ' + wyzieText));
+  out.push(rtl('🔹 ' + latin('org') + ': ' + orgText));
   enqueue(out.join('\n'));
 }
 
