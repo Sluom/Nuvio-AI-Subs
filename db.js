@@ -211,6 +211,36 @@ async function deleteMap(ns, key) {
   }
 }
 
+// روابط الإعداد القصيرة: مجموعة منفصلة بدون انتهاء (TTL) حتى ما يختفي الرابط
+async function saveLink(id, value) {
+  const d = await getPrimaryDb();
+  if (!d) return false;
+  try {
+    await d.collection('links').updateOne(
+      { _id: String(id) },
+      { $set: { value: String(value), updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+      { upsert: true }
+    );
+    return true;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حفظ رابط الإعداد: ${e.message}`);
+    return false;
+  }
+}
+
+// يرجع { ok:false } اذا القاعدة غير متاحة، و{ ok:true, value:null } اذا الرابط غير موجود
+async function loadLink(id) {
+  const d = await getPrimaryDb();
+  if (!d) return { ok: false, value: null };
+  try {
+    const doc = await d.collection('links').findOne({ _id: String(id) });
+    return { ok: true, value: doc ? doc.value : null };
+  } catch (e) {
+    console.log(`[MongoDB] فشلت قراءة رابط الإعداد: ${e.message}`);
+    return { ok: false, value: null };
+  }
+}
+
 async function stats() {
   const read = async d => {
     if (!d) return null;
@@ -226,4 +256,4 @@ async function stats() {
   return primary || tracks ? { primary, tracks } : null;
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats };
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink };
