@@ -17,12 +17,82 @@ const {
 const db = require('./db');
 const trackPref = require('./trackPref');
 const notify = require('./notify');
+const crypto = require('crypto');
 const tgbot = require('./tgbot');
 const { resolveCeeId } = require('./ceeMap');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ===== روابط الاعداد القصيرة =====
+// الرابط القصير: /x + 22 حرف عشوائي (128 بت). الاعداد (والمفاتيح) محفوظ بـ Mongo وليس بالرابط.
+// الوسيط يحوّل المعرّف الى الاعداد الاصلي قبل المسارات، فبقية الكود ما يتغير. الروابط الطويلة القديمة تشتغل مثل قبل.
+const SHORT_RE = /^x[A-Za-z0-9_-]{22}$/;
+const shortCache = new Map();
+function shortCachePut(id, raw) {
+    if (shortCache.size >= 500 && !shortCache.has(id)) shortCache.delete(shortCache.keys().next().value);
+    shortCache.set(id, raw);
+}
+app.use(async (req, res, next) => {
+    try {
+        const qi = req.url.indexOf('?');
+        const pathPart = qi === -1 ? req.url : req.url.slice(0, qi);
+        const query = qi === -1 ? '' : req.url.slice(qi);
+        const seg = pathPart.split('/')[1] || '';
+        if (!SHORT_RE.test(seg)) return next();
+        let raw = shortCache.get(seg);
+        if (!raw) {
+            const r = await db.loadLink(seg);
+            if (!r.ok) return res.status(503).json({ error: 'قاعدة البيانات غير متاحة حالياً، حاول بعد شوي.' });
+            if (!r.value) return res.status(404).json({ error: 'رابط الإعداد غير موجود.' });
+            raw = r.value;
+            shortCachePut(seg, raw);
+        }
+        req.shortId = seg;
+        req.url = '/' + encodeURIComponent(raw) + pathPart.slice(seg.length + 1) + query;
+        next();
+    } catch (e) {
+        next(e);
+    }
+});
+
+const shortRate = new Map();
+function shortRateOk(ip) {
+    const now = Date.now();
+    const arr = (shortRate.get(ip) || []).filter(t => now - t < 3600000);
+    if (arr.length >= 30) { shortRate.set(ip, arr); return false; }
+    arr.push(now);
+    shortRate.set(ip, arr);
+    if (shortRate.size > 2000) shortRate.clear();
+    return true;
+}
+const SHORT_STR_FIELDS = ['model', 'tmdbKey', 'subdlKey', 'subsourceKey', 'oscomKey', 'oscomUser', 'oscomPass', 'wyzieKey'];
+app.post('/api/short-config', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    if (!shortRateOk(ip)) return res.status(429).json({ error: 'طلبات كثيرة، حاول بعد شوي.' });
+    const body = req.body || {};
+    const c = body.config;
+    if (!c || typeof c !== 'object' || !Array.isArray(c.keys) || !c.keys.length || !c.keys.every(k => typeof k === 'string' && k.length < 300) || c.keys.length > 200) {
+        return res.status(400).json({ error: 'إعداد غير صالح.' });
+    }
+    const clean = { keys: c.keys.map(k => k.trim()).filter(Boolean) };
+    for (const f of SHORT_STR_FIELDS) if (typeof c[f] === 'string' && c[f] && c[f].length < 500) clean[f] = c[f];
+    const json = JSON.stringify(clean);
+    if (json.length > 60000) return res.status(400).json({ error: 'الإعداد كبير جداً.' });
+    // تحديث نفس الرابط: اذا ارسل معرّف موجود نكتب فوقه (نفس الرابط، مفاتيح جديدة)، وغير هيج ننشئ معرّف عشوائي جديد
+    let id = '';
+    if (typeof body.id === 'string' && SHORT_RE.test(body.id)) {
+        const ex = await db.loadLink(body.id);
+        if (ex.ok && ex.value) id = body.id;
+    }
+    if (!id) id = 'x' + crypto.randomBytes(16).toString('base64url');
+    const ok = await db.saveLink(id, json);
+    if (!ok) return res.status(503).json({ error: 'تعذر الحفظ بقاعدة البيانات.' });
+    shortCachePut(id, json);
+    res.json({ id });
+});
 
 const PORT = process.env.PORT || 7000;
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
@@ -744,13 +814,14 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 </div>
 </div>
 <script>
+const CUR_ID=${JSON.stringify(req.shortId || '')};
 function addKeyField(){
 const row=document.createElement('div');
 row.className='key-row';
 row.innerHTML='<input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)"><button class="remove-btn" onclick="this.parentElement.remove()">X</button>';
 document.getElementById('keys-container').appendChild(row);
 }
-function buildConfigStr(){
+function buildConfigObj(){
 const keys=[];
 document.querySelectorAll('.api-key').forEach(i=>{const v=i.value.trim();if(v)keys.push(v);});
 if(keys.length===0){alert('الرجاء إدخال مفتاح API واحد على الأقل!');return null;}
@@ -769,11 +840,18 @@ if(oscomKey)config.oscomKey=oscomKey;
 if(oscomUser)config.oscomUser=oscomUser;
 if(oscomPass)config.oscomPass=oscomPass;
 if(wyzieKey)config.wyzieKey=wyzieKey;
-return encodeURIComponent(JSON.stringify(config));
+return config;
 }
-function generateInstallLink(){
-const c=buildConfigStr();
-if(!c)return;
+async function generateInstallLink(){
+const config=buildConfigObj();
+if(!config)return;
+let c=encodeURIComponent(JSON.stringify(config));
+let short=false;
+try{
+const r=await fetch('/api/short-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:config,id:CUR_ID})});
+if(r.ok){const j=await r.json();if(j&&j.id){c=j.id;short=true;}}
+}catch(e){}
+if(!short)alert('تعذر إنشاء الرابط القصير (القاعدة غير متاحة)، تم استعمال الرابط الطويل.');
 document.getElementById('test-link-input').value=window.location.origin+'/'+c+'/manifest.json';
 document.getElementById('test-link-box').style.display='block';
 window.location.href='stremio://'+window.location.host+'/'+c+'/manifest.json';
@@ -917,7 +995,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Content-Type', 'application/json');
-    const configParam = req.params.config ? encodeURIComponent(req.params.config) : '';
+    const configParam = req.shortId ? req.shortId : (req.params.config ? encodeURIComponent(req.params.config) : '');
     const addonCfg = parseConfig(req.params.config);
     tgbot.noteContext(req);
     const isPrefetch = String(req.query.prefetch || '') === '1';
