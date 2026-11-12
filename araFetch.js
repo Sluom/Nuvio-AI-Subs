@@ -6,7 +6,7 @@ const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 const { getWyzieAss, isAnimeTitle, hasWyzieKey, isPaused: isWyziePaused } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 
-module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub };
+module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, parseAssSlots } };
 
 const cleanPath = p => String(p || '').split('?')[0];
 
@@ -46,6 +46,53 @@ const CORRECTOR_MAX = 4;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const VERIFY_LEGACY = process.env.OS_LEGACY_VERIFY !== '0';
+
+function slotSite(token) {
+    const t = String(token || '').trim().toLowerCase();
+    if (!t) return '';
+    if (t === 'any' || t === '*') return 'any';
+    if (t === 'subdl') return 'subdl';
+    if (t === 'subsource' || t === 'subs') return 'subsource';
+    if (t.startsWith('wyz') || t === 'wiz' || t === 'wyzie') return 'wyzie';
+    if (t === 'org' || t === 'legacy' || t === 'os_legacy') return 'os_legacy';
+    if (t === 'com' || t === 'oscom') return 'oscom';
+    if (t === 'os' || t === 'mirror' || t === 'opensubtitles') return 'opensubtitles';
+    return '';
+}
+
+function parseAssSlots(raw, max) {
+    const tokens = String(raw || '').split(/[\s,;|]+/).filter(Boolean).slice(0, max);
+    const bad = [];
+    const slots = tokens.map(t => {
+        const site = slotSite(t);
+        if (!site) bad.push(t);
+        return site || 'any';
+    });
+    return { slots: slots.some(x => x !== 'any') ? slots : [], bad };
+}
+
+const ASS_SLOTS_PARSED = parseAssSlots(process.env.ASS_SLOTS, 4);
+const ASS_SLOTS = ASS_SLOTS_PARSED.slots;
+const ASS_SLOT_SITES = new Set(ASS_SLOTS.filter(x => x !== 'any'));
+if (ASS_SLOTS.length) console.log('[ترتيب ASS 📌] ASS_SLOTS=' + ASS_SLOTS.join(','));
+if (ASS_SLOTS_PARSED.bad.length) console.log('[ترتيب ASS ⚠️] أسماء غير معروفة اعتُبرت any: ' + ASS_SLOTS_PARSED.bad.join(','));
+
+function applyAssSlots(list, slots = ASS_SLOTS) {
+    if (!slots.length || !Array.isArray(list) || !list.length) return list;
+    const pool = list.slice();
+    const chosen = new Array(slots.length).fill(null);
+    slots.forEach((site, i) => {
+        if (site === 'any') return;
+        const j = pool.findIndex(x => x && x._site === site);
+        if (j >= 0) chosen[i] = pool.splice(j, 1)[0];
+    });
+    const out = [];
+    for (let i = 0; i < slots.length; i++) {
+        if (chosen[i]) out.push(chosen[i]);
+        else if (pool.length) out.push(pool.shift());
+    }
+    return [...out, ...pool];
+}
 
 const resultCache = new Map();
 const MAX_RAW_CACHE = 150;
@@ -652,7 +699,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (a._bad) continue;
             const u = cleanPath(a.url);
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
-            if (strictDedupe && globalAssCount >= CORRECTOR_MAX) continue;
+            if (strictDedupe && globalAssCount >= CORRECTOR_MAX && !ASS_SLOT_SITES.has(siteKey)) continue;
             seenUrls.add(u);
             unverifiedOut.push(a);
         }
@@ -736,12 +783,12 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         ...collectSiteAss('oscom', oscomPre.assList),
         ...collectSiteAss('wyzie', wyziePre.assList)
     ];
-    const allAss = [
+    const allAss = applyAssSlots([
         ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
         ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
         ...rawAllAss.filter(x => isHearingImpairedMeta(x) && !x._badSpelling),
         ...rawAllAss.filter(x => isHearingImpairedMeta(x) && x._badSpelling)
-    ];
+    ]);
 
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
     const subsourceSrt = collectSiteSrt('subsource', subsourcePre.srtList);
