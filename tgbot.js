@@ -933,9 +933,14 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
     } catch (e) {
       const st = (e && e.response && e.response.status) || 0;
       if (S.isGeminiAuthFailure(e)) { S.deadKeys.add(key); continue; }
+      if (grounded) {
+        const em = String((e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) || (e && e.message) || '').replace(/\s+/g, ' ').slice(0, 160);
+        grounded = false;
+        console.log('[بحث ذكي] فشل البحث بجوجل (grounding) HTTP ' + (st || 'timeout') + ' → ' + em + ' | أكمل بدونه.');
+        continue;
+      }
       if (st === 404) return { err: 'config' };
       if (st === 400) {
-        if (grounded) { grounded = false; console.log('[بحث ذكي] الموديل رفض البحث بجوجل (grounding)، أكمل بدونه.'); continue; }
         if (vi < variants.length - 1) { vi++; continue; }
         return { err: 'config' };
       }
