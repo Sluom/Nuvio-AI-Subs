@@ -428,7 +428,7 @@ async function onRequest(chatId, rq, count) {
       }));
       for (let k = 0; k < row.length; k += 2) rows.push(row.slice(k, k + 2));
     }
-    if (count) head.push(rtl('📦 دفعة: ' + count + ' حلقات (حلقة كل 5 دقائق، وتتوقف بنهاية الموسم)'));
+    if (count) head.push(rtl('📦 دفعة: ' + count + ' حلقات (حلقة كل ' + (batchGapMs(count) / 60000) + ' دقائق، وتتوقف بنهاية الموسم)'));
     await finish(head.concat(rtl(count ? 'اختر التراك لبدء الدفعة:' : 'اختر التراك اللي تريد تجهزه:')).join('\n'), { inline_keyboard: rows });
   } catch (e) {
     try { await send(rtl('⚠️ صار خطأ أثناء الطلب، جرّب مرة ثانية.')); } catch (e2) {}
@@ -463,7 +463,9 @@ async function onGoCallback(cq) {
 }
 
 const COUNTS = [4, 6, 8, 10];
-const GAP_MS = 5 * 60 * 1000;
+const GAP_SMALL_MS = 5 * 60 * 1000;   // دفعة 4 حلقات او اقل
+const GAP_BIG_MS = 10 * 60 * 1000;    // دفعة اكثر من 4 حلقات
+function batchGapMs(count) { return (count || 0) <= 4 ? GAP_SMALL_MS : GAP_BIG_MS; }
 const READY_GAP_MS = 3000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const META_TTL_MS = 6 * 3600 * 1000;
@@ -637,7 +639,7 @@ async function runBatch(b) {
       started++;
       b.lines.push((res ? '⏳ ' : '✅ جاهزة أصلاً: ') + started + '. ' + txt);
       console.log('[دفعة] ' + started + '/' + b.count + ' ' + cur + (res ? ': بدأ التجهيز' : ': جاهزة أصلاً'));
-      b.nextAt = Date.now() + (res ? GAP_MS : READY_GAP_MS);
+      b.nextAt = Date.now() + (res ? batchGapMs(b.count) : READY_GAP_MS);
       if (started >= b.count) break;
       await pushBatch(b);
     }
