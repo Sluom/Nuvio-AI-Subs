@@ -45,7 +45,6 @@ const MAX_SRT_PER_SITE = 20;
 const OSCOM_VERIFY_EACH = 2;
 const CORRECTOR_MAX = 4;
 const READY_SRT_PER_SITE = 4;
-const ASS_NAME_DEDUPE_MIN = 8;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const VERIFY_LEGACY = process.env.OS_LEGACY_VERIFY !== '0';
@@ -92,19 +91,45 @@ function currentAssSlots() {
 function applyAssSlots(list, slots) {
     if (!slots) slots = currentAssSlots().slots;
     if (!slots.length || !Array.isArray(list) || !list.length) return list;
+    slots = slots.slice();
+    while (slots.length < CORRECTOR_MAX) slots.push('any');
     const pool = list.slice();
+    // بصمة نص الحوار (من التحقق) ⟵ خانتان من نفس الموقع ما تاخذان نفس الترجمة حرفياً (بين المواقع لا نصفّي).
+    // ويز بصمته رقم تعريف فقط فلا يُعتمد
+    const sigOf = x => (x && x._sig && !/^wyzie:/.test(String(x._sig))) ? String(x._site) + '|' + String(x._sig) : '';
+    const used = new Set();
+    const skipped = {};
+    const dups = new Set();
+    const takeFrom = pred => {
+        for (let j = 0; j < pool.length; j++) {
+            const x = pool[j];
+            if (!x || !pred(x)) continue;
+            const sg = sigOf(x);
+            if (sg && used.has(sg)) { if (!dups.has(x)) { dups.add(x); skipped[x._site] = (skipped[x._site] || 0) + 1; } continue; }
+            if (sg) used.add(sg);
+            return pool.splice(j, 1)[0];
+        }
+        return null;
+    };
     const chosen = new Array(slots.length).fill(null);
     slots.forEach((site, i) => {
         if (site === 'any') return;
-        const j = pool.findIndex(x => x && x._site === site);
-        if (j >= 0) chosen[i] = pool.splice(j, 1)[0];
+        chosen[i] = takeFrom(x => x._site === site);
     });
     const out = [];
     for (let i = 0; i < slots.length; i++) {
         if (chosen[i]) out.push(chosen[i]);
-        else if (pool.length) out.push(pool.shift());
+        else { const g = takeFrom(() => true); if (g) out.push(g); }
     }
-    return [...out, ...pool];
+    const sk = Object.keys(skipped);
+    if (sk.length) console.log('[ASS 🧩] خانات ASS: تخطيت ترجمات مطابقة حرفياً لخانة سابقة (' + sk.map(k => k + ' ' + skipped[k]).join('، ') + ')');
+    // المطابقات تنزل لآخر القائمة، ولا تاخذ مكان خانة (أفضل خانة ناقصة من ترجمة مكررة)
+    const rest = [...pool.filter(x => !dups.has(x)), ...pool.filter(x => dups.has(x))];
+    const final = [...out, ...rest];
+    for (let i = 0; i < slots.length && i < final.length;) {
+        if (dups.has(final[i])) final.splice(i, 1); else i++;
+    }
+    return final;
 }
 
 const resultCache = new Map();
@@ -697,10 +722,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         const verifiedOut = [];
         const unverifiedOut = [];
         const seenUrls = new Set();
-        const seenSigs = new Set();
-        const seenNames = new Set();
-        const seenFileIds = new Set();
-        const nameOf = x => normalizeNameSig(x.fileName || x.title || '');
         const siteVerifiedAss = sortByConsistentTemplate(
             verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'ass' && !v._bad)
         );
@@ -709,12 +730,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             const u = cleanPath(v.url);
             if (seenUrls.has(u)) continue;
             seenUrls.add(u);
-            // نفس نص الترجمة حرفياً من نفس الموقع (البصمة تتجاهل التوقيت والتنسيق) ⟵ نبقي الأول فقط
-            if (v._sig && seenSigs.has(v._sig)) continue;
-            if (v._sig) { seenSigs.add(v._sig); globalAssCount++; }
-            const nm = nameOf(v);
-            if (nm.length > ASS_NAME_DEDUPE_MIN) seenNames.add(nm);
-            if (v._osFileId) seenFileIds.add(v._osFileId);
+            if (v._sig) globalAssCount++;
             verifiedOut.push(v);
         }
 
@@ -723,13 +739,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (a._bad) continue;
             const u = cleanPath(a.url);
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
-            if (a._osFileId && seenFileIds.has(a._osFileId)) continue;
-            const nm = nameOf(a);
-            if (nm.length > ASS_NAME_DEDUPE_MIN && seenNames.has(nm)) continue;
             if (strictDedupe && globalAssCount >= CORRECTOR_MAX && !assSlotSites.has(siteKey)) continue;
             seenUrls.add(u);
-            if (nm.length > ASS_NAME_DEDUPE_MIN) seenNames.add(nm);
-            if (a._osFileId) seenFileIds.add(a._osFileId);
             unverifiedOut.push(a);
         }
 
