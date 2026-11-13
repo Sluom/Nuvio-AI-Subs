@@ -7,7 +7,7 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const SOURCE = String(process.env.WYZIE_SOURCE || 'all').trim() || 'all';
 const SOURCE_COST = SOURCE === 'all' ? 3 : Math.max(1, SOURCE.split(',').filter(Boolean).length);
 const DAILY_UNITS = Math.max(30, parseInt(process.env.WYZIE_DAILY_UNITS || '600', 10) || 600);
-const ALL_TITLES = process.env.WYZIE_ALL_TITLES === '1';
+const ALL_TITLES = false;
 
 const MAX_RESULTS = 3;
 const SEARCH_TIMEOUT_MS = 3000;
