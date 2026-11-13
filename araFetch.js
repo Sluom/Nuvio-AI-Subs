@@ -5,6 +5,7 @@ const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 const { getWyzieAss, isAnimeTitle, hasWyzieKey, isPaused: isWyziePaused } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
+const settings = require('./settings');
 
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, parseAssSlots } };
 
@@ -73,13 +74,23 @@ function parseAssSlots(raw, max) {
     return { slots: slots.some(x => x !== 'any') ? slots : [], bad };
 }
 
-const ASS_SLOTS_PARSED = parseAssSlots(process.env.ASS_SLOTS, 4);
-const ASS_SLOTS = ASS_SLOTS_PARSED.slots;
-const ASS_SLOT_SITES = new Set(ASS_SLOTS.filter(x => x !== 'any'));
-if (ASS_SLOTS.length) console.log('[ترتيب ASS 📌] ASS_SLOTS=' + ASS_SLOTS.join(','));
-if (ASS_SLOTS_PARSED.bad.length) console.log('[ترتيب ASS ⚠️] أسماء غير معروفة اعتُبرت any: ' + ASS_SLOTS_PARSED.bad.join(','));
+// ترتيب ASS يُقرأ لحظياً: تعديل تلغرام ← متغير ASS_SLOTS ← فاضي (الترتيب القديم)
+let assSlotsRaw = null;
+let assSlotsState = { slots: [], sites: new Set(), bad: [] };
+function currentAssSlots() {
+    const raw = String(settings.get('ass_slots') || '');
+    if (raw !== assSlotsRaw) {
+        assSlotsRaw = raw;
+        const p = parseAssSlots(raw, 4);
+        assSlotsState = { slots: p.slots, sites: new Set(p.slots.filter(x => x !== 'any')), bad: p.bad };
+        if (p.slots.length) console.log('[ترتيب ASS 📌] ' + p.slots.join(','));
+        if (p.bad.length) console.log('[ترتيب ASS ⚠️] أسماء غير معروفة اعتُبرت any: ' + p.bad.join(','));
+    }
+    return assSlotsState;
+}
 
-function applyAssSlots(list, slots = ASS_SLOTS) {
+function applyAssSlots(list, slots) {
+    if (!slots) slots = currentAssSlots().slots;
     if (!slots.length || !Array.isArray(list) || !list.length) return list;
     const pool = list.slice();
     const chosen = new Array(slots.length).fill(null);
@@ -97,6 +108,7 @@ function applyAssSlots(list, slots = ASS_SLOTS) {
 }
 
 const resultCache = new Map();
+settings.onChange(k => { if (k === 'ass_slots') resultCache.clear(); });
 const MAX_RAW_CACHE = 150;
 const rawTextCache = new Map();
 const seriesMetaCache = new Map();
@@ -678,6 +690,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     }
 
     let globalAssCount = 0;
+    const assSlotSites = currentAssSlots().sites;
     const globalSeenSrtSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
@@ -713,7 +726,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (a._osFileId && seenFileIds.has(a._osFileId)) continue;
             const nm = nameOf(a);
             if (nm.length > ASS_NAME_DEDUPE_MIN && seenNames.has(nm)) continue;
-            if (strictDedupe && globalAssCount >= CORRECTOR_MAX && !ASS_SLOT_SITES.has(siteKey)) continue;
+            if (strictDedupe && globalAssCount >= CORRECTOR_MAX && !assSlotSites.has(siteKey)) continue;
             seenUrls.add(u);
             if (nm.length > ASS_NAME_DEDUPE_MIN) seenNames.add(nm);
             if (a._osFileId) seenFileIds.add(a._osFileId);
