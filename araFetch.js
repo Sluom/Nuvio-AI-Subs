@@ -27,9 +27,6 @@ function reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieLi
     } catch (e) { }
 }
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
-let legacyPreferredIdx = 0;
-let legacyPreferredUntil = 0;
-const LEGACY_PREFER_MS = 10 * 60 * 1000;
 
 const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500, wyzie: 3500 };
 const FAST_VERIFY_WINDOW_MS = 2800;
@@ -368,9 +365,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             });
             if (!response || response.status < 200 || response.status >= 300) {
                 console.log('[جلب عربي - opensubtitles.org (' + label + ')' + phase + '] HTTP ' + (response ? response.status : 'بدون رد'));
-                const failed = [];
-                if (response && (response.status === 401 || response.status === 403)) failed._blocked = true;
-                return failed;
+                return [];
             }
             let json = response.data;
             if (typeof json === 'string') {
@@ -385,18 +380,7 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
     }
 
     async function fetchLegacyData(url, phase = '') {
-        const baseIdx = Date.now() < legacyPreferredUntil ? legacyPreferredIdx : 0;
-        const order = [baseIdx, ...LEGACY_AGENTS.map((_, i) => i).filter(i => i !== baseIdx)];
-        let firstResults = await requestWithAgent(url, LEGACY_AGENTS[order[0]], phase);
-        if (firstResults._blocked && order.length > 1) {
-            const second = await requestWithAgent(url, LEGACY_AGENTS[order[1]], phase + ' - وكيل ثاني');
-            if (!second._blocked) {
-                legacyPreferredIdx = order[1];
-                legacyPreferredUntil = Date.now() + LEGACY_PREFER_MS;
-                console.log('[جلب عربي - opensubtitles.org] ' + LEGACY_AGENTS[order[0]] + ' انرفض ⟵ نجح ' + LEGACY_AGENTS[order[1]] + '، أعتمده ' + (LEGACY_PREFER_MS / 60000) + ' دقائق');
-            }
-            if (!second._blocked) firstResults = second;
-        }
+        const firstResults = await requestWithAgent(url, LEGACY_AGENTS[0], phase);
         const combined = [];
         const seenIds = new Set();
         for (const item of firstResults) {
