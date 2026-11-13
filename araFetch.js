@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
-const { getWyzieAss, isAnimeTitle, hasWyzieKey, isPaused: isWyziePaused } = require('./wyzie');
+const { getWyzieAss, isAnimeTitle, hasWyzieKey, getWyzieUnits, isPaused: isWyziePaused } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 const settings = require('./settings');
 
@@ -19,7 +19,9 @@ function reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieLi
             const wyzieState = !hasWyzieKey() ? 'off' : isWyziePaused() ? 'paused' : 'on';
             require('./notify').sourcesEvent({
                 imdbId, season, episode, isPrefetch, wyzieState,
-                wyzie: wyzieList.length,
+                wyzie: wyzieList.filter(x => x && x.format === 'ass').length,
+                wyzieSrt: wyzieList.filter(x => x && x.format === 'srt').length,
+                wyzieUnits: getWyzieUnits(),
                 org: orgList.length,
                 orgAss: orgList.filter(x => x && x.format === 'ass').length
             });
@@ -708,7 +710,7 @@ function lightweightPreFilter(list, siteKey) {
     };
 }
 
-function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [] }, verifiedZipItems, strictDedupe = false }) {
+function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [], srtList: [] }, verifiedZipItems, strictDedupe = false }) {
     const verifiedUrls = new Set();
     for (const v of verifiedZipItems) {
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
@@ -835,8 +837,11 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const osSrt = collectSiteSrt('opensubtitles', osPre.srtList);
     const legacySrt = collectSiteSrt('os_legacy', legacyPre.srtList);
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
+    const wyzieSrt = collectSiteSrt('wyzie', wyziePre.srtList || []);
     const readyCap = l => l.slice(0, READY_SRT_PER_SITE);
     const readySrt = [...readyCap(subdlSrt), ...readyCap(subsourceSrt), ...readyCap(osSrt), ...readyCap(legacySrt), ...readyCap(oscomSrt)];
+    // ويز SRT احتياطي فقط: يكمّل القائمة الجاهزة إذا باقي المواقع أعطت أقل من 4
+    if (readySrt.length < READY_SRT_PER_SITE) readySrt.push(...wyzieSrt.slice(0, READY_SRT_PER_SITE - readySrt.length));
 
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
@@ -870,6 +875,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const isStremLink = c => String(c.url || '').includes('strem.top');
     pickInto([...subdlSrt.filter(c => !isStremLink(c)), ...subsourceSrt, ...subdlSrt.filter(isStremLink)]);
     if (correctorSrt.length < CORRECTOR_MAX) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
+    if (correctorSrt.length < CORRECTOR_MAX) pickInto(wyzieSrt);
 
     return {
         ass: allAss,
@@ -881,7 +887,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             subsourceSrt: subsourceSrt.length,
             osSrt: osSrt.length,
             legacySrt: legacySrt.length,
-            oscomSrt: oscomSrt.length
+            oscomSrt: oscomSrt.length,
+            wyzieSrt: wyzieSrt.length
         }
     };
 }
