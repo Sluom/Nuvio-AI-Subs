@@ -6,8 +6,8 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 const SOURCE = String(process.env.WYZIE_SOURCE || 'all').trim() || 'all';
 const SOURCE_COST = SOURCE === 'all' ? 3 : Math.max(1, SOURCE.split(',').filter(Boolean).length);
-const DAILY_UNITS = Math.max(30, parseInt(process.env.WYZIE_DAILY_UNITS || '600', 10) || 600);
-const ALL_TITLES = false;
+const DAILY_UNITS = Math.max(30, parseInt(process.env.WYZIE_DAILY_UNITS || '1000', 10) || 1000);
+const ALL_TITLES = true; // للاختبار: ويز لكل الأعمال (ارجعها false ليرجع للأنمي فقط)
 
 const MAX_RESULTS = 3;
 const SEARCH_TIMEOUT_MS = 3000;
@@ -173,18 +173,19 @@ function isArabicRow(r) {
 }
 
 function toItems(rows) {
-    const list = (Array.isArray(rows) ? rows : [])
-        .filter(r => r && typeof r.url === 'string' && /^https:\/\//i.test(r.url)
-            && /^(ass|ssa)$/i.test(String(r.format || '')) && isArabicRow(r) && r.ai !== true);
-    list.sort((a, b) =>
+    const arabic = (Array.isArray(rows) ? rows : [])
+        .filter(r => r && typeof r.url === 'string' && /^https:\/\//i.test(r.url) && isArabicRow(r) && r.ai !== true);
+    const rank = (a, b) =>
         (+!!a.isHearingImpaired - +!!b.isHearingImpaired) ||
-        ((Number(b.downloadCount) || 0) - (Number(a.downloadCount) || 0)));
-    const out = list.slice(0, MAX_RESULTS).map(r => {
+        ((Number(b.downloadCount) || 0) - (Number(a.downloadCount) || 0));
+    const assRows = arabic.filter(r => /^(ass|ssa)$/i.test(String(r.format || ''))).sort(rank);
+    const srtRows = arabic.filter(r => /^srt$/i.test(String(r.format || ''))).sort(rank);
+    const mk = fmt => r => {
         const hi = !!r.isHearingImpaired;
         const id = String(r.id || r.url.split('?')[0]);
         return {
             url: r.url,
-            format: 'ass',
+            format: fmt,
             fileName: String(r.fileName || r.release || ('Wyzie_Ara_' + id)),
             hearingImpaired: hi,
             _isSdh: hi,
@@ -193,8 +194,10 @@ function toItems(rows) {
             _sig: 'wyzie:' + id,
             _wyzieSource: r.source ? String(r.source) : ''
         };
-    });
-    out._raw = list.length;
+    };
+    const out = [...assRows.slice(0, MAX_RESULTS).map(mk('ass')), ...srtRows.slice(0, MAX_RESULTS).map(mk('srt'))];
+    out._raw = assRows.length;
+    out._rawSrt = srtRows.length;
     return out;
 }
 
@@ -204,7 +207,7 @@ function buildQuery(params) {
 
 async function searchWyzie({ imdbId, season, episode, isSeries, isPrefetch, tag }) {
     if (!takeBudget()) return null;
-    const params = { id: imdbId, language: 'ar', format: 'ass,ssa', source: SOURCE, key: apiKey };
+    const params = { id: imdbId, language: 'ar', format: 'ass,ssa,srt', source: SOURCE, key: apiKey };
     if (isSeries) {
         params.season = String(season);
         params.episode = String(episode);
@@ -266,9 +269,11 @@ async function getWyzieAss({ imdbId, season, episode, type, isPrefetch = false }
                 putCache(resultCache, cacheKey, out, out.length ? RESULT_OK_TTL_MS : RESULT_EMPTY_TTL_MS);
                 if (out.length) {
                     const src = Array.from(new Set(out.map(x => x._wyzieSource).filter(Boolean))).join('/');
-                    console.log('[Wyzie] ' + tag + ': ' + out.length + ' ASS عربي' + (src ? ' (' + src + ')' : ''));
+                    const nAss = out.filter(x => x.format === 'ass').length;
+                    const nSrt = out.length - nAss;
+                    console.log('[Wyzie] ' + tag + ': ' + nAss + ' ASS + ' + nSrt + ' SRT عربي' + (src ? ' (' + src + ')' : '') + ' | U ' + usage.units);
                 } else {
-                    console.log('[Wyzie] ' + tag + ': ما في ASS عربي');
+                    console.log('[Wyzie] ' + tag + ': ما في ASS/SRT عربي | U ' + usage.units);
                 }
                 return out;
             } finally {
@@ -280,4 +285,8 @@ async function getWyzieAss({ imdbId, season, episode, type, isPrefetch = false }
     return pending;
 }
 
-module.exports = { getWyzieAss, setWyzieKey, hasWyzieKey, isAnimeTitle, isPaused };
+function getWyzieUnits() {
+    return usage.day === todayUtc() ? usage.units : 0;
+}
+
+module.exports = { getWyzieUnits, getWyzieAss, setWyzieKey, hasWyzieKey, isAnimeTitle, isPaused };
