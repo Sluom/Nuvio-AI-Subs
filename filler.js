@@ -19,7 +19,9 @@ const axios = require('axios');
 //    - أي خطأ/تعذّر اتصال ⟵ يرجع null فيكمل التجهيز بالحلقة التالية العادية (الميزة لا تعطّل شيئاً أبداً).
 // ============================================================================
 
-const ENABLED = process.env.FILLER_SKIP !== '0';
+const settings = require('./settings');
+// يُقرأ لحظياً: تعديل تلغرام ← FILLER_SKIP ← شغّال
+const isEnabled = () => !!settings.get('filler_skip');
 
 // يقبل: https://host/…/manifest.json أو stremio://host/…/manifest.json أو الرابط بدون manifest.json
 function normalizeBase(raw) {
@@ -163,7 +165,7 @@ async function skipKitsu(targetId, kid, kepRaw, detail) {
  * kitsuId/kitsuEp: يوصلان فقط إذا كان الطلب الأصلي من Kitsu (index.js يمرّرهما)، وعندها يرجع targetId بصيغة kitsu:ID:N.
  */
 async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
-    if (!ENABLED || !targetId) return null;
+    if (!isEnabled() || !targetId) return null;
     if (!BASE) {
         if (!warnedNoUrl) {
             warnedNoUrl = true;
