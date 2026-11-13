@@ -882,6 +882,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 
 const WANTED_TRACKS = 4;
 const SHOW_AI_ALWAYS = process.env.SHOW_AI_ALWAYS === '1';
+const READY_ASS_MAX = 3;
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 const SOURCE_LABELS = {
     subdl: 'subdl',
@@ -927,7 +928,7 @@ function logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, a
     };
     const siteOf = s => s._site || s._source;
     (arabicSubs.srt || []).forEach(s => add(ready, siteOf(s), false));
-    (arabicSubs.ass || []).forEach(s => add(ready, siteOf(s), true));
+    (arabicSubs.ass || []).slice(0, READY_ASS_MAX).forEach(s => add(ready, siteOf(s), true));
     (corrSrtList || []).slice(0, 4).forEach(s => add(corr, siteOf(s), false));
     (corrAssList || arabicSubs.ass || []).slice(0, 4).forEach(s => add(corr, siteOf(s), true));
     add(foreign, 'opensubtitles', false, osClean.length + osHi.length);
@@ -1143,10 +1144,11 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const streamPathAss = configParam ? '/' + configParam + '/stream-ai.ass' : '/stream-ai.ass';
         let extraParams = '&id=' + finalTargetId;
         if (originalKitsuId) extraParams += '&kitsu=' + originalKitsuId + (originalKitsuEp ? '&kep=' + originalKitsuEp : '');
-        if (arabicSubs.ass && arabicSubs.ass.length > 0) {
+        const readyAssList = (arabicSubs.ass || []).slice(0, READY_ASS_MAX);
+        if (readyAssList.length > 0) {
             const assSiteCounters = {};
-            for (let i = 0; i < arabicSubs.ass.length; i++) {
-                const sub = arabicSubs.ass[i];
+            for (let i = 0; i < readyAssList.length; i++) {
+                const sub = readyAssList[i];
                 const srcLabel = getSourceLabel(sub._source);
                 assSiteCounters[srcLabel] = (assSiteCounters[srcLabel] || 0) + 1;
                 const siteIdx = assSiteCounters[srcLabel];
