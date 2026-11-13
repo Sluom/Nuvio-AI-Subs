@@ -100,7 +100,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const translationCache = {};
 const pinnedCorrectorMemCache = new Map();
-tgbot.onDrop(k => { const c = translationCache[k]; if (c && c.status !== 'pending') delete translationCache[k]; });
+tgbot.onDrop(k => { const c = translationCache[k]; if (c && c.status !== 'pending') delete translationCache[k]; pinnedCorrectorMemCache.delete(k); });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
