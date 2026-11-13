@@ -8,7 +8,7 @@ const GAP_OK = /^[ \t\uE002\uE003]*[ \t][ \t\uE002\uE003]*$/;
 const MARK_RE = /[\uE002\uE003]/g;
 const TAG_RE = /\{[^}]*\}|<[^>]*>/g;
 const PH_RE = /\uE000(\d+)\uE001/g;
-const TRANSLATOR_MODE = process.env.NAMES_SWAP_ONLY !== '0';
+const TRANSLATOR_MODE = true;
 const SLICE_SMALL = 100;
 const SLICE_BIG = 300;
 const SMALL_MAX_LINES = 600;
