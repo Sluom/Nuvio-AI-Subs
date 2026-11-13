@@ -416,7 +416,7 @@ function parseRequest(text) {
 async function fetchTracks(type, targetId, rawOverride) {
   const rawCfg = rawOverride || ctx.rawConfig;
   const path = (rawCfg ? '/' + encodeURIComponent(rawCfg) : '')
-    + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json';
+    + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json?bgq=1';
   const hdrs = { 'x-forwarded-host': ctx.host || ('127.0.0.1:' + PORT), 'x-forwarded-proto': ctx.proto };
   if (rawOverride) hdrs['x-nuvio-nonote'] = '1';
   const r = await axios.get('http://127.0.0.1:' + PORT + path, {
@@ -481,7 +481,7 @@ async function onRequest(chatId, rq, count) {
         rtl('افتح أي حلقة من Nuvio مرة وحدة وبعدها ارجع ابعث الرقم.')].join('\n'));
       return;
     }
-    const wait = await send(rtl('🔎 جاري جلب التراكات لـ ' + latin(title) + '...'));
+    const wait = await send(rtl('🔎 جاري جلب التراكات لـ ' + latin(title) + '... (جودة التجهيز بالخلفية، قد ياخذ حتى دقيقة)'));
     const tracks = await fetchTracks(type, rq.targetId);
     const head = [rtl('🎬 ' + latin(title) + ' ' + latin('(' + rq.imdb + ')'))];
     if (isEp) {
