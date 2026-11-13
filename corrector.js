@@ -29,7 +29,7 @@ const HEDGE_AFTER_FAILS = 2;
 const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const TRACKS_REV = String(process.env.TRACKS_REV || '').trim();
 const TRACKS_TAG = (TRACKS_REV && TRACKS_REV !== '0') ? '_t' + TRACKS_REV : '';
-const ELLIPSIS_AUTO = process.env.ELLIPSIS_AUTO !== '0';
+const ELLIPSIS_AUTO = true;
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
 const ASS_FONT_PCT = 7.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
@@ -645,7 +645,7 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}) {
       .then(m => { priMap = m; check(); });
   });
 }
-const NAMES_PARALLEL = process.env.NAMES_PARALLEL !== '0';
+const NAMES_PARALLEL = true;
 const secsOf = ms => (ms / 1000).toFixed(1);
 const namesCountOf = book => { try { const m = /\] (\d+):/.exec(describeBook(book) || ''); return m ? Number(m[1]) : null; } catch (e) { return null; } };
 const fileDurOf = cues => { try { const m = /(\d+):(\d{1,2}):(\d{1,2})/.exec(String(cues[cues.length - 1].end)); return m ? Number(m[1]) + ':' + m[2].padStart(2, '0') + ':' + m[3].padStart(2, '0') : ''; } catch (e) { return ''; } };
