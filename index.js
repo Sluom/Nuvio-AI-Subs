@@ -899,8 +899,8 @@ const assExtRe = /\.(ass|ssa)$/i;
 const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com', 'wyzie'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
 
-function logRequestLine(origId, finalId, finalType, isPrefetch) {
-    const bg = isPrefetch ? ' (خلفية)' : '';
+function logRequestLine(origId, finalId, finalType, isPrefetch, fromBot) {
+    const bg = isPrefetch ? ' (خلفية)' : (fromBot ? ' (بوت - جودة الخلفية)' : '');
     const fmtEp = (id, short) => {
         const m = /^tt\d+:(\d+):(\d+)$/.exec(id);
         if (!m) return id;
@@ -1001,6 +1001,9 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     const addonCfg = parseConfig(req.params.config);
     tgbot.noteContext(req);
     const isPrefetch = String(req.query.prefetch || '') === '1';
+    // طلب من البوت (bgq=1): نفس جودة جلب الخلفية (مهلات طويلة وتحقق كامل) بدون تغيير منطق تثبيت التراكات
+    const fromBot = !isPrefetch && String(req.query.bgq || '') === '1';
+    const bgQuality = isPrefetch || fromBot;
 
     let targetId = req.params.reqId.split('/')[0];
     if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
@@ -1054,8 +1057,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
         const osUrl = 'https://opensubtitles-v3.strem.io/subtitles/' + finalType + '/' + finalTargetId + '.json';
-        logRequestLine(targetId, finalTargetId, finalType, isPrefetch);
-        const sharedOsPromise = axios.get(osUrl, { timeout: isPrefetch ? 6500 : 3800 })
+        logRequestLine(targetId, finalTargetId, finalType, isPrefetch, fromBot);
+        const sharedOsPromise = axios.get(osUrl, { timeout: bgQuality ? 6500 : 3800 })
             .then(res => (res && res.data && Array.isArray(res.data.subtitles)) ? res.data.subtitles : [])
             .catch(e => {
                 console.log('[Fetch] OpenSubtitles فشل لـ ' + finalTargetId + ': ' + e.message);
@@ -1070,7 +1073,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 subdlKey: addonCfg.subdlKey,
                 subsourceKey: addonCfg.subsourceKey,
                 sharedOsPromise,
-                isPrefetch
+                isPrefetch: bgQuality
             }).catch(err => {
                 console.error('[لوغ الفحص] خطأ أثناء جلب الترجمات العربية:', err.message);
                 return { srt: [], ass: [], correctorSrt: [] };
