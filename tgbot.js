@@ -9,6 +9,7 @@ let filler = null;
 try { filler = require('./filler'); } catch (e) { filler = null; }
 let shared = null;
 try { shared = require('./ai').shared; } catch (e) { shared = null; }
+const settings = require('./settings');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TG_CHAT = String(process.env.TELEGRAM_CHAT_ID || '').trim();
@@ -861,8 +862,8 @@ let pendingEp = null;
 const envList = v => String(v || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
 const searchEnv = () => ({
   keys: envList(process.env.SEARCH_GEMINI_KEYS),
-  model: String(process.env.SEARCH_GEMINI_MODEL || '').trim(),
-  grounding: /^(1|true|yes|on)$/i.test(String(process.env.SEARCH_GROUNDING || '').trim())
+  model: String(settings.get('search_model') || '').trim(),
+  grounding: !!settings.get('search_grounding')
 });
 
 const latinDigits = s => String(s == null ? '' : s).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660));
@@ -1050,11 +1051,12 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
   const url = S.DEFAULT_GEMINI_API_URL + '/models/' + model + ':generateContent';
   let vi = thinking === 'minimal' ? 1 : 0;
   let grounded = !!grounding;
+  let why = '';
   for (let attempt = 0; attempt < 6; attempt++) {
     const remaining = deadline - Date.now();
-    if (remaining < 3000) return { err: 'busy' };
+    if (remaining < 3000) return { err: 'busy', why };
     const key = await S.acquireKey(ks.keys, Math.min(8000, remaining));
-    if (!key) return { err: 'busy' };
+    if (!key) return { err: 'busy', why };
     const variants = genVariants(model, wantJson, grounded, temperature == null ? 0.2 : temperature);
     const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: variants[Math.min(vi, variants.length - 1)], safetySettings: S.SAFETY_SETTINGS_OFF };
     if (grounded) body.tools = [{ google_search: {} }];
@@ -1068,13 +1070,15 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
       return text.trim() ? { text, grounded } : { err: 'empty' };
     } catch (e) {
       const st = (e && e.response && e.response.status) || 0;
-      if (S.isGeminiAuthFailure(e)) { S.deadKeys.add(key); continue; }
+      const em = String((e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) || (e && e.message) || '').replace(/\s+/g, ' ').slice(0, 160);
+      why = (st ? 'HTTP ' + st : 'timeout/شبكة') + ' | ' + model + (em ? ' | ' + em.slice(0, 70) : '');
+      if (S.isGeminiAuthFailure(e)) { console.log('[بحث ذكي] مفتاح مرفوض ' + why); S.deadKeys.add(key); continue; }
       if (grounded) {
-        const em = String((e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) || (e && e.message) || '').replace(/\s+/g, ' ').slice(0, 160);
         grounded = false;
         console.log('[بحث ذكي] فشل البحث بجوجل (grounding) HTTP ' + (st || 'timeout') + ' → ' + em + ' | أكمل بدونه.');
         continue;
       }
+      console.log('[بحث ذكي] ' + why);
       if (st === 404) return { err: 'config' };
       if (st === 400) {
         if (vi < variants.length - 1) { vi++; continue; }
@@ -1084,7 +1088,7 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
       await sleep(600);
     }
   }
-  return { err: 'busy' };
+  return { err: 'busy', why };
 }
 
 async function cinemetaSearch(type, q) {
@@ -1158,7 +1162,7 @@ async function understand(raw, p, deadline) {
   ].filter(Boolean).join('\n');
   const descLike = DESC_CUE.test(raw) || String(raw).split(/\s+/).filter(Boolean).length >= 7;
   const r = await searchGemini({ prompt, deadline, wantJson: true, grounding: env.grounding, temperature: 0.2, thinking: descLike ? '' : 'minimal' });
-  if (!r.text) return { err: r.err || 'empty' };
+  if (!r.text) return { err: r.err || 'empty', why: r.why || '' };
   const j = extractJson(r.text);
   if (!j || typeof j !== 'object') return { err: 'empty' };
   const arr = Array.isArray(j) ? j : (Array.isArray(j.candidates) ? j.candidates : []);
@@ -1339,10 +1343,10 @@ async function runSearch(chatId, rawIn, opts) {
     };
     const u = await understand(raw, p, deadline);
     if (u.err) {
-      console.log('[بحث ذكي] فشل الفهم: ' + u.err);
+      console.log('[بحث ذكي] فشل الفهم: ' + u.err + (u.why ? ' | ' + u.why : ''));
       if (free && free.items.length) { await fallbackFree('تعذر البحث الذكي، هذي نتائج البحث العادي:'); return; }
       await clearWait();
-      await send(rtl('⚠️ ' + (SMART_FAIL[u.err] || SMART_FAIL.empty)));
+      await send(rtl('⚠️ ' + (SMART_FAIL[u.err] || SMART_FAIL.empty)) + (u.why ? '\n' + rtl('🔎 السبب:') + ' ' + latin(u.why) : ''));
       return;
     }
     if (u.vague) {
@@ -1435,6 +1439,108 @@ const isOrderCmd = t => /^\/order(@\w+)?$/i.test(t) || t === 'مسح الترت�
 const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
 const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' || t === 'لوحة التحكم' || /^panel$/i.test(t);
 
+// ===== الإعدادات: تتغير من هنا وتنحفظ بـ Mongo (تعديل تلغرام ← متغير ريندر ← الافتراضي) =====
+const SLOT_CHOICES = settings.ASS_SLOT_CHOICES;
+const SLOT_FIX = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', '*': 'any' };
+const MODEL_PRESETS = [
+  { id: 'gemini-3.5-flash-lite', label: '3.5 lite' },
+  { id: 'gemini-3.5-flash', label: '3.5 flash' },
+  { id: 'gemini-3.1-flash-lite', label: '3.1 lite' },
+  { id: '', label: 'موديل الإضافة' }
+];
+const SRC_NAME = { tg: 'من تلغرام', env: 'من ريندر', def: 'افتراضي' };
+const isSettingsCmd = t => /^\/(settings|setting)(@\w+)?$/i.test(t) || t === 'الاعدادات' || t === 'الإعدادات' || t === 'اعدادات';
+const slotsCmd = t => { const m = /^\/slots(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
+
+function currentSlots() {
+  const toks = String(settings.get('ass_slots') || '').split(/[\s,;|]+/).filter(Boolean).slice(0, 4).map(t => {
+    const l = t.toLowerCase();
+    return SLOT_FIX[l] || l;
+  });
+  while (toks.length < 4) toks.push('any');
+  return toks;
+}
+
+function settingsText() {
+  const slots = String(settings.get('ass_slots') || '').trim() ? currentSlots() : [];
+  const onOff = v => (v ? 'شغّال ✅' : 'مطفأ ⛔');
+  const model = String(settings.get('search_model') || '').trim();
+  const L = [];
+  L.push(rtl('⚙️ الإعدادات'));
+  L.push(rtl('🎞 ترتيب ASS (' + SRC_NAME[settings.source('ass_slots')] + '): ') + (slots.length ? latin(slots.join(', ')) : rtl('الترتيب الافتراضي')));
+  L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
+  L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))));
+  L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
+  L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
+  L.push('');
+  L.push(rtl('ترتيب ASS يشمل الحلقات الجديدة فقط، والمثبتة تحتاج /clear.'));
+  L.push(rtl('أو اكتب مثلاً: ') + latin('/slots subdl,subsource,wyzie,any'));
+  return L.join('\n');
+}
+
+function settingsKeyboard() {
+  const slots = currentSlots();
+  const model = String(settings.get('search_model') || '').trim();
+  const tgl = (label, v, op) => ({ text: label + ': ' + (v ? 'شغّال' : 'مطفأ'), callback_data: 'st:' + op });
+  const rows = [];
+  rows.push(slots.map((n, i) => ({ text: (i + 1) + ': ' + n, callback_data: 'st:s:' + i })));
+  rows.push([{ text: '↩️ ترتيب ASS الافتراضي', callback_data: 'st:sd' }]);
+  const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
+  rows.push(mp.slice(0, 2), mp.slice(2));
+  rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
+  rows.push([tgl('⏭ تخطي الحشو', settings.get('filler_skip'), 'f'), tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
+  return { inline_keyboard: rows };
+}
+
+async function sendSettings(chatId) {
+  await tg('sendMessage', { chat_id: chatId, text: settingsText(), reply_markup: settingsKeyboard(), disable_web_page_preview: true });
+}
+
+async function onSettingsCallback(cq) {
+  const parts = String(cq.data || '').split(':');
+  const op = parts[1];
+  const arg = parts[2];
+  let r = null;
+  let note = 'تم ✅';
+  if (op === 's') {
+    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
+    const cur = currentSlots().map(x => (SLOT_CHOICES.includes(x) ? x : 'any'));
+    cur[i] = SLOT_CHOICES[(SLOT_CHOICES.indexOf(cur[i]) + 1) % SLOT_CHOICES.length];
+    r = await settings.set('ass_slots', cur.join(','));
+  } else if (op === 'sd') {
+    r = await settings.clear('ass_slots');
+  } else if (op === 'm') {
+    const m = MODEL_PRESETS[clamp(parseInt(arg, 10) || 0, 0, MODEL_PRESETS.length - 1)];
+    r = await settings.set('search_model', m.id);
+  } else if (op === 'g') {
+    r = await settings.set('search_grounding', !settings.get('search_grounding'));
+  } else if (op === 'f') {
+    r = await settings.set('filler_skip', !settings.get('filler_skip'));
+  } else if (op === 'a') {
+    r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
+  } else {
+    await answerCb(cq);
+    return;
+  }
+  if (r && r.ok && r.saved === false) note = '⚠️ اشتغل لكن ما انحفظ بالقاعدة (يرجع للقديم بعد إعادة التشغيل)';
+  await editMsg(cq.message, settingsText(), settingsKeyboard());
+  await answerCb(cq, note);
+}
+
+async function onSlotsCmd(chatId, arg) {
+  if (!arg) { await sendSettings(chatId); return; }
+  if (/^(default|reset|افتراضي)$/i.test(arg)) {
+    await settings.clear('ass_slots');
+  } else {
+    const r = await settings.set('ass_slots', arg);
+    if (!r.ok) {
+      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ أسماء غير معروفة: ') + latin((r.bad || []).join(', ') || arg) + '\n' + rtl('المسموح: ') + latin(SLOT_CHOICES.join(', ')) });
+      return;
+    }
+  }
+  await sendSettings(chatId);
+}
+
 let searchBusy = false;
 let lastSearch = Promise.resolve();
 
@@ -1460,6 +1566,7 @@ async function handleUpdate(u) {
       if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);
       return;
     }
+    if (cq && /^st:/.test(data)) return await onSettingsCallback(cq);
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
     if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
@@ -1474,6 +1581,8 @@ async function handleUpdate(u) {
     else if (rq) { pendingEp = null; await onRequest(chatId, rq, takeCount()); }
     else if (fq) { if (!startSearch(() => onFind(chatId, fq.q))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
     else if (er) await onEpisodeReply(chatId, er);
+    else if (slotsCmd(text) !== null) await onSlotsCmd(chatId, slotsCmd(text));
+    else if (isSettingsCmd(text)) await sendSettings(chatId);
     else if (isBatchCmd(text)) await askCount(chatId);
     else if (isOrderCmd(text)) await askOrder(chatId);
     else if (isStopCmd(text)) await stopBatch(chatId);
@@ -1490,7 +1599,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
@@ -1534,5 +1643,5 @@ loadCtx().catch(() => {});
 
 module.exports = {
   start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+  _t: { sendSettings, onSettingsCallback, onSlotsCmd, settingsText, settingsKeyboard, currentSlots, handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
 };
