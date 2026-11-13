@@ -31,24 +31,43 @@ const MAX_SEASON_COUNTS = 200;
 const seasonCountsCache = new Map();
 
 async function getSeasonCounts(imdbId) {
+    const e = await getSeasonInfo(imdbId);
+    return e ? e.counts : null;
+}
+
+// تاريخ عرض حلقة (ms) من Cinemeta، أو null إذا غير معروف
+async function getReleaseMs(imdbId, season, ep) {
+    const e = await getSeasonInfo(imdbId);
+    if (!e || !e.rel) return null;
+    const v = e.rel.get(season + ':' + ep);
+    return Number.isFinite(v) ? v : null;
+}
+
+async function getSeasonInfo(imdbId) {
     const hit = seasonCountsCache.get(imdbId);
-    if (hit && Date.now() - hit.at < SEASON_COUNTS_TTL_MS) return hit.counts;
+    if (hit && Date.now() - hit.at < SEASON_COUNTS_TTL_MS) return hit;
     try {
         const res = await axios.get('https://v3-cinemeta.strem.io/meta/series/' + imdbId + '.json', { timeout: 5000 });
         const videos = (res.data && res.data.meta && Array.isArray(res.data.meta.videos)) ? res.data.meta.videos : [];
         const counts = new Map();
+        const rel = new Map();
         for (const v of videos) {
             const vs = parseInt(v.season, 10);
             const ve = parseInt(v.episode != null ? v.episode : v.number, 10);
             if (!isNaN(vs) && vs > 0 && !isNaN(ve) && ve > 0 && ve > (counts.get(vs) || 0)) counts.set(vs, ve);
+            if (!isNaN(vs) && vs > 0 && !isNaN(ve) && ve > 0 && v.released) {
+                const t = Date.parse(v.released);
+                if (!isNaN(t)) rel.set(vs + ':' + ve, t);
+            }
         }
         if (!counts.size) return null;
         if (seasonCountsCache.size >= MAX_SEASON_COUNTS) {
             const oldest = seasonCountsCache.keys().next().value;
             if (oldest) seasonCountsCache.delete(oldest);
         }
-        seasonCountsCache.set(imdbId, { counts, at: Date.now() });
-        return counts;
+        const entry = { counts, rel, at: Date.now() };
+        seasonCountsCache.set(imdbId, entry);
+        return entry;
     } catch (e) {
         return null;
     }
@@ -98,6 +117,18 @@ async function runNextEpisodePrefetch(info) {
     } catch (e) {
         console.error('[تجهيز تلقائي] فحص الحشو فشل (' + e.message + ') ⟵ أكمل بالحلقة التالية العادية.');
     }
+
+    // لا نجهّز حلقة لم تُعرض بعد (وإلا تُحفظ ترجمات غلط مرفوعة على حلقة غير منشورة)
+    try {
+        const np = String(nextTargetId).split(':');
+        if (np[0].startsWith('tt') && np.length >= 3) {
+            const relMs = await getReleaseMs(np[0], parseInt(np[1], 10), parseInt(np[2], 10));
+            if (relMs != null && relMs > Date.now()) {
+                console.log('[تجهيز تلقائي] ' + nextTargetId + ' لم تُعرض بعد (' + new Date(relMs).toISOString().slice(0, 10) + ') ⟵ لا أجهّزها.');
+                return;
+            }
+        }
+    } catch (e) {}
 
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
     if (prefetchedNextSet.has(prefetchKey)) {
@@ -208,6 +239,7 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
 }
 
 module.exports = {
+    getReleaseMs,
     getNextEpisodeTargetId,
     resolveNextEpisodeTargetId,
     cancelNextEpisodePrefetch,
