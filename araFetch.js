@@ -43,6 +43,8 @@ const CONCURRENCY_LIMIT = 8;
 const MAX_SRT_PER_SITE = 20;
 const OSCOM_VERIFY_EACH = 2;
 const CORRECTOR_MAX = 4;
+const READY_SRT_PER_SITE = 4;
+const ASS_NAME_DEDUPE_MIN = 8;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
 const VERIFY_LEGACY = process.env.OS_LEGACY_VERIFY !== '0';
@@ -682,6 +684,10 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         const verifiedOut = [];
         const unverifiedOut = [];
         const seenUrls = new Set();
+        const seenSigs = new Set();
+        const seenNames = new Set();
+        const seenFileIds = new Set();
+        const nameOf = x => normalizeNameSig(x.fileName || x.title || '');
         const siteVerifiedAss = sortByConsistentTemplate(
             verifiedZipItems.filter(v => v && v._site === siteKey && v.format === 'ass' && !v._bad)
         );
@@ -690,7 +696,12 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             const u = cleanPath(v.url);
             if (seenUrls.has(u)) continue;
             seenUrls.add(u);
-            if (v._sig) globalAssCount++;
+            // نفس نص الترجمة حرفياً من نفس الموقع (البصمة تتجاهل التوقيت والتنسيق) ⟵ نبقي الأول فقط
+            if (v._sig && seenSigs.has(v._sig)) continue;
+            if (v._sig) { seenSigs.add(v._sig); globalAssCount++; }
+            const nm = nameOf(v);
+            if (nm.length > ASS_NAME_DEDUPE_MIN) seenNames.add(nm);
+            if (v._osFileId) seenFileIds.add(v._osFileId);
             verifiedOut.push(v);
         }
 
@@ -699,8 +710,13 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
             if (a._bad) continue;
             const u = cleanPath(a.url);
             if (seenUrls.has(u) || verifiedUrls.has(u)) continue;
+            if (a._osFileId && seenFileIds.has(a._osFileId)) continue;
+            const nm = nameOf(a);
+            if (nm.length > ASS_NAME_DEDUPE_MIN && seenNames.has(nm)) continue;
             if (strictDedupe && globalAssCount >= CORRECTOR_MAX && !ASS_SLOT_SITES.has(siteKey)) continue;
             seenUrls.add(u);
+            if (nm.length > ASS_NAME_DEDUPE_MIN) seenNames.add(nm);
+            if (a._osFileId) seenFileIds.add(a._osFileId);
             unverifiedOut.push(a);
         }
 
@@ -795,7 +811,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const osSrt = collectSiteSrt('opensubtitles', osPre.srtList);
     const legacySrt = collectSiteSrt('os_legacy', legacyPre.srtList);
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
-    const readySrt = [...subdlSrt, ...subsourceSrt, ...osSrt, ...legacySrt, ...oscomSrt];
+    const readyCap = l => l.slice(0, READY_SRT_PER_SITE);
+    const readySrt = [...readyCap(subdlSrt), ...readyCap(subsourceSrt), ...readyCap(osSrt), ...readyCap(legacySrt), ...readyCap(oscomSrt)];
 
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
