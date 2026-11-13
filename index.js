@@ -881,7 +881,8 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 const WANTED_TRACKS = 4;
-const SHOW_AI_ALWAYS = process.env.SHOW_AI_ALWAYS === '1';
+const settings = require('./settings');
+const showAiAlways = () => !!settings.get('show_ai_always');
 const READY_ASS_MAX = 3;
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 const SOURCE_LABELS = {
@@ -1112,7 +1113,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             osHi = srtOnly.filter(s => isHearingImpairedSub(s)).sort(byEng);
         }
         const hasReadyArabic = (arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0;
-        const priSubs = (hasReadyArabic && !SHOW_AI_ALWAYS) ? [] : await getHebHindiSubs({
+        const priSubs = (hasReadyArabic && !showAiAlways()) ? [] : await getHebHindiSubs({
             type: finalType, targetId: finalTargetId,
             imdbId: assImdbId, season: assSeason, episode: assEpisode,
             osList: subtitlesData,
@@ -1210,7 +1211,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 });
             }
         }
-        const hasArabic = !SHOW_AI_ALWAYS && ((arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0);
+        const hasArabic = !showAiAlways() && ((arabicSubs.srt || []).length > 0 || (arabicSubs.ass || []).length > 0 || (arabicSubs.correctorSrt || []).length > 0 || corrSrtList.length > 0 || corrAssList.length > 0);
         if (!hasArabic && srtSubs.length > 0) {
             for (let i = 0; i < WANTED_TRACKS; i++) {
                 const sub = srtSubs[i] || srtSubs[srtSubs.length - 1];
@@ -1541,6 +1542,7 @@ app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req
 app.listen(PORT, () => {
     console.log('✅ Nuvio AI Subs Server is LIVE on port ' + PORT);
     db.init();
+    settings.load();
     tgbot.start();
 });
 
