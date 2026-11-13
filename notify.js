@@ -291,7 +291,7 @@ async function report(ev) {
       if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
     }
     detail.push('🔔 ' + why);
-    retryKinds = allFailed ? ['z'] : ['m', 'z'];
+    retryKinds = ['m'];
   } else if (ev.kind === 'failed') {
     warn = true; badge = '❌';
     line = 'فشل ' + head + ' | ' + ep.text + ' | ' + src + ' | الملف الأصلي لم يُحمَّل أو لم يُستخرج'
@@ -301,14 +301,14 @@ async function report(ev) {
     detail = ['src', 'work', 'ep',
       '💬 الملف الأصلي لم يُحمَّل أو لم يُستخرج' + (ev.healTried ? ' (وجرّبت بديلاً فلم أنجح)' : ''),
       '🔁 ستُعاد المحاولة عند الضغطة القادمة', '🔔 ' + why];
-    retryKinds = ['z'];
+    retryKinds = ['m'];
   } else {
     warn = true; badge = '⚠️';
     const msg = scrub(ev.error).slice(0, 150);
     line = 'خطأ غير متوقع في ' + head + ' | ' + ep.text + ' | ' + msg + ' | ' + why;
     title1 = 'خطأ غير متوقع: ' + tgHead;
     detail = ['src', 'work', 'ep', '💬 ' + msg, '🔔 ' + why];
-    retryKinds = ['z'];
+    retryKinds = ['m'];
   }
 
   // تنبيه التكرار: نفس الحلقة ونفس التراك محفوظان أيضا تحت الاسم الآخر (الموسم/المطلق)
@@ -353,7 +353,7 @@ async function report(ev) {
   const slot = ev.label === 'ARA-ASS' ? 'a' : ev.label === 'ARA-SRT' ? 's' : '';
   if (retryKinds && slot && ev.targetId && ev.trackNum && /^\d+$/.test(String(ev.trackNum))) {
     const cb = k => 'rt:' + k + ':' + slot + ':' + ev.trackNum + ':' + ev.targetId;
-    const row = retryKinds.map(k => ({ text: k === 'm' ? '🔁 أكمل الناقص فقط' : (retryKinds.length === 1 ? '🔁 أعد المحاولة' : '🗑 من الصفر'), callback_data: cb(k) }));
+    const row = retryKinds.map(k => ({ text: ev.kind === 'partial' ? '🔁 أكمل الناقص فقط' : '🔁 أعد المحاولة', callback_data: cb(k) }));
     if (row.every(b => Buffer.byteLength(b.callback_data) <= 64)) markup = { inline_keyboard: [row] };
   }
   enqueue(lines.join('\n'), markup);
@@ -365,7 +365,7 @@ const MODEL_EVENT_GAP_MS = 5 * 60 * 1000;
 async function modelReport(ev) {
   if (!ENABLED) return;
   const kind = String(ev && ev.kind || '');
-  statModel(kind);
+  statModel(kind, ev && ev.model);
   const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
   const now = Date.now();
   const last = modelSeen.get(key);
@@ -423,7 +423,7 @@ const SOURCES_EVENT_GAP_MS = 3 * 60 * 1000;
 
 const getDb = () => { try { return require('./db'); } catch (e) { return null; } };
 const baghdadDay = (t = Date.now()) => new Date(t + STATS_TZ_MS).toISOString().slice(0, 10);
-const emptyStats = day => ({ day, tracks: { ASS: 0, SRT: 0 }, eps: [], lines: 0, partial: 0, failed: 0, error: 0, src: {}, choke: 0, fbwon: 0, rescue: 0, bothFailed: 0 });
+const emptyStats = day => ({ day, tracks: { ASS: 0, SRT: 0 }, eps: [], lines: 0, partial: 0, failed: 0, error: 0, src: {}, choke: 0, chokeBy: {}, fbwon: 0, rescue: 0, bothFailed: 0 });
 
 let statsPromise = null;
 let statsPromiseDay = '';
@@ -438,7 +438,7 @@ function statsFor(day) {
     try { const db = getDb(); data = db ? await db.loadDoc('dailystats', day) : null; } catch (e) { data = null; }
     const base = emptyStats(day);
     if (data && typeof data === 'object') {
-      Object.assign(base, data, { tracks: Object.assign(base.tracks, data.tracks || {}), src: Object.assign({}, data.src || {}), eps: Array.isArray(data.eps) ? data.eps : [] });
+      Object.assign(base, data, { tracks: Object.assign(base.tracks, data.tracks || {}), src: Object.assign({}, data.src || {}), chokeBy: Object.assign({}, data.chokeBy || {}), eps: Array.isArray(data.eps) ? data.eps : [] });
     }
     return base;
   })();
@@ -490,9 +490,16 @@ function statTrack(ev) {
   } catch (e) { /* لا شيء */ }
 }
 
-function statModel(kind) {
+function statModel(kind, model) {
   const field = { choke: 'choke', 'fallback-won': 'fbwon', rescue: 'rescue', 'both-failed': 'bothFailed' }[kind];
-  if (field) statBump(s => { s[field] = (s[field] || 0) + 1; });
+  if (field) statBump(s => {
+    s[field] = (s[field] || 0) + 1;
+    if (kind === 'choke' && model) {   // أي موديل اختنق (للملخص اليومي)
+      const m = String(model).slice(0, 40);
+      if (!s.chokeBy || typeof s.chokeBy !== 'object') s.chokeBy = {};
+      s.chokeBy[m] = (s.chokeBy[m] || 0) + 1;
+    }
+  });
 }
 
 function summaryText(s) {
@@ -502,7 +509,10 @@ function summaryText(s) {
   lines.push(rtl('🎞 الحلقات: ' + s.eps.length + ' | التراكات المكتملة: ' + done + ' (' + latin('ASS ' + (s.tracks.ASS || 0) + ' · SRT ' + (s.tracks.SRT || 0)) + ')'));
   lines.push(rtl('📄 الأسطر: ' + (s.lines || 0)));
   lines.push(rtl('⚠️ جزئي: ' + s.partial + ' | ❌ فشل: ' + s.failed + ' | 💥 خطأ: ' + s.error));
-  if (s.choke || s.bothFailed) lines.push(rtl('🧠 اختناق الموديل: ' + s.choke + (s.bothFailed ? ' | فشل الموديلين: ' + s.bothFailed : '')));
+  if (s.choke || s.bothFailed) {
+    const by = Object.entries(s.chokeBy || {}).sort((a, b) => b[1] - a[1]).map(([m, c]) => latin(m) + ': ' + c).join(' · ');
+    lines.push(rtl('🧠 اختناق الموديل: ' + s.choke + (by ? ' (' + by + ')' : '') + (s.bothFailed ? ' | فشل الموديلين: ' + s.bothFailed : '')));
+  }
   const top = Object.entries(s.src || {}).sort((a, b) => b[1] - a[1]).slice(0, 4);
   if (top.length) lines.push(rtl('🏆 أكثر المصادر: ' + top.map(([n, c]) => latin(n) + ' (' + c + ')').join(' · ')));
   return lines.join('\n');
