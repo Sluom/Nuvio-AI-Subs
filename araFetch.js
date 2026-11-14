@@ -7,7 +7,7 @@ const { getWyzieAss, isAnimeTitle, hasWyzieKey, getWyzieUnits, isPaused: isWyzie
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 const settings = require('./settings');
 
-module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, parseAssSlots } };
+module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, applySiteSlots, parseAssSlots } };
 
 const cleanPath = p => String(p || '').split('?')[0];
 
@@ -75,23 +75,25 @@ function parseAssSlots(raw, max) {
     return { slots: slots.some(x => x !== 'any') ? slots : [], bad };
 }
 
-// ترتيب ASS يُقرأ لحظياً: تعديل تلغرام ← متغير ASS_SLOTS ← فاضي (الترتيب القديم)
-let assSlotsRaw = null;
-let assSlotsState = { slots: [], sites: new Set(), bad: [] };
-function currentAssSlots() {
-    const raw = String(settings.get('ass_slots') || '');
-    if (raw !== assSlotsRaw) {
-        assSlotsRaw = raw;
-        const p = parseAssSlots(raw, 4);
-        assSlotsState = { slots: p.slots, sites: new Set(p.slots.filter(x => x !== 'any')), bad: p.bad };
-        if (p.slots.length) console.log('[ترتيب ASS 📌] ' + p.slots.join(','));
-        if (p.bad.length) console.log('[ترتيب ASS ⚠️] أسماء غير معروفة اعتُبرت any: ' + p.bad.join(','));
-    }
-    return assSlotsState;
+// ترتيب ASS/SRT يُقرأ لحظياً: تعديل تلغرام ← متغير ريندر ← فاضي (الترتيب القديم)
+const slotStates = {};
+function currentSlotsFor(key, label) {
+    const raw = String(settings.get(key) || '');
+    const c = slotStates[key];
+    if (c && c.raw === raw) return c.state;
+    const p = parseAssSlots(raw, 4);
+    const state = { slots: p.slots, sites: new Set(p.slots.filter(x => x !== 'any')), bad: p.bad };
+    slotStates[key] = { raw, state };
+    if (p.slots.length) console.log('[ترتيب ' + label + ' 📌] ' + p.slots.join(','));
+    if (p.bad.length) console.log('[ترتيب ' + label + ' ⚠️] أسماء غير معروفة اعتُبرت any: ' + p.bad.join(','));
+    return state;
 }
+const currentAssSlots = () => currentSlotsFor('ass_slots', 'ASS');
+const currentSrtSlots = () => currentSlotsFor('srt_slots', 'SRT');
 
-function applyAssSlots(list, slots) {
-    if (!slots) slots = currentAssSlots().slots;
+function applyAssSlots(list, slots) { return applySiteSlots(list, slots || currentAssSlots().slots, 'ASS'); }
+
+function applySiteSlots(list, slots, label) {
     if (!slots.length || !Array.isArray(list) || !list.length) return list;
     slots = slots.slice();
     while (slots.length < CORRECTOR_MAX) slots.push('any');
@@ -124,7 +126,7 @@ function applyAssSlots(list, slots) {
         else { const g = takeFrom(() => true); if (g) out.push(g); }
     }
     const sk = Object.keys(skipped);
-    if (sk.length) console.log('[ASS 🧩] خانات ASS: تخطيت ترجمات مطابقة حرفياً لخانة سابقة (' + sk.map(k => k + ' ' + skipped[k]).join('، ') + ')');
+    if (sk.length) console.log('[' + label + ' 🧩] خانات ' + label + ': تخطيت ترجمات مطابقة حرفياً لخانة سابقة (' + sk.map(k => k + ' ' + skipped[k]).join('، ') + ')');
     // المطابقات تنزل لآخر القائمة، ولا تاخذ مكان خانة (أفضل خانة ناقصة من ترجمة مكررة)
     const rest = [...pool.filter(x => !dups.has(x)), ...pool.filter(x => dups.has(x))];
     const final = [...out, ...rest];
@@ -135,7 +137,7 @@ function applyAssSlots(list, slots) {
 }
 
 const resultCache = new Map();
-settings.onChange(k => { if (k === 'ass_slots') resultCache.clear(); });
+settings.onChange(k => { if (k === 'ass_slots' || k === 'srt_slots') resultCache.clear(); });
 const MAX_RAW_CACHE = 150;
 const rawTextCache = new Map();
 const seriesMetaCache = new Map();
@@ -847,12 +849,14 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const seenCorrSigs = new Set();
     const seenCorrNames = new Set();
     const correctorSrt = [];
+    const srtSlots = currentSrtSlots().slots;
+    const poolLimit = srtSlots.length ? 40 : CORRECTOR_MAX;
     const pickInto = pool => {
         for (const allowSdh of [false, true]) {
             for (const allowBad of [false, true]) {
                 for (const pass of [true, false]) {
                     for (const c of pool) {
-                        if (correctorSrt.length >= CORRECTOR_MAX) break;
+                        if (correctorSrt.length >= poolLimit) break;
                         const isSdh = isHearingImpairedMeta(c);
                         if (isSdh !== allowSdh) continue;
                         const isBad = !!c._badSpelling;
@@ -874,8 +878,13 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     };
     const isStremLink = c => String(c.url || '').includes('strem.top');
     pickInto([...subdlSrt.filter(c => !isStremLink(c)), ...subsourceSrt, ...subdlSrt.filter(isStremLink)]);
-    if (correctorSrt.length < CORRECTOR_MAX) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
-    if (correctorSrt.length < CORRECTOR_MAX) pickInto(wyzieSrt);
+    if (correctorSrt.length < poolLimit) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
+    if (correctorSrt.length < poolLimit) pickInto(wyzieSrt);
+    if (srtSlots.length) {
+        const picked = applySiteSlots(correctorSrt, srtSlots, 'SRT').slice(0, CORRECTOR_MAX);
+        correctorSrt.length = 0;
+        correctorSrt.push(...picked);
+    }
 
     return {
         ass: allAss,
