@@ -1012,6 +1012,12 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         strictDedupe: isPrefetch
     });
 
+    // سطر تشخيص مؤقت لـ subsource (يُحذف بعد الفحص)
+    try {
+        const ssReady = [...value.ass, ...value.srt].filter(x => x && x._site === 'subsource').length;
+        console.log('[subsource] جلب ' + subsourceRawList.length + ' → بعد التصفية ' + (subsourcePre.assList.length + subsourcePre.srtList.length) + ' | جاهز (' + ssReady + ')' + (isPrefetch ? ' [تحميل مسبق]' : ''));
+    } catch (_) {}
+
     if (value.ass.length > 0 || value.srt.length > 0) {
         setResultCache(cacheKey, value, isPrefetch);
     }
