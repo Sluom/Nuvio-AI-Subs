@@ -585,7 +585,7 @@ async function onGoCallback(cq) {
   await editMsg(cq.message, r.head.concat(status, rtl('تقدر تضغط تراك ثاني.')).join('\n'), cq.message && cq.message.reply_markup);
 }
 
-const COUNTS = [4, 6, 8, 10];
+const COUNTS = [4, 6, 8, 10, 20];
 const GAP_SMALL_MS = 5 * 60 * 1000;   // دفعة 4 حلقات او اقل
 const GAP_BIG_MS = 10 * 60 * 1000;    // دفعة اكثر من 4 حلقات
 function batchGapMs(count) { return (count || 0) <= 4 ? GAP_SMALL_MS : GAP_BIG_MS; }
@@ -1629,7 +1629,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
