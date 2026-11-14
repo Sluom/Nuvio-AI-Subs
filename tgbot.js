@@ -1441,7 +1441,10 @@ const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' 
 
 // ===== الإعدادات: تتغير من هنا وتنحفظ بـ Mongo (تعديل تلغرام ← متغير ريندر ← الافتراضي) =====
 const SLOT_CHOICES = settings.ASS_SLOT_CHOICES;
-const SLOT_FIX = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', '*': 'any' };
+const SRT_CHOICES = settings.SRT_SLOT_CHOICES;
+const SLOT_FIX = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', oscom: 'com', mirror: 'os', opensubtitles: 'os', '*': 'any' };
+const SLOT_LABEL = { subsource: 'subsrc' };
+const slotLabel = n => SLOT_LABEL[n] || n;
 const MODEL_PRESETS = [
   { id: 'gemini-3.5-flash-lite', label: '3.5 lite' },
   { id: 'gemini-3.5-flash', label: '3.5 flash' },
@@ -1451,9 +1454,10 @@ const MODEL_PRESETS = [
 const SRC_NAME = { tg: 'من تلغرام', env: 'من ريندر', def: 'افتراضي' };
 const isSettingsCmd = t => /^\/(settings|setting)(@\w+)?$/i.test(t) || t === 'الاعدادات' || t === 'الإعدادات' || t === 'اعدادات';
 const slotsCmd = t => { const m = /^\/slots(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
+const srtSlotsCmd = t => { const m = /^\/srtslots(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
 
-function currentSlots() {
-  const toks = String(settings.get('ass_slots') || '').split(/[\s,;|]+/).filter(Boolean).slice(0, 4).map(t => {
+function currentSlots(key = 'ass_slots') {
+  const toks = String(settings.get(key) || '').split(/[\s,;|]+/).filter(Boolean).slice(0, 4).map(t => {
     const l = t.toLowerCase();
     return SLOT_FIX[l] || l;
   });
@@ -1463,28 +1467,35 @@ function currentSlots() {
 
 function settingsText() {
   const slots = String(settings.get('ass_slots') || '').trim() ? currentSlots() : [];
+  const srtS = String(settings.get('srt_slots') || '').trim() ? currentSlots('srt_slots') : [];
   const onOff = v => (v ? 'شغّال ✅' : 'مطفأ ⛔');
   const model = String(settings.get('search_model') || '').trim();
   const L = [];
   L.push(rtl('⚙️ الإعدادات'));
   L.push(rtl('🎞 ترتيب ASS (' + SRC_NAME[settings.source('ass_slots')] + '): ') + (slots.length ? latin(slots.join(', ')) : rtl('الترتيب الافتراضي')));
+  L.push(rtl('📄 ترتيب SRT (' + SRC_NAME[settings.source('srt_slots')] + '): ') + (srtS.length ? latin(srtS.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
   L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))));
   L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
   L.push('');
-  L.push(rtl('ترتيب ASS يشمل الحلقات الجديدة فقط، والمثبتة تحتاج /clear.'));
+  L.push(rtl('الترتيب يشمل الحلقات الجديدة فقط، والمثبتة تحتاج /clear.'));
   L.push(rtl('أو اكتب مثلاً: ') + latin('/slots subdl,subsource,wyzie,any'));
+  L.push(rtl('وللـ SRT: ') + latin('/srtslots subdl,subsource,os,com'));
+  L.push(rtl('المواقع: ') + latin(SRT_CHOICES.join(', ')));
   return L.join('\n');
 }
 
 function settingsKeyboard() {
   const slots = currentSlots();
+  const srtSlots = currentSlots('srt_slots');
   const model = String(settings.get('search_model') || '').trim();
   const tgl = (label, v, op) => ({ text: label + ': ' + (v ? 'شغّال' : 'مطفأ'), callback_data: 'st:' + op });
   const rows = [];
-  rows.push(slots.map((n, i) => ({ text: (i + 1) + ': ' + n, callback_data: 'st:s:' + i })));
+  rows.push(slots.map((n, i) => ({ text: (i + 1) + ': ' + slotLabel(n), callback_data: 'st:s:' + i })));
   rows.push([{ text: '↩️ ترتيب ASS الافتراضي', callback_data: 'st:sd' }]);
+  rows.push(srtSlots.map((n, i) => ({ text: 'SRT ' + (i + 1) + ': ' + slotLabel(n), callback_data: 'st:r:' + i })));
+  rows.push([{ text: '↩️ ترتيب SRT الافتراضي', callback_data: 'st:rd' }]);
   const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
   rows.push(mp.slice(0, 2), mp.slice(2));
   rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
@@ -1507,6 +1518,13 @@ async function onSettingsCallback(cq) {
     const cur = currentSlots().map(x => (SLOT_CHOICES.includes(x) ? x : 'any'));
     cur[i] = SLOT_CHOICES[(SLOT_CHOICES.indexOf(cur[i]) + 1) % SLOT_CHOICES.length];
     r = await settings.set('ass_slots', cur.join(','));
+  } else if (op === 'r') {
+    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
+    const cur = currentSlots('srt_slots').map(x => (SRT_CHOICES.includes(x) ? x : 'any'));
+    cur[i] = SRT_CHOICES[(SRT_CHOICES.indexOf(cur[i]) + 1) % SRT_CHOICES.length];
+    r = await settings.set('srt_slots', cur.join(','));
+  } else if (op === 'rd') {
+    r = await settings.clear('srt_slots');
   } else if (op === 'sd') {
     r = await settings.clear('ass_slots');
   } else if (op === 'm') {
@@ -1527,14 +1545,15 @@ async function onSettingsCallback(cq) {
   await answerCb(cq, note);
 }
 
-async function onSlotsCmd(chatId, arg) {
+async function onSlotsCmd(chatId, arg, key = 'ass_slots') {
+  const choices = key === 'srt_slots' ? SRT_CHOICES : SLOT_CHOICES;
   if (!arg) { await sendSettings(chatId); return; }
   if (/^(default|reset|افتراضي)$/i.test(arg)) {
-    await settings.clear('ass_slots');
+    await settings.clear(key);
   } else {
-    const r = await settings.set('ass_slots', arg);
+    const r = await settings.set(key, arg);
     if (!r.ok) {
-      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ أسماء غير معروفة: ') + latin((r.bad || []).join(', ') || arg) + '\n' + rtl('المسموح: ') + latin(SLOT_CHOICES.join(', ')) });
+      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ أسماء غير معروفة: ') + latin((r.bad || []).join(', ') || arg) + '\n' + rtl('المسموح: ') + latin(choices.join(', ')) });
       return;
     }
   }
@@ -1582,6 +1601,7 @@ async function handleUpdate(u) {
     else if (fq) { if (!startSearch(() => onFind(chatId, fq.q))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
     else if (er) await onEpisodeReply(chatId, er);
     else if (slotsCmd(text) !== null) await onSlotsCmd(chatId, slotsCmd(text));
+    else if (srtSlotsCmd(text) !== null) await onSlotsCmd(chatId, srtSlotsCmd(text), 'srt_slots');
     else if (isSettingsCmd(text)) await sendSettings(chatId);
     else if (isBatchCmd(text)) await askCount(chatId);
     else if (isOrderCmd(text)) await askOrder(chatId);
@@ -1599,7 +1619,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
