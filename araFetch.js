@@ -860,12 +860,13 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
                         const u = cleanPath(c.url);
                         const sig = c._sig || u;
                         const nameSig = normalizeNameSig(c.fileName || c.title || '');
+                        const nameKey = srtSlots.length ? String(c._site) + '|' + nameSig : nameSig;
                         if (c._bad || seenCorr.has(u) || seenCorrSigs.has(sig)) continue;
-                        if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameSig)) continue;
+                        if (!c._verified && nameSig && nameSig.length > 8 && seenCorrNames.has(nameKey)) continue;
                         if (!!c._verified !== pass) continue;
                         seenCorr.add(u);
                         seenCorrSigs.add(sig);
-                        if (nameSig && nameSig.length > 8) seenCorrNames.add(nameSig);
+                        if (nameSig && nameSig.length > 8) seenCorrNames.add(nameKey);
                         correctorSrt.push(c);
                     }
                 }
