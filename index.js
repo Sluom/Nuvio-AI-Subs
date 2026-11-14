@@ -25,9 +25,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ===== روابط الاعداد القصيرة =====
-// الرابط القصير: /x + 22 حرف عشوائي (128 بت). الاعداد (والمفاتيح) محفوظ بـ Mongo وليس بالرابط.
-// الوسيط يحوّل المعرّف الى الاعداد الاصلي قبل المسارات، فبقية الكود ما يتغير. الروابط الطويلة القديمة تشتغل مثل قبل.
 const SHORT_RE = /^x[A-Za-z0-9_-]{22}$/;
 const shortCache = new Map();
 function shortCachePut(id, raw) {
@@ -81,7 +78,6 @@ app.post('/api/short-config', async (req, res) => {
     for (const f of SHORT_STR_FIELDS) if (typeof c[f] === 'string' && c[f] && c[f].length < 500) clean[f] = c[f];
     const json = JSON.stringify(clean);
     if (json.length > 60000) return res.status(400).json({ error: 'الإعداد كبير جداً.' });
-    // تحديث نفس الرابط: اذا ارسل معرّف موجود نكتب فوقه (نفس الرابط، مفاتيح جديدة)، وغير هيج ننشئ معرّف عشوائي جديد
     let id = '';
     if (typeof body.id === 'string' && SHORT_RE.test(body.id)) {
         const ex = await db.loadLink(body.id);
@@ -1001,7 +997,6 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     const addonCfg = parseConfig(req.params.config);
     tgbot.noteContext(req);
     const isPrefetch = String(req.query.prefetch || '') === '1';
-    // طلب من البوت (bgq=1): نفس جودة جلب الخلفية (مهلات طويلة وتحقق كامل) بدون تغيير منطق تثبيت التراكات
     const fromBot = !isPrefetch && String(req.query.bgq || '') === '1';
     const bgQuality = isPrefetch || fromBot;
 
