@@ -1,29 +1,8 @@
 const axios = require('axios');
 
-// ============================================================================
-//  تجاوز حلقات الحشو (Filler) في التجهيز التلقائي للحلقة القادمة.
-//  المصدر الوحيد: إضافة aiometadata الخاصة بك (علامات isFiller / isMixedFiller).
-//
-//  الإعداد من Render (لا يوضع أي رابط داخل الكود لأن المستودع عام):
-//    AIOMETADATA_URL = رابط تثبيت إضافتك (نفس رابط manifest.json) — يقبل مع أو بدون /manifest.json
-//    FILLER_SKIP=0   ← يطفئ الميزة بالكامل
-//
-//  مصدر الترقيم:
-//    - طلب جاء بصيغة tt:S:E  ← نقرأ meta/series/<tt>.json ونطابق موسم:حلقة (أو الترقيم المطلق tt:1:N).
-//    - طلب أصله Kitsu (kitsu:ID:N) ← نقرأ meta/series/kitsu:ID.json ونعتمد ترقيم Kitsu نفسه (kitsu:ID:N)،
-//      ولا نمر عبر tt أبداً لأن تحويل ARM قد يعطي موسماً فارغاً فيصير الرقم غير دقيق.
-//
-//  القاعدة:
-//    - يُتجاوز فقط من علامته isFiller=true (ولم تُعلَّم Mixed).
-//    - Mixed وأي حلقة غير حشو تُجهَّز دائماً كما هي.
-//    - أي خطأ/تعذّر اتصال ⟵ يرجع null فيكمل التجهيز بالحلقة التالية العادية (الميزة لا تعطّل شيئاً أبداً).
-// ============================================================================
-
 const settings = require('./settings');
-// يُقرأ لحظياً: تعديل تلغرام ← FILLER_SKIP ← شغّال
 const isEnabled = () => !!settings.get('filler_skip');
 
-// يقبل: https://host/…/manifest.json أو stremio://host/…/manifest.json أو الرابط بدون manifest.json
 function normalizeBase(raw) {
     let u = String(raw || '').trim();
     if (!u) return '';
@@ -42,8 +21,8 @@ const FAIL_RETRY_MS = 5 * 60 * 1000;
 const MAX_SHOWS = 100;
 const MAX_SCAN = 1000;
 
-const showCache = new Map();   // مفتاح (tt… أو kitsu:ID) → { at, ok, seq, index, maxS1, imdb }
-const inflight = new Map();    // مفتاح → Promise
+const showCache = new Map();
+const inflight = new Map();
 let warnedNoUrl = false;
 
 const posInt = v => {
@@ -51,7 +30,6 @@ const posInt = v => {
     return Number.isInteger(n) && n > 0 ? n : null;
 };
 
-// يبني من videos تسلسلاً مرتباً للحلقات العادية فقط (الموسم 0 / الخاصة مستبعدة)
 function buildShow(videos) {
     const seq = [];
     for (const v of videos || []) {
@@ -60,7 +38,7 @@ function buildShow(videos) {
         const e = posInt(v.episode != null ? v.episode : v.number);
         if (!s || !e) continue;
         const mixed = v.isMixedFiller === true;
-        const filler = v.isFiller === true && !mixed;   // Mixed لا يُتجاوز أبداً
+        const filler = v.isFiller === true && !mixed;
         seq.push({ s, e, id: String(v.id || ''), filler, mixed });
     }
     seq.sort((a, b) => a.s - b.s || a.e - b.e);
@@ -108,7 +86,6 @@ async function getShow(key) {
             return entry;
         })
         .catch(e => {
-            // لا نطبع الرابط أبداً (فيه إعدادك الخاص) — الرسالة فقط
             console.error('[فلر] تعذّر قراءة aiometadata لـ ' + key + (BASE_HOST ? ' (' + BASE_HOST + ')' : '') + ': ' + e.message);
             showCache.set(key, { at: Date.now(), ok: false });
             return null;
@@ -118,16 +95,14 @@ async function getShow(key) {
     return p;
 }
 
-// طلب أصله Kitsu: الترقيم هو ترقيم Kitsu نفسه (kitsu:ID:N) كما يرسله Nuvio، بدون أي تحويل عبر tt.
 async function skipKitsu(targetId, kid, kepRaw, detail) {
     if (!/^\d+$/.test(kid)) return null;
     const kep = posInt(kepRaw);
-    if (!kep) return null;                      // رقم حلقة Kitsu الأصلي لم يصل ⟵ لا نخمّن
+    if (!kep) return null;
     const t0 = Date.now();
     const show = await getShow('kitsu:' + kid);
     if (!show) return null;
 
-    // حارس: إن عرّف الطرفان رقم IMDb وكانا مختلفين فهذا ليس العمل نفسه ⟵ لا تخطي
     const tm = /^(tt\d+):/.exec(String(targetId));
     if (tm && /^tt\d+$/.test(show.imdb || '') && show.imdb !== tm[1]) {
         console.log('[فلر] kitsu:' + kid + ': رقم IMDb عند aiometadata (' + show.imdb + ') لا يطابق ' + tm[1] + ' ⟵ تجاوز الحشو متوقف لهذه الحلقة.');
@@ -139,12 +114,12 @@ async function skipKitsu(targetId, kid, kepRaw, detail) {
 
     const nextIdx = cur + 1;
     const nextItem = show.seq[nextIdx];
-    if (!nextItem || !nextItem.filler) return null;     // التالية ليست حشواً ⟵ لا شيء يتغير
+    if (!nextItem || !nextItem.filler) return null;
 
     let to = nextIdx;
     while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
     const target = show.seq[to];
-    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى الموسم ⟵ المنطق المعتاد
+    if (!target || target.filler) return detail ? { allFiller: true } : null;
     const tmk = /^kitsu:(\d+):(\d+)$/.exec(target.id);
     if (!tmk || tmk[1] !== kid) return null;
 
@@ -158,12 +133,6 @@ async function skipKitsu(targetId, kid, kepRaw, detail) {
     };
 }
 
-/**
- * يُستدعى من الخلفية فقط (تجهيز الحلقة القادمة).
- * يرجع null  ← لا تغيير، يكمل prefetch.js بمنطقه المعتاد.
- * يرجع كائن  ← { targetId, from, to, skipped, kind, ms } أقرب حلقة غير حشو بعد الحلقة الحالية.
- * kitsuId/kitsuEp: يوصلان فقط إذا كان الطلب الأصلي من Kitsu (index.js يمرّرهما)، وعندها يرجع targetId بصيغة kitsu:ID:N.
- */
 async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
     if (!isEnabled() || !targetId) return null;
     if (!BASE) {
@@ -185,9 +154,6 @@ async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
     const show = await getShow(imdbId);
     if (!show) return null;
 
-    // موضع الحلقة الحالية بالتسلسل:
-    //  1) ترقيم aiometadata نفسه (موسم:حلقة)  ← الحالة المعتادة
-    //  2) ترقيم مطلق tt:1:N الذي تنتجه إعادة الترقيم داخل الإضافة (N أكبر من آخر حلقة بالموسم 1 عند aiometadata)
     let absolute = false;
     let cur = show.index.get(season + ':' + ep);
     if (cur === undefined) {
@@ -201,12 +167,12 @@ async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
 
     const nextIdx = cur + 1;
     const nextItem = show.seq[nextIdx];
-    if (!nextItem || !nextItem.filler) return null;     // التالية ليست حشواً ⟵ لا شيء يتغير
+    if (!nextItem || !nextItem.filler) return null;
 
     let to = nextIdx;
     while (show.seq[to] && show.seq[to].filler && to - nextIdx < MAX_SCAN) to++;
     const target = show.seq[to];
-    if (!target || target.filler) return detail ? { allFiller: true } : null;          // ما بعدها كله حشو/انتهى المسلسل ⟵ المنطق المعتاد
+    if (!target || target.filler) return detail ? { allFiller: true } : null;
 
     const idOf = i => absolute ? (imdbId + ':1:' + (i + 1)) : (imdbId + ':' + show.seq[i].s + ':' + show.seq[i].e);
     const labelOf = i => {
