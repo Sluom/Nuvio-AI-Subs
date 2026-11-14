@@ -29,9 +29,6 @@ function reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieLi
     } catch (e) { }
 }
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
-let legacyPreferredIdx = 0;
-let legacyPreferredUntil = 0;
-const LEGACY_PREFER_MS = 10 * 60 * 1000;
 
 const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500, wyzie: 3500 };
 const FAST_VERIFY_WINDOW_MS = 2800;
@@ -385,18 +382,14 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
         }
     }
 
-    async function fetchLegacyData(url, phase = '') {
-        const baseIdx = Date.now() < legacyPreferredUntil ? legacyPreferredIdx : 0;
-        const order = [baseIdx, ...LEGACY_AGENTS.map((_, i) => i).filter(i => i !== baseIdx)];
-        let firstResults = await requestWithAgent(url, LEGACY_AGENTS[order[0]], phase);
-        if (firstResults._blocked && order.length > 1) {
-            const second = await requestWithAgent(url, LEGACY_AGENTS[order[1]], phase + ' - وكيل ثاني');
-            if (!second._blocked) {
-                legacyPreferredIdx = order[1];
-                legacyPreferredUntil = Date.now() + LEGACY_PREFER_MS;
-                console.log('[جلب عربي - opensubtitles.org] ' + LEGACY_AGENTS[order[0]] + ' انرفض ⟵ نجح ' + LEGACY_AGENTS[order[1]] + '، أعتمده ' + (LEGACY_PREFER_MS / 60000) + ' دقائق');
-            }
-            if (!second._blocked) firstResults = second;
+    async function fetchLegacyData(url, phase = '', startIdx = 0) {
+        let usedIdx = startIdx;
+        let firstResults = await requestWithAgent(url, LEGACY_AGENTS[startIdx], phase);
+        if (firstResults._blocked) {
+            const otherIdx = startIdx === 0 ? 1 : 0;
+            const second = await requestWithAgent(url, LEGACY_AGENTS[otherIdx], phase + ' - وكيل ثاني');
+            firstResults = second;
+            if (!second._blocked) usedIdx = otherIdx;
         }
         const combined = [];
         const seenIds = new Set();
@@ -407,6 +400,8 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
             seenIds.add(key);
             combined.push(item);
         }
+        if (firstResults._blocked) combined._blocked = true;
+        combined._idx = usedIdx;
         return combined;
     }
 
@@ -420,9 +415,9 @@ async function fetchOsLegacyArabic(imdbId, season, episode, isPrefetch = false) 
 
     try {
         let data = await fetchLegacyData(primaryUrl);
-        if (hasSE && !data.some(r => legacyFormat(r) === 'ass')) {
+        if (hasSE && !data._blocked && !data.some(r => legacyFormat(r) === 'ass')) {
             const fallbackUrl = 'https://rest.opensubtitles.org/search/imdbid-' + numericId + '/sublanguageid-ara';
-            const fallbackData = await fetchLegacyData(fallbackUrl, ' - بحث ثاني');
+            const fallbackData = await fetchLegacyData(fallbackUrl, ' - بحث ثاني', data._idx || 0);
             const epNum = parseInt(episode, 10);
             const epRe = new RegExp('(?:e|ep|episode)[._ -]*0*' + epNum + '(?:[^0-9]|$)', 'i');
             data = [...data, ...fallbackData.filter(r => legacyFormat(r) === 'ass' && epRe.test(r.SubFileName || ''))];
