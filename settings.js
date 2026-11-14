@@ -1,7 +1,4 @@
 'use strict';
-// إعدادات تتغير من تلغرام وتنحفظ بـ Mongo.
-// الأولوية: تعديل تلغرام ← متغير ريندر ← الافتراضي.
-// تُقرأ لحظياً (بدون إعادة تشغيل). المفاتيح والأسرار تبقى بريندر ولا تدخل هنا.
 
 const NS = 'cfg';
 const KEY = 'settings';
@@ -9,13 +6,15 @@ const KEY = 'settings';
 const TOUCH_MS = 7 * 24 * 60 * 60 * 1000;
 
 const ASS_SLOT_CHOICES = ['subdl', 'subsource', 'wyzie', 'org', 'any'];
-const ASS_SLOT_ALIASES = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', '*': 'any' };
+const SRT_SLOT_CHOICES = ['subdl', 'subsource', 'os', 'com', 'org', 'wyzie', 'any'];
+const ASS_SLOT_ALIASES = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', oscom: 'com', mirror: 'os', opensubtitles: 'os', '*': 'any' };
 const ASS_SLOTS_MAX = 4;
 
 const trimEnv = v => String(v == null ? '' : v).trim();
 
 const DEFS = {
   ass_slots: { env: 'ASS_SLOTS', fromEnv: trimEnv, def: '' },
+  srt_slots: { env: 'SRT_SLOTS', fromEnv: trimEnv, def: '' },
   search_model: { env: 'SEARCH_GEMINI_MODEL', fromEnv: trimEnv, def: '' },
   search_grounding: { env: 'SEARCH_GROUNDING', fromEnv: v => /^(1|true|yes|on)$/i.test(trimEnv(v)), def: false },
   filler_skip: { env: 'FILLER_SKIP', fromEnv: v => v !== '0', def: true },
@@ -27,7 +26,7 @@ let loaded = false;
 let touchTimer = null;
 const listeners = [];
 
-function normalizeSlots(raw) {
+function normalizeSlots(raw, choices = ASS_SLOT_CHOICES) {
   const toks = String(raw == null ? '' : raw).split(/[\s,;|]+/).filter(Boolean);
   if (!toks.length) return { ok: true, value: '' };
   const out = [];
@@ -35,7 +34,7 @@ function normalizeSlots(raw) {
   for (const t0 of toks.slice(0, ASS_SLOTS_MAX)) {
     const t = String(t0).toLowerCase();
     const name = ASS_SLOT_ALIASES[t] || t;
-    if (ASS_SLOT_CHOICES.includes(name)) out.push(name); else bad.push(t0);
+    if (choices.includes(name)) out.push(name); else bad.push(t0);
   }
   if (bad.length) return { ok: false, bad };
   return { ok: true, value: out.every(x => x === 'any') ? '' : out.join(',') };
@@ -45,6 +44,7 @@ function validate(key, value) {
   const d = DEFS[key];
   if (!d) return { ok: false };
   if (key === 'ass_slots') return normalizeSlots(value);
+  if (key === 'srt_slots') return normalizeSlots(value, SRT_SLOT_CHOICES);
   if (key === 'search_model') {
     const v = trimEnv(value);
     return /^[A-Za-z0-9._\-\/]{0,80}$/.test(v) ? { ok: true, value: v } : { ok: false };
@@ -147,6 +147,6 @@ function onChange(fn) { if (typeof fn === 'function') listeners.push(fn); }
 
 module.exports = {
   get, set, clear, load, source, onChange,
-  ASS_SLOT_CHOICES, ASS_SLOTS_MAX,
+  ASS_SLOT_CHOICES, SRT_SLOT_CHOICES, ASS_SLOTS_MAX,
   _t: { normalizeSlots, validate, DEFS, reset: () => { overrides = {}; loaded = false; }, isLoaded: () => loaded, dump: () => ({ ...overrides }) }
 };
