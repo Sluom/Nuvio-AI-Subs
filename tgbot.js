@@ -351,7 +351,7 @@ async function onRetryCallback(cq) {
   const tracks = await fetchTracks(type, targetId).catch(() => null);
   const t = tracks && tracks.find(x => x.ext === ext && x.track === track);
   if (!t) { await edit(rtl('⚠️ انمسح التراك، بس ما لقيت ' + ext.toUpperCase() + ' ' + track + ' بالقائمة. شغّله من Nuvio.')); return; }
-  const started = await startPath(t.path);
+  const started = await startPath(t.path, true);
   console.log('[إعادة تجهيز] ' + targetId + ' ' + ext.toUpperCase() + ' ' + track + (mode === 'z' ? ' (من الصفر)' : ' (الناقص فقط)') + (started === null ? ': تعذر البدء' : started ? ': بدأ' : ': جاهز') + (cleared.failed ? ' | خطوة مسح فشلت' : ''));
   if (started === null) { await edit(rtl('⚠️ تعذر بدء التجهيز، جرّب مرة ثانية.')); return; }
   await edit(rtl(started ? '🔁 بدأت إعادة التجهيز (' + (mode === 'z' ? 'من الصفر' : 'الناقص فقط') + ') ⏳ يوصلك إشعار لما يخلص.' : '✅ التراك جاهز، شغّله من Nuvio.'));
@@ -572,7 +572,7 @@ async function onGoCallback(cq) {
     await startBatch({ chat: cq.message && cq.message.chat, messageId: cq.message && cq.message.message_id, targetId: r.targetId, head, track: t, count: r.count, model: r.model || '' });
     return;
   }
-  const started = await startPath(t.path);
+  const started = await startPath(t.path, true);
   if (started === null) {
     await answerCb(cq, 'تعذر بدء التجهيز، جرّب مرة ثانية');
     return;
