@@ -15,11 +15,30 @@ const {
     activatePendingNextEpTimer
 } = require('./prefetch');
 const db = require('./db');
-const trackPref = require('./trackPref');
 const notify = require('./notify');
 const crypto = require('crypto');
 const tgbot = require('./tgbot');
 const { resolveCeeId } = require('./ceeMap');
+
+function urlKey(u) {
+  const s = String(u || '').trim();
+  if (!s) return '';
+  try { return new URL(s).pathname.toLowerCase(); } catch (e) { return s.split('?')[0].toLowerCase(); }
+}
+
+function nameOf(item) {
+  const raw = item && (item.name || item.fileName || item.title || item.origName);
+  return String(raw || '').trim().slice(0, 200);
+}
+
+function makePinEntry(item) {
+  return {
+    url: item.url,
+    _source: item._source || item._site || 'subdl',
+    _site: item._site || item._source || 'subdl',
+    name: nameOf(item)
+  };
+}
 
 const app = express();
 app.use(cors());
@@ -170,7 +189,7 @@ async function repinFailedSlot(targetId, kind, slot, item) {
         ass: Array.isArray(doc && doc.ass) ? doc.ass.slice() : []
     };
     if (next[kind].length < slot) return false;
-    next[kind][slot - 1] = trackPref.makePinEntry(item);
+    next[kind][slot - 1] = makePinEntry(item);
     pinnedCorrectorMemCache.set(pinKey, next);
     try { await db.saveDoc('job', pinKey, next); } catch { }
     return true;
@@ -202,8 +221,8 @@ async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extr
 
     const { doc } = await loadPinsDoc(targetId);
     const pinned = (doc && Array.isArray(doc[kind])) ? doc[kind] : [];
-    const skip = new Set([trackPref.urlKey(failedUrl)]);
-    pinned.forEach((p, i) => { if (i !== slot - 1 && p && p.url) skip.add(trackPref.urlKey(p.url)); });
+    const skip = new Set([urlKey(failedUrl)]);
+    pinned.forEach((p, i) => { if (i !== slot - 1 && p && p.url) skip.add(urlKey(p.url)); });
     const siteOfItem = it => String((it && (it._site || it._source)) || '').toLowerCase();
     const failedPin = pinned[slot - 1];
     const failedSite = failedPin ? siteOfItem(failedPin) : '';
@@ -213,7 +232,7 @@ async function findAlternativeSource({ kind, targetId, trackNum, failedUrl, extr
     const cands = [];
     for (const it of raw) {
         if (!it || !it.url || it._bad) continue;
-        const k = trackPref.urlKey(it.url);
+        const k = urlKey(it.url);
         if (skip.has(k) || seen.has(k)) continue;
         seen.add(k);
         cands.push(it);
@@ -266,7 +285,7 @@ async function healFailedTrack({ label, kind, targetId, trackNum, failedUrl, ext
     const pinned = await repinFailedSlot(targetId, kind, slot, found.item).catch(() => false);
     const rawKey = (kind === 'ass' ? 'ass_' : '') + targetId + '_track' + slot + TRACKS_TAG;
     try { await db.saveDoc('rawsrt', rawKey, { text: found.text }); } catch { }
-    console.log(tag + ': لقيت بديل ✅ (' + secs + ' ث، جرّبت ' + found.tried + ') ⟵ ' + getSourceLabel(found.item._site || found.item._source) + ' | ' + trackPref.nameOf(found.item) + (pinned ? ' | ثبّتُه' : ' | ما قدرت أثبّته'));
+    console.log(tag + ': لقيت بديل ✅ (' + secs + ' ث، جرّبت ' + found.tried + ') ⟵ ' + getSourceLabel(found.item._site || found.item._source) + ' | ' + nameOf(found.item) + (pinned ? ' | ثبّتُه' : ' | ما قدرت أثبّته'));
     return { url: found.item.url, text: found.text };
 }
 
@@ -381,7 +400,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshSrt) {
         if (finalSrt.length >= 4) break;
         if (item && item.url && !usedSrtUrls.has(item.url)) {
-            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: trackPref.nameOf(item) });
+            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: nameOf(item) });
             usedSrtUrls.add(item.url);
             changed = true;
         }
@@ -397,7 +416,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshAss) {
         if (finalAss.length >= 4) break;
         if (item && item.url && !usedAssUrls.has(item.url)) {
-            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: trackPref.nameOf(item) });
+            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: nameOf(item) });
             usedAssUrls.add(item.url);
             changed = true;
         }
