@@ -49,7 +49,7 @@ const CORRECTOR_MAX = 4;
 const READY_SRT_PER_SITE = 4;
 const RESULT_TTL = 30 * 60 * 1000;
 const MAX_RESULT_CACHE = 100;
-const VERIFY_LEGACY = false; // مثبّت مطفي (كان OS_LEGACY_VERIFY=0)
+const VERIFY_LEGACY = false;
 
 function slotSite(token) {
     const t = String(token || '').trim().toLowerCase();
@@ -98,8 +98,6 @@ function applySiteSlots(list, slots, label) {
     slots = slots.slice();
     while (slots.length < CORRECTOR_MAX) slots.push('any');
     const pool = list.slice();
-    // بصمة نص الحوار (من التحقق) ⟵ خانتان من نفس الموقع ما تاخذان نفس الترجمة حرفياً (بين المواقع لا نصفّي).
-    // ويز بصمته رقم تعريف فقط فلا يُعتمد
     const sigOf = x => (x && x._sig && !/^wyzie:/.test(String(x._sig))) ? String(x._site) + '|' + String(x._sig) : '';
     const used = new Set();
     const skipped = {};
@@ -127,7 +125,6 @@ function applySiteSlots(list, slots, label) {
     }
     const sk = Object.keys(skipped);
     if (sk.length) console.log('[' + label + ' 🧩] خانات ' + label + ': تخطيت ترجمات مطابقة حرفياً لخانة سابقة (' + sk.map(k => k + ' ' + skipped[k]).join('، ') + ')');
-    // المطابقات تنزل لآخر القائمة، ولا تاخذ مكان خانة (أفضل خانة ناقصة من ترجمة مكررة)
     const rest = [...pool.filter(x => !dups.has(x)), ...pool.filter(x => dups.has(x))];
     const final = [...out, ...rest];
     for (let i = 0; i < slots.length && i < final.length;) {
@@ -842,7 +839,6 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const wyzieSrt = collectSiteSrt('wyzie', wyziePre.srtList || []);
     const readyCap = l => l.slice(0, READY_SRT_PER_SITE);
     const readySrt = [...readyCap(subdlSrt), ...readyCap(subsourceSrt), ...readyCap(osSrt), ...readyCap(legacySrt), ...readyCap(oscomSrt)];
-    // ويز SRT احتياطي فقط: يكمّل القائمة الجاهزة إذا باقي المواقع أعطت أقل من 4
     if (readySrt.length < READY_SRT_PER_SITE) readySrt.push(...wyzieSrt.slice(0, READY_SRT_PER_SITE - readySrt.length));
 
     const seenCorr = new Set();
