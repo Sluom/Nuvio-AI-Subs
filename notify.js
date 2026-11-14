@@ -1,5 +1,3 @@
-// إشعارات التصحيح: سطر ملخص في اللوغ لكل تراك مصحح، ونفس السطر يُرسل إلى تيليغرام إن وُجد المتغيران
-// TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID. كل شيء هنا محمي: أي فشل يُبلع بصمت ولا يؤثر على الإضافة.
 const axios = require('axios');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -25,7 +23,6 @@ let lastErrLogAt = 0;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// لا يظهر الرمز أبدا في أي سطر لوغ
 function scrub(s) {
   let out = String(s == null ? '' : s);
   if (TG_TOKEN) out = out.split(TG_TOKEN).join('***');
@@ -52,7 +49,6 @@ async function sendOne(text, markup) {
   }
 }
 
-// رسالة وحدة كل ثانية وزيادة (حد تيليغرام للمحادثة الواحدة) مهما تتابعت الأحداث
 async function pump() {
   if (pumping) return;
   pumping = true;
@@ -83,10 +79,9 @@ function enqueue(text, markup) {
     if (queue.length >= MAX_QUEUE) queue.shift();
     queue.push(markup ? { text, markup } : text);
     pump().catch(() => {});
-  } catch (e) { /* لا شيء */ }
+  } catch (e) {}
 }
 
-// أحجام المواسم من Cinemeta (عدد الحلقات بكل موسم) لحساب الرقم المطلق والاسم البديل للحلقة
 async function getSeasonSizes(imdbId) {
   const hit = metaCache.get(imdbId);
   if (hit && Date.now() - hit.at < CINEMETA_TTL_MS) return hit.sizes;
@@ -124,7 +119,6 @@ function rememberName(key, name) {
   nameCache.set(key, { name: n, at: Date.now() });
 }
 
-// اسم العمل (مسلسل أو فيلم) من Cinemeta. لا يرمي خطأ أبدا؛ يرجع null إن لم يوجد
 async function titleOf(id, type) {
   try {
     const m = /^(tt\d+)/.exec(String(id || ''));
@@ -142,7 +136,6 @@ async function titleOf(id, type) {
   }
 }
 
-// وصف الحلقة بكلام مقروء + الاسم البديل لنفس الحلقة (ترقيم المواسم <-> الترقيم المطلق) إن أمكن
 async function describeEpisode(targetId) {
   const id = String(targetId || '');
   let m = /^(tt\d+):(\d+):(\d+)$/.exec(id);
@@ -182,7 +175,6 @@ async function describeEpisode(targetId) {
   return { text: id || '؟', alt: null };
 }
 
-// اسم الموقع + معرّف الحزمة من رابط التراك (بدون أي مفاتيح)
 function siteOfUrl(url) {
   const u = String(url || '');
   let host = '';
@@ -212,11 +204,9 @@ function siteOfUrl(url) {
 
 const LRI = '⁦';
 const PDI = '⁩';
-// سطر كامل يُقرأ من اليمين لليسار؛ الأجزاء اللاتينية (اسم، رقم، ASS) تُعزل حتى لا تنقلب
 const rtl = t => RLM + t;
 const latin = t => LRI + t + PDI;
 
-// الثواني بالعربي الصحيح: ثانية، ثانيتان، 3 ثوانٍ، 12 ثانية، دقيقة و12 ثانية
 function arSeconds(n) {
   const x = Math.max(0, Math.round(Number(n) || 0));
   const secWord = k => (k === 1 ? 'ثانية واحدة' : k === 2 ? 'ثانيتان' : k <= 10 ? k + ' ثوانٍ' : k + ' ثانية');
@@ -245,7 +235,6 @@ async function report(ev) {
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
   if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
 
-  // اسم العمل (لا يرمي خطأ أبدا)
   const idStr = String(ev.targetId || '');
   const isMovie = /^tt\d+$/.test(idStr);
   let title = null;
@@ -265,7 +254,6 @@ async function report(ev) {
   let detail = [];
   let retryKinds = null;
 
-  // رأس الرسالة بتيليغرام: "تراك 1 ASS" بترتيب يُقرأ صح من اليمين لليسار
   const tgHead = 'تراك ' + ev.trackNum + ' ' + latin(kindName);
 
   if (ev.kind === 'done') {
@@ -311,7 +299,6 @@ async function report(ev) {
     retryKinds = ['m'];
   }
 
-  // تنبيه التكرار: نفس الحلقة ونفس التراك محفوظان أيضا تحت الاسم الآخر (الموسم/المطلق)
   let dupText = '';
   if (ev.kind === 'done' && ep.alt && typeof ev.loadDoc === 'function' && ev.cacheKey && ev.cacheKey.includes('_' + ev.targetId + '_track')) {
     try {
@@ -321,14 +308,12 @@ async function report(ev) {
         warn = true; badge = '⚠️';
         dupText = 'نفس الحلقة محفوظة أيضا باسم (' + ep.alt.text + ') لنفس التراك ⟵ صُحّحت مرتين بسبب اختلاف الاسم.';
       }
-    } catch (e) { /* لا شيء */ }
+    } catch (e) {}
   }
 
-  // سطر اللوغ (مضغوط كما كان) — بدون رموز اتجاه
   const epLog = title ? (isMovie ? 'فيلم ' + title : title + ' ' + ep.text) : ep.text;
   console.log('[ملخص التراك] ' + (warn ? '⚠️ ' : '✅ ') + line.replace(ep.text, epLog) + (dupText ? '\n⚠️ ' + dupText : ''));
 
-  // رسالة تيليغرام: كل معلومة بسطر
   const workLine = '🎬 ' + latin((title ? title + ' (' + workId + ')' : workId));
   const epLine = isMovie ? null : '📺 ' + ep.text;
   const lines = [rtl(badge + ' ' + title1)];
@@ -359,7 +344,6 @@ async function report(ev) {
   enqueue(lines.join('\n'), markup);
 }
 
-// أحداث الموديل (اختناق، تشغيل الاحتياطي...). للتيليغرام فقط، ولا يرمي خطأ أبدا.
 const modelSeen = new Map();
 const MODEL_EVENT_GAP_MS = 5 * 60 * 1000;
 async function modelReport(ev) {
@@ -409,9 +393,8 @@ async function modelReport(ev) {
 }
 
 function modelEvent(ev) {
-  try { modelReport(ev || {}).catch(() => {}); } catch (e) { /* لا شيء */ }
+  try { modelReport(ev || {}).catch(() => {}); } catch (e) {}
 }
-
 
 const STATS_TZ_MS = 3 * 3600 * 1000;
 const DAY_MS = 24 * 3600 * 1000;
@@ -453,7 +436,7 @@ function flushStats() {
   try {
     const db = getDb();
     if (db) Promise.resolve(db.saveDoc('dailystats', s.day, s)).catch(() => {});
-  } catch (e) { /* لا شيء */ }
+  } catch (e) {}
 }
 
 function statBump(fn) {
@@ -468,7 +451,7 @@ function statBump(fn) {
         if (statsTimer.unref) statsTimer.unref();
       }
     }).catch(() => {});
-  } catch (e) { /* لا شيء */ }
+  } catch (e) {}
 }
 
 function statTrack(ev) {
@@ -487,14 +470,14 @@ function statTrack(ev) {
       else if (kind === 'failed') s.failed++;
       else s.error++;
     });
-  } catch (e) { /* لا شيء */ }
+  } catch (e) {}
 }
 
 function statModel(kind, model) {
   const field = { choke: 'choke', 'fallback-won': 'fbwon', rescue: 'rescue', 'both-failed': 'bothFailed' }[kind];
   if (field) statBump(s => {
     s[field] = (s[field] || 0) + 1;
-    if (kind === 'choke' && model) {   // أي موديل اختنق (للملخص اليومي)
+    if (kind === 'choke' && model) {
       const m = String(model).slice(0, 40);
       if (!s.chokeBy || typeof s.chokeBy !== 'object') s.chokeBy = {};
       s.chokeBy[m] = (s.chokeBy[m] || 0) + 1;
@@ -532,7 +515,7 @@ async function sendDailySummary(day) {
     try { s = db ? await db.loadDoc('dailystats', day) : null; } catch (e) { s = null; }
   }
   lastSummaryDay = day;
-  try { if (db) await db.saveDoc('dailystats', '_sent', { day }); } catch (e) { /* لا شيء */ }
+  try { if (db) await db.saveDoc('dailystats', '_sent', { day }); } catch (e) {}
   if (!s || typeof s !== 'object') return;
   s = Object.assign(emptyStats(day), s, { tracks: Object.assign({ ASS: 0, SRT: 0 }, s.tracks || {}), src: s.src || {}, eps: Array.isArray(s.eps) ? s.eps : [] });
   const total = (s.tracks.ASS || 0) + (s.tracks.SRT || 0) + s.partial + s.failed + s.error + (s.choke || 0);
@@ -587,14 +570,13 @@ async function sourcesReport(ev) {
 }
 
 function sourcesEvent(ev) {
-  try { sourcesReport(ev).catch(() => {}); } catch (e) { /* لا شيء */ }
+  try { sourcesReport(ev).catch(() => {}); } catch (e) {}
 }
 
-// الواجهة الوحيدة: ترجع فورا ولا ترمي خطأ أبدا
 function trackEvent(ev) {
   try {
     report(ev).catch(() => {});
-  } catch (e) { /* لا شيء */ }
+  } catch (e) {}
 }
 
 if (ENABLED) {
