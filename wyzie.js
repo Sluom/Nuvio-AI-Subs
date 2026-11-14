@@ -27,6 +27,8 @@ let apiKey = '';
 let pausedUntil = 0;
 let pauseReason = '';
 let usage = { day: '', units: 0 };
+let real = { plan: '', balance: null };
+const FREE_DAILY = 1000;
 
 const resultCache = new Map();
 const resultPending = new Map();
@@ -106,6 +108,26 @@ function takeBudget() {
     }
     usage.units += SOURCE_COST;
     return true;
+}
+
+function noteBilling(res) {
+    const h = res && res.headers;
+    if (!h) return;
+    const balance = parseFloat(h['x-wyzie-balance']);
+    if (!Number.isFinite(balance)) return;
+    const plan = String(h['x-wyzie-plan'] || '').toLowerCase();
+    real = { plan, balance };
+    if (plan === 'free') {
+        const day = todayUtc();
+        if (usage.day !== day) usage = { day, units: 0 };
+        usage.units = Math.max(0, FREE_DAILY - Math.round(balance));
+    }
+}
+
+function unitsLabel() {
+    if (real.balance !== null && real.plan === 'free') return 'U ' + usage.units + '/' + FREE_DAILY;
+    if (real.balance !== null) return 'R ' + Math.round(real.balance);
+    return 'U ~' + usage.units;
 }
 
 function judgeAnime(meta) {
@@ -223,6 +245,7 @@ async function searchWyzie({ imdbId, season, episode, isSeries, isPrefetch, tag 
         logOnce('wyzie-net', '[Wyzie] ' + tag + ': خطأ شبكة (' + (e && (e.code || e.message) || 'خطأ') + ')', 10 * 60 * 1000);
         return null;
     }
+    noteBilling(res);
     const st = res.status;
     if (st === 200 && Array.isArray(res.data)) return toItems(res.data);
     if (st === 404) return Object.assign([], { _raw: 0 });
@@ -271,9 +294,9 @@ async function getWyzieAss({ imdbId, season, episode, type, isPrefetch = false }
                     const src = Array.from(new Set(out.map(x => x._wyzieSource).filter(Boolean))).join('/');
                     const nAss = out.filter(x => x.format === 'ass').length;
                     const nSrt = out.length - nAss;
-                    console.log('[Wyzie] ' + tag + ': ' + nAss + ' ASS + ' + nSrt + ' SRT عربي' + (src ? ' (' + src + ')' : '') + ' | U ' + usage.units);
+                    console.log('[Wyzie] ' + tag + ': ' + nAss + ' ASS + ' + nSrt + ' SRT عربي' + (src ? ' (' + src + ')' : '') + ' | ' + unitsLabel());
                 } else {
-                    console.log('[Wyzie] ' + tag + ': ما في ASS/SRT عربي | U ' + usage.units);
+                    console.log('[Wyzie] ' + tag + ': ما في ASS/SRT عربي | ' + unitsLabel());
                 }
                 return out;
             } finally {
