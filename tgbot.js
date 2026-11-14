@@ -1042,6 +1042,10 @@ function genVariants(model, wantJson, grounded, temperature) {
   ];
 }
 
+const GROUNDING_QUOTA_COOLDOWN_MS = 20 * 60 * 1000;
+let groundingBlockedUntil = 0;
+const groundingBlockedMin = () => Math.max(0, Math.ceil((groundingBlockedUntil - Date.now()) / 60000));
+
 async function searchGemini({ prompt, deadline, wantJson, grounding, temperature, thinking }) {
   const S = shared;
   if (!S || !S.acquireKey || !S.axios) return { err: 'nocfg' };
@@ -1050,7 +1054,7 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
   const model = S.normalizeGeminiModelId(ks.model);
   const url = S.DEFAULT_GEMINI_API_URL + '/models/' + model + ':generateContent';
   let vi = thinking === 'minimal' ? 1 : 0;
-  let grounded = !!grounding;
+  let grounded = !!grounding && groundingBlockedMin() === 0;
   let why = '';
   for (let attempt = 0; attempt < 6; attempt++) {
     const remaining = deadline - Date.now();
@@ -1075,7 +1079,13 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
       if (S.isGeminiAuthFailure(e)) { console.log('[بحث ذكي] مفتاح مرفوض ' + why); S.deadKeys.add(key); continue; }
       if (grounded) {
         grounded = false;
-        console.log('[بحث ذكي] فشل البحث بجوجل (grounding) HTTP ' + (st || 'timeout') + ' → ' + em + ' | أكمل بدونه.');
+        if (st === 429) {
+          const first = groundingBlockedMin() === 0;
+          groundingBlockedUntil = Date.now() + GROUNDING_QUOTA_COOLDOWN_MS;
+          if (first) console.log('[بحث ذكي] حصة البحث بجوجل خلصت (429) ⟵ أكمل بدونه، وأعيد المحاولة بعد ' + Math.round(GROUNDING_QUOTA_COOLDOWN_MS / 60000) + ' دقيقة.');
+        } else {
+          console.log('[بحث ذكي] تعذر البحث بجوجل (' + (st ? 'HTTP ' + st : 'timeout') + ') ⟵ أكمل بدونه.');
+        }
         continue;
       }
       console.log('[بحث ذكي] ' + why);
@@ -1475,7 +1485,7 @@ function settingsText() {
   L.push(rtl('🎞 ترتيب ASS (' + SRC_NAME[settings.source('ass_slots')] + '): ') + (slots.length ? latin(slots.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('📄 ترتيب SRT (' + SRC_NAME[settings.source('srt_slots')] + '): ') + (srtS.length ? latin(srtS.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
-  L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))));
+  L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))) + (settings.get('search_grounding') && groundingBlockedMin() > 0 ? rtl(' ⏳ الحصة خلصت، يرجع بعد ') + latin(groundingBlockedMin() + '') + rtl(' دقيقة') : ''));
   L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
   L.push('');
