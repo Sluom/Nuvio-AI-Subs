@@ -8,7 +8,7 @@ const {
 const db = require('./db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
-const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames } = require('./name-book');
+const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames, applyPins } = require('./name-book');
 
 function shortModel(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
@@ -671,6 +671,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const seriesParts = seriesTid.split(':');
   const seriesKey = seriesParts.length >= 3 ? cacheVersion + '_snames_' + (/^tt\d+$/.test(seriesParts[0]) ? seriesParts[0] : seriesParts[0] + ':' + seriesParts[1]) : null;
   const seriesEp = seriesTid;
+  const pinSid = seriesParts.length >= 3 ? (/^tt\d+$/.test(seriesParts[0]) ? seriesParts[0] : seriesParts[0] + ':' + seriesParts[1]) : null;
+  const pinsPromise = pinSid
+    ? Promise.race([db.loadPins(pinSid).then(r => (r && r.ok ? r.value : null)), new Promise(res => setTimeout(() => res(null), 3000))]).catch(() => null)
+    : Promise.resolve(null);
 
   const cache = await loadLineCache(lineCacheKey);
   const namesStored = await db.loadMap('names', nameCacheKey);
@@ -860,6 +864,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           }
         } catch (e) { console.log(`[مصحح - حفظ الأسماء] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
+      book = applyPins(book, await pinsPromise);
       outTexts = applyNameBook(propagateNamesT(finalTexts, eligible, kinds, book, tflags), eligible, book, tflags);
     } else {
       if (!namesLoadedFromCache && book) {
@@ -872,6 +877,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
         } catch (e) { console.log(`[مصحح - حفظ الأسماء (القديم)] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
+      book = applyPins(book, await pinsPromise);
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
     
