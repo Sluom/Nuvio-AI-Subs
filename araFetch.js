@@ -833,8 +833,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const oscomSrt = collectSiteSrt('oscom', oscomPre.srtList);
     const wyzieSrt = collectSiteSrt('wyzie', wyziePre.srtList || []);
     const readyCap = l => l.slice(0, READY_SRT_PER_SITE);
-    const readySrt = [...readyCap(subdlSrt), ...readyCap(subsourceSrt), ...readyCap(osSrt), ...readyCap(legacySrt), ...readyCap(oscomSrt)];
-    if (readySrt.length < READY_SRT_PER_SITE) readySrt.push(...wyzieSrt.slice(0, READY_SRT_PER_SITE - readySrt.length));
+    const readySrt = [...readyCap(subdlSrt), ...readyCap(subsourceSrt), ...readyCap(osSrt), ...readyCap(legacySrt), ...readyCap(oscomSrt), ...readyCap(wyzieSrt)];
 
     const seenCorr = new Set();
     const seenCorrSigs = new Set();
@@ -869,8 +868,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     };
     const isStremLink = c => String(c.url || '').includes('strem.top');
     pickInto([...subdlSrt.filter(c => !isStremLink(c)), ...subsourceSrt, ...subdlSrt.filter(isStremLink)]);
-    if (correctorSrt.length < poolLimit) pickInto([...osSrt, ...legacySrt, ...oscomSrt]);
-    if (correctorSrt.length < poolLimit) pickInto(wyzieSrt);
+    if (correctorSrt.length < poolLimit) pickInto([...osSrt, ...legacySrt, ...oscomSrt, ...wyzieSrt]);
     if (srtSlots.length) {
         const picked = applySiteSlots(correctorSrt, srtSlots, 'SRT').slice(0, CORRECTOR_MAX);
         correctorSrt.length = 0;
