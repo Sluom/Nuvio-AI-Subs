@@ -256,6 +256,35 @@ async function stats() {
   return primary || tracks ? { primary, tracks } : null;
 }
 
+// أسماء/أماكن مثبّتة يدوياً لكل مسلسل: مجموعة منفصلة بدون انتهاء (TTL) مثل الروابط القصيرة
+async function savePins(sid, value) {
+  const d = await getPrimaryDb();
+  if (!d) return false;
+  try {
+    await d.collection('pins').updateOne(
+      { _id: String(sid) },
+      { $set: { value, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+      { upsert: true }
+    );
+    return true;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حفظ الأسماء المثبّتة: ${e.message}`);
+    return false;
+  }
+}
+
+async function loadPins(sid) {
+  const d = await getPrimaryDb();
+  if (!d) return { ok: false, value: null };
+  try {
+    const doc = await d.collection('pins').findOne({ _id: String(sid) });
+    return { ok: true, value: doc ? doc.value : null };
+  } catch (e) {
+    console.log(`[MongoDB] فشلت قراءة الأسماء المثبّتة: ${e.message}`);
+    return { ok: false, value: null };
+  }
+}
+
 // مسح بنطاق تاريخ (آخر تحديث): 'translations' = ترجمات الحساب الأساسي (كاش الأسطر + نتائج التراكات المترجمة فقط)
 // 'tracks' = ملفات التراكات الخام بحساب التراكات. أي شي ثاني ما يتمس. dryRun = عدّ بدون حذف.
 async function purgeRange(kind, from, to, dryRun) {
@@ -284,4 +313,4 @@ async function purgeRange(kind, from, to, dryRun) {
   }
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange };
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange, savePins, loadPins };
