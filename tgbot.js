@@ -181,9 +181,6 @@ async function headOf(d) {
   return lines;
 }
 
-const panelText = head => [rtl('🎛 لوحة التحكم'), ...head].join('\n');
-const keyboard = h => ({ inline_keyboard: [[{ text: '🗑 امسح آخر حلقة', callback_data: 'cl:' + h }]] });
-
 async function loadLast() {
   if (last) return last;
   const doc = await withTimeout(db.loadDoc(NS, 'last'), 3000);
@@ -200,17 +197,6 @@ function rememberPanel(d, head) {
   panels.set(h, { d, head });
   while (panels.size > MAX_PANELS) panels.delete(panels.keys().next().value);
   return h;
-}
-
-async function sendPanel(chatId) {
-  const d = await loadLast();
-  if (!d) {
-    await tg('sendMessage', { chat_id: chatId, text: rtl('ما في تراك مصحح شغّلته بعد.') + '\n' + rtl('شغّل تراك من Nuvio وبعدها ابعث /panel') });
-    return;
-  }
-  const head = await headOf(d);
-  const h = rememberPanel(d, head);
-  await tg('sendMessage', { chat_id: chatId, text: panelText(head), reply_markup: keyboard(h), disable_web_page_preview: true });
 }
 
 async function askClear(chatId, d, head) {
@@ -233,11 +219,6 @@ async function sendAskClear(chatId) {
 
 async function onClearCallback(cq, op, h, panel) {
   const msg = cq.message;
-  if (op === 'cl') {
-    await answerCb(cq);
-    await askClear(msg.chat.id, panel.d, panel.head);
-    return;
-  }
   if (op === 'cn') {
     await answerCb(cq, 'تم الإلغاء');
     await editMsg(msg, rtl('تم الإلغاء، ما انمسح شي.'));
@@ -257,6 +238,108 @@ async function onClearCallback(cq, op, h, panel) {
 
 let pendingOrder = null;
 const orderAsks = new Map();
+
+let pendingPurge = null;
+let purgeAsk = null;
+const BAGHDAD_OFFSET_MS = 3 * 3600 * 1000;
+const PURGE_KINDS = {
+  t: { name: 'ترجمات الحساب الأساسي', what: 'كاش الأسطر ونتائج التراكات المترجمة', statKey: 'primary' },
+  k: { name: 'تراكات الحساب الثاني', what: 'ملفات التراكات الخام', statKey: 'tracks' }
+};
+
+function parsePurgeDates(text) {
+  const t = latinDigits(String(text || '')).trim();
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s*(?:الى|إلى|to|[-–—>→])?\s*(\d{4})-(\d{1,2})-(\d{1,2}))?$/i.exec(t);
+  if (!m) return null;
+  const mk = (y, mo, d) => {
+    const x = new Date(Date.UTC(+y, +mo - 1, +d));
+    return x.getUTCFullYear() === +y && x.getUTCMonth() === +mo - 1 && x.getUTCDate() === +d ? x : null;
+  };
+  const a = mk(m[1], m[2], m[3]);
+  const b = m[4] ? mk(m[4], m[5], m[6]) : a;
+  if (!a || !b) return null;
+  const from = a.getTime() - BAGHDAD_OFFSET_MS;
+  const to = b.getTime() + 24 * 3600 * 1000 - BAGHDAD_OFFSET_MS;
+  if (!(from < to)) return null;
+  const f = x => x.toISOString().slice(0, 10);
+  return { from: new Date(from), to: new Date(to), fromStr: f(a), toStr: f(b) };
+}
+
+async function askPurge(chatId) {
+  pendingPurge = null; purgeAsk = null;
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: [rtl('🧹 مسح بيانات بتاريخ'), rtl('اختر شنو تمسح (الباقي كله ما ينمس ويبقى حسب مدته):')].join('\n'),
+    reply_markup: { inline_keyboard: [
+      [{ text: '🗑 مسح ترجمات (الحساب الأساسي)', callback_data: 'pg:t' }],
+      [{ text: '🗑 مسح تراكات (الحساب الثاني)', callback_data: 'pg:k' }],
+      [{ text: 'إلغاء', callback_data: 'pg:n' }]
+    ] }
+  }).catch(() => {});
+}
+
+async function onPurgeDates(chatId, r) {
+  const k = PURGE_KINDS[pendingPurge.kind];
+  const kind = pendingPurge.kind;
+  pendingPurge = null;
+  const cnt = await db.purgeRange(kind === 'k' ? 'tracks' : 'translations', r.from, r.to, true);
+  if (!cnt) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ ما قدرت أوصل لقاعدة البيانات، جرّب مرة ثانية.') }).catch(() => {});
+    return;
+  }
+  const total = cnt.docs + cnt.maps;
+  const range = r.fromStr === r.toStr ? r.fromStr : r.fromStr + ' ⟵ ' + r.toStr;
+  if (!total) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('ما لقيت شي يخص ' + k.name + ' بهذا التاريخ:') + '\n' + latin(range) }).catch(() => {});
+    return;
+  }
+  purgeAsk = { kind, from: r.from, to: r.to, at: Date.now() };
+  const lines = [rtl('⚠️ تأكيد المسح'), rtl('🗂 ' + k.name + ' (' + k.what + ')'), rtl('📅 ') + latin(range)];
+  if (kind === 't') { lines.push(rtl('🎞 نتائج تراكات: ' + cnt.docs)); lines.push(rtl('📄 كاش أسطر: ' + cnt.maps)); }
+  else lines.push(rtl('🎞 تراكات خام: ' + cnt.docs));
+  lines.push(rtl('المسح ما له رجعة. متأكد؟'));
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    reply_markup: { inline_keyboard: [[{ text: '✅ نعم، امسح', callback_data: 'pg:y' }, { text: 'إلغاء', callback_data: 'pg:n' }]] }
+  }).catch(() => {});
+}
+
+async function onPurgeCallback(cq) {
+  const m = /^pg:([tkywn])$/.exec(String(cq.data || ''));
+  if (!m) { await answerCb(cq, 'خيار غير صالح'); return; }
+  const op = m[1];
+  if (op === 'w') { await answerCb(cq); await askPurge(cq.message.chat.id); return; }
+  if (op === 'n') {
+    pendingPurge = null; purgeAsk = null;
+    await answerCb(cq, 'تم الإلغاء');
+    await editMsg(cq.message, rtl('تم الإلغاء، ما انمسح شي.'));
+    return;
+  }
+  if (op === 't' || op === 'k') {
+    pendingPurge = { kind: op, at: Date.now() };
+    purgeAsk = null;
+    await answerCb(cq);
+    await editMsg(cq.message, [rtl('🧹 ' + PURGE_KINDS[op].name), rtl('ابعث التاريخين (من ⟵ إلى) بهذا الشكل:'), latin('2026-10-01 2026-10-20'), rtl('أو تاريخ واحد لو تريد يوم واحد. التاريخ هو تاريخ آخر حفظ، بتوقيت بغداد.')].join('\n'), { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'pg:n' }]] });
+    return;
+  }
+  const a = purgeAsk;
+  if (!a || Date.now() - a.at > PENDING_TTL_MS) { purgeAsk = null; await answerCb(cq, 'انتهت صلاحية الطلب، ابعث /purge من جديد'); return; }
+  purgeAsk = null;
+  await answerCb(cq, 'جاري المسح...');
+  const k = PURGE_KINDS[a.kind];
+  const before = await db.stats().catch(() => null);
+  const r = await db.purgeRange(a.kind === 'k' ? 'tracks' : 'translations', a.from, a.to, false);
+  if (!r) { await editMsg(cq.message, rtl('⚠️ فشل المسح (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.')); return; }
+  const after = await db.stats().catch(() => null);
+  console.log('[بوت التحكم] مسح بالتاريخ (' + k.name + '): ' + r.docs + ' وثيقة، ' + r.maps + ' خريطة');
+  const out = [rtl('🧹 تم المسح: ' + k.name)];
+  if (a.kind === 't') { out.push(rtl('🎞 نتائج تراكات انمسحت: ' + r.docs)); out.push(rtl('📄 كاش أسطر انمسح: ' + r.maps)); }
+  else out.push(rtl('🎞 تراكات خام انمسحت: ' + r.docs));
+  const b = before && before[k.statKey], f = after && after[k.statKey];
+  if (b && f) out.push(rtl('💾 الحجم: ' + Math.round(b.usedMB) + ' ⟵ ' + Math.round(f.usedMB) + ' ميغا (قد لا ينزل فوراً بحسب Atlas)'));
+  await editMsg(cq.message, out.join('\n'));
+}
 
 async function clearOrder(targetId) {
   const ids = await idsOf(targetId);
@@ -330,8 +413,8 @@ async function onOrderCallback(cq) {
 async function onPanelCallback(cq) {
   const m = /^([a-z]{2}):([0-9a-f]{8})$/.exec(String(cq.data || ''));
   const panel = m && panels.get(m[2]);
-  if (m && panel && (m[1] === 'cl' || m[1] === 'cy' || m[1] === 'cn')) return onClearCallback(cq, m[1], m[2], panel);
-  await answerCb(cq, 'انتهت صلاحية هذي اللوحة، ابعث /panel');
+  if (m && panel && (m[1] === 'cy' || m[1] === 'cn')) return onClearCallback(cq, m[1], m[2], panel);
+  await answerCb(cq, 'انتهت صلاحية هذي الرسالة، ابعث /clear من جديد');
 }
 
 async function onRetryCallback(cq) {
@@ -829,7 +912,7 @@ async function checkDbSize() {
     for (const [name, v] of rows) {
       lines.push(rtl(name + ': ' + Math.round(v.usedMB) + ' من ' + DB_LIMIT_MB + ' ميغا (' + Math.round(v.usedMB / DB_LIMIT_MB * 100) + '%)'));
     }
-    await tg('sendMessage', { chat_id: TG_CHAT, text: lines.join('\n') });
+    await tg('sendMessage', { chat_id: TG_CHAT, text: lines.join('\n'), reply_markup: { inline_keyboard: [[{ text: '🧹 نظّف بتاريخ', callback_data: 'pg:w' }]] } });
     await db.saveDoc('dbwatch', 'last', { at: Date.now() });
   } catch (e) {}
 }
@@ -1446,8 +1529,9 @@ async function onEpisodeReply(chatId, er) {
 const isClearCmd = t => /^\/clear(@\w+)?$/i.test(t) || /^(امسح|مسح) (آخر|اخر) حلقة$/.test(t);
 const isBatchCmd = t => /^\/batch(@\w+)?$/i.test(t) || t === 'دفعة';
 const isOrderCmd = t => /^\/order(@\w+)?$/i.test(t) || t === 'مسح الترتيب' || t === 'امسح الترتيب';
+const isPurgeCmd = t => /^\/purge(@\w+)?$/i.test(t);
 const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
-const isPanelCmd = t => /^\/(panel|start)(@\w+)?$/i.test(t) || t === 'لوحة' || t === 'لوحة التحكم' || /^panel$/i.test(t);
+const isStartCmd = t => /^\/start(@\w+)?$/i.test(t);
 
 // ===== الإعدادات: تتغير من هنا وتنحفظ بـ Mongo (تعديل تلغرام ← متغير ريندر ← الافتراضي) =====
 const SLOT_CHOICES = settings.ASS_SLOT_CHOICES;
@@ -1599,9 +1683,14 @@ async function handleUpdate(u) {
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
     if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
+    if (cq && /^pg:/.test(data)) return await onPurgeCallback(cq);
     if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
     if (cq) return await onPanelCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
+    if (pendingPurge && Date.now() - pendingPurge.at < PENDING_TTL_MS) {
+      const pr = parsePurgeDates(text);
+      if (pr) { await onPurgeDates(chatId, pr); return; }
+    }
     const rq = parseRequest(text);
     const fq = rq ? null : parseFind(text);
     const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
@@ -1615,9 +1704,10 @@ async function handleUpdate(u) {
     else if (isSettingsCmd(text)) await sendSettings(chatId);
     else if (isBatchCmd(text)) await askCount(chatId);
     else if (isOrderCmd(text)) await askOrder(chatId);
+    else if (isPurgeCmd(text)) await askPurge(chatId);
     else if (isStopCmd(text)) await stopBatch(chatId);
     else if (isClearCmd(text)) await sendAskClear(chatId);
-    else if (isPanelCmd(text)) await sendPanel(chatId);
+    else if (isStartCmd(text)) await tg('sendMessage', { chat_id: chatId, text: [rtl('أهلاً 👋 الأوامر المتاحة:'), rtl('/find ابحث عن فلم أو مسلسل'), rtl('/settings الإعدادات'), rtl('/clear امسح ترجمة آخر حلقة'), rtl('/batch جهّز دفعة حلقات'), rtl('/order امسح ترتيب تراكات حلقة'), rtl('/stop أوقف الدفعة الشغالة')].join('\n') });
     else if (isPlainSearchText(text)) { if (!startSearch(() => onFind(chatId, text))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
   } catch (e) {
     logErr('خطأ بمعالجة أمر', e);
@@ -1629,7 +1719,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'panel', description: 'لوحة التحكم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
@@ -1662,7 +1752,7 @@ function start() {
   if (!ENABLED || running) return;
   running = true;
   stopped = false;
-  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /find أو /panel أو /clear.');
+  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /find أو /clear.');
   startDbWatch();
   loop().catch(() => { running = false; });
 }
@@ -1673,5 +1763,5 @@ loadCtx().catch(() => {});
 
 module.exports = {
   start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { sendSettings, onSettingsCallback, onSlotsCmd, settingsText, settingsKeyboard, currentSlots, handleUpdate, keyOf, hashOf, panels, sendPanel, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+  _t: { sendSettings, onSettingsCallback, onSlotsCmd, settingsText, settingsKeyboard, currentSlots, handleUpdate, keyOf, hashOf, panels, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
 };
