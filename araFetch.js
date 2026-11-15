@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
-const { getWyzieAss, isAnimeTitle, hasWyzieKey, getWyzieUnits, isPaused: isWyziePaused } = require('./wyzie');
+const { getWyzieAss } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 const settings = require('./settings');
 
@@ -11,23 +11,6 @@ module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEp
 
 const cleanPath = p => String(p || '').split('?')[0];
 
-function reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieList, orgList }) {
-    try {
-        const isSeries = season != null && episode != null;
-        Promise.resolve(isAnimeTitle(imdbId, type, isSeries)).then(anime => {
-            if (!anime) return;
-            const wyzieState = !hasWyzieKey() ? 'off' : isWyziePaused() ? 'paused' : 'on';
-            require('./notify').sourcesEvent({
-                imdbId, season, episode, isPrefetch, wyzieState,
-                wyzie: wyzieList.filter(x => x && x.format === 'ass').length,
-                wyzieSrt: wyzieList.filter(x => x && x.format === 'srt').length,
-                wyzieUnits: getWyzieUnits(),
-                org: orgList.length,
-                orgAss: orgList.filter(x => x && x.format === 'ass').length
-            });
-        }).catch(() => {});
-    } catch (e) { }
-}
 const LEGACY_AGENTS = ['TemporaryUserAgent', 'VLSub 0.10.3'];
 
 const SOURCE_TIMEOUTS = { os_legacy: 4500, os_mirror: 3200, subdl: 3800, subsource: 3800, oscom: 3500, wyzie: 3500 };
@@ -957,8 +940,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
             wyzieRawList = [...wyzieRawList, ...tagAbs(absRes.wyzieRawList)];
         }
     }
-
-    reportAnimeSources({ imdbId, season, episode, type, isPrefetch, wyzieList: wyzieRawList, orgList: osLegacyList });
 
     const legacyPre = lightweightPreFilter(osLegacyList, 'os_legacy');
     const osPre = lightweightPreFilter(osMirrorList, 'opensubtitles');
