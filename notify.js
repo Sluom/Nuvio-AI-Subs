@@ -402,7 +402,6 @@ const STATS_SAVE_DELAY_MS = 3000;
 const SUMMARY_FIRST_CHECK_MS = 90 * 1000;
 const SUMMARY_FIRE_DELAY_MS = 5000;
 const STATS_MAX_EPS = 500;
-const SOURCES_EVENT_GAP_MS = 3 * 60 * 1000;
 
 const getDb = () => { try { return require('./db'); } catch (e) { return null; } };
 const baghdadDay = (t = Date.now()) => new Date(t + STATS_TZ_MS).toISOString().slice(0, 10);
@@ -541,38 +540,6 @@ function startDailySummary() {
   arm();
 }
 
-const sourcesSeen = new Map();
-
-async function sourcesReport(ev) {
-  if (!ENABLED || !ev || !/^tt\d+$/.test(String(ev.imdbId || ''))) return;
-  const isSeries = ev.season != null && ev.episode != null;
-  const targetId = isSeries ? ev.imdbId + ':' + ev.season + ':' + ev.episode : ev.imdbId;
-  const now = Date.now();
-  const last = sourcesSeen.get(targetId);
-  if (last && now - last < SOURCES_EVENT_GAP_MS) return;
-  sourcesSeen.set(targetId, now);
-  if (sourcesSeen.size > 200) sourcesSeen.clear();
-  let ep = null;
-  try { ep = await describeEpisode(targetId); } catch (e) { ep = null; }
-  let title = null;
-  try { title = await titleOf(targetId, isSeries ? 'series' : 'movie'); } catch (e) { title = null; }
-  const wSrt = ev.wyzieSrt > 0 ? ev.wyzieSrt : 0;
-  const wyzieFound = ev.wyzie > 0 || wSrt > 0 ? latin((ev.wyzie > 0 ? ev.wyzie + ' ASS' : '') + (ev.wyzie > 0 && wSrt ? ' + ' : '') + (wSrt ? wSrt + ' SRT' : '')) : 'ما لقى';
-  const wUnits = ev.wyzieState !== 'off' && Number.isFinite(ev.wyzieUnits) ? ' | ' + latin('U ' + ev.wyzieUnits) : '';
-  const wyzieText = (ev.wyzieState === 'off' ? 'غير مفعّل' : ev.wyzieState === 'paused' ? 'متوقف مؤقتاً' : wyzieFound) + wUnits;
-  const orgText = ev.org > 0 ? latin(ev.org + (ev.orgAss > 0 ? ' (' + ev.orgAss + ' ASS)' : '')) : 'ما لقى';
-  const out = [rtl('📡 المصادر' + (ev.isPrefetch ? ' (تجهيز تلقائي)' : ''))];
-  out.push(rtl('🎬 ' + latin(title ? title + ' (' + ev.imdbId + ')' : ev.imdbId)));
-  if (isSeries && ep) out.push(rtl('📺 ' + ep.text));
-  out.push(rtl('🔹 ' + latin('Wyzie') + ': ' + wyzieText));
-  out.push(rtl('🔹 ' + latin('org') + ': ' + orgText));
-  enqueue(out.join('\n'));
-}
-
-function sourcesEvent(ev) {
-  try { sourcesReport(ev).catch(() => {}); } catch (e) {}
-}
-
 function trackEvent(ev) {
   try {
     report(ev).catch(() => {});
@@ -588,4 +555,4 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
+module.exports = { trackEvent, modelEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
