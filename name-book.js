@@ -38,7 +38,7 @@ function stripNotNames(text) {
 }
 const NEVER = new Set(['الله', 'الرب'].map(bookKey));
 const FUNC_RAW = new Set(['على', 'إلى', 'الى', 'حتى', 'متى', 'لدى', 'سوى', 'عدا']);
-const ALWAYS_AMBIG_RAW = 'علي نور امل سعيد جميل كريم رحمة حياة سلام امين صالح حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير';
+const ALWAYS_AMBIG_RAW = 'علي نور امل سعيد جميل كريم رحمة حياة سلام امين صالح طيبة حسن جمال بدر زهرة ورد عزيز حبيب سيف غالي رائد قمر نجم وسام فرح خير';
 const ALWAYS_AMBIG = new Set(ALWAYS_AMBIG_RAW.split(/\s+/).map(bookKey));
 const NEVER_STRONG_RAW = 'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد';
 const NEVER_STRONG = new Set(NEVER_STRONG_RAW.split(/\s+/).map(bookKey));
@@ -527,7 +527,25 @@ function applyNameBook(texts, eligible, book, flagsArr = null) {
   const allowUnwrap = book.complete !== false;
   return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
+// تثبيت يدوي: pins = { p: [أشخاص], c: [أماكن/منظمات] } ⟵ يُضاف للقاموس قبل التنصيص، ولا يدخل بتصويت ذاكرة المسلسل
+function applyPins(book, pins) {
+  if (!pins || typeof pins !== 'object') return book;
+  const persons = Array.isArray(pins.p) ? pins.p : [];
+  const places = Array.isArray(pins.c) ? pins.c : [];
+  if (!persons.length && !places.length) return book;
+  if (!book) { book = makeBook(new Map()); book.complete = false; }
+  for (const [list, kind] of [[persons, 'person'], [places, 'entity']]) {
+    for (const w of list) {
+      if (typeof w !== 'string') continue;
+      const k = bookKey(w);
+      if (!k || k.split(' ').length > 3) continue;
+      book.map.set(k, { kind, ambig: false, pinned: true });
+    }
+  }
+  book.size = book.map.size;
+  return book;
+}
 module.exports = {
-  buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
+  applyPins, buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
   updateSeriesMemory, mergeSeriesMemory, seriesInfoFromTarget, mergeSeriesNames
 };
