@@ -814,7 +814,7 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 <input type="password" id="oscom-pass" placeholder="كلمة المرور" value="` + attr(existingOsComPass) + `">
 </div>
 <div class="input-group">
-<label>مفتاح Wyzie API (اختياري - ترجمات ASS عربية للأنمي فقط)</label>
+<label>مفتاح Wyzie API (اختياري - ترجمات عربية لكل الأعمال)</label>
 <input type="text" id="wyzie-key" placeholder="wyzie-..." value="` + attr(existingWyzieKey) + `">
 </div>
 <div class="input-group" style="margin-top:20px">
