@@ -10,6 +10,7 @@ try { filler = require('./filler'); } catch (e) { filler = null; }
 let shared = null;
 try { shared = require('./ai').shared; } catch (e) { shared = null; }
 const settings = require('./settings');
+const { seriesInfoFromTarget, bookKey } = require('./name-book');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TG_CHAT = String(process.env.TELEGRAM_CHAT_ID || '').trim();
@@ -702,6 +703,212 @@ async function onCountCallback(cq) {
   pendingCount = { n, at: Date.now() };
   await answerCb(cq, 'تمام: ' + n + ' حلقات');
   await editMsg(cq.message, [rtl('📦 دفعة: ' + n + ' حلقات'), rtl('الآن ابعث رقم العمل مع الموسم والحلقة اللي تبدأ منها، مثل:'), latin('tt0409591 1 5')].join('\n'));
+}
+
+const NAMES_AR_RE = /^[ء-ٰٟ-ۓ]+(?: [ء-ٰٟ-ۓ]+){0,2}$/;
+const NAMES_MAX_PINS = 300;
+const NAMES_AUTO_SHOW = 15;
+const NAMES_SERIES_PREFIX = 'ARB2_snames_';
+let namesCur = null;
+let pendingNames = null;
+
+const namesSidOf = tok => {
+  const t = String(tok || '').trim();
+  if (/^tt\d+$/i.test(t)) return t.toLowerCase();
+  if (/^kitsu:\d+$/i.test(t)) return t.toLowerCase();
+  return null;
+};
+
+async function loadNamePins(sid) {
+  const r = await withTimeout(db.loadPins(sid), 4000).catch(() => null);
+  const v = r && r.ok && r.value && typeof r.value === 'object' ? r.value : {};
+  const clean = a => (Array.isArray(a) ? a.filter(x => typeof x === 'string' && x) : []);
+  return { p: clean(v.p), c: clean(v.c), ok: !!(r && r.ok) };
+}
+
+async function listAutoNames(sid, pinned) {
+  const out = { p: [], c: [] };
+  try {
+    const stored = await withTimeout(db.loadMap('names', NAMES_SERIES_PREFIX + sid), 4000);
+    const raw = stored && stored.has(1) ? JSON.parse(stored.get(1)) : null;
+    if (!raw || typeof raw !== 'object') return out;
+    const rows = [];
+    for (const [k, rec] of Object.entries(raw)) {
+      if (k === '~' || !rec || typeof rec !== 'object' || pinned.has(k)) continue;
+      const codes = Object.values(rec).filter(n => Number.isInteger(n));
+      if (codes.length < 2) continue;
+      const persons = codes.filter(n => n & 1).length;
+      rows.push({ k, n: codes.length, kind: persons * 2 >= codes.length ? 'p' : 'c' });
+    }
+    rows.sort((a, b) => b.n - a.n);
+    for (const r of rows) if (out[r.kind].length < NAMES_AUTO_SHOW) out[r.kind].push(r.k);
+  } catch (e) {}
+  return out;
+}
+
+const namesKeyboard = () => ({ inline_keyboard: [
+  [{ text: '➕ اسم شخص', callback_data: 'nm:p' }, { text: '➕ مكان / منظمة', callback_data: 'nm:c' }],
+  [{ text: '🗑 شيل اسم', callback_data: 'nm:d' }, { text: '🔄 غيّر المسلسل', callback_data: 'nm:s' }]
+] });
+
+async function namesViewText(sid, head) {
+  const pins = await loadNamePins(sid);
+  let title = null;
+  try { title = notify && notify.titleOf ? await withTimeout(notify.titleOf(sid, 'series'), 6000) : null; } catch (e) { title = null; }
+  const lines = [];
+  if (head && head.length) lines.push(...head, '');
+  lines.push(rtl('📖 أسماء المسلسل'));
+  lines.push(rtl(title ? latin(title) + ' ' + latin('(' + sid + ')') : latin(sid)));
+  lines.push('');
+  lines.push(rtl('🔒 المثبّتة (تنطبق من الحلقة الجاية):'));
+  lines.push(rtl('👤 الأسماء: ' + (pins.p.length ? pins.p.join(' · ') : '—')));
+  lines.push(rtl('📍 الأماكن والمنظمات: ' + (pins.c.length ? pins.c.join(' · ') : '—')));
+  const auto = await listAutoNames(sid, new Set([...pins.p, ...pins.c].map(bookKey)));
+  if (auto.p.length || auto.c.length) {
+    lines.push('');
+    lines.push(rtl('🤖 المكتشفة تلقائياً من الحلقات:'));
+    if (auto.p.length) lines.push(rtl('👤 ' + auto.p.join(' · ')));
+    if (auto.c.length) lines.push(rtl('📍 ' + auto.c.join(' · ')));
+  }
+  lines.push('');
+  lines.push(rtl('اضغط الزر وابعث الكلمة، وتنثبّت للحلقات القادمة.'));
+  return { text: lines.join('\n'), pins };
+}
+
+async function sendNamesView(chatId, sid, head) {
+  namesCur = { sid, at: Date.now() };
+  const v = await namesViewText(sid, head);
+  await tg('sendMessage', { chat_id: chatId, text: v.text, reply_markup: namesKeyboard(), disable_web_page_preview: true }).catch(() => {});
+}
+
+async function onNamesCmd(chatId, arg) {
+  pendingNames = null;
+  let sid = null;
+  const tok = String(arg || '').trim().split(/\s+/)[0];
+  if (tok) {
+    sid = namesSidOf(tok);
+    if (!sid) {
+      await tg('sendMessage', { chat_id: chatId, text: rtl('اكتب الأمر مع معرّف المسلسل، مثال:') + '\n' + latin('/names tt0409591') }).catch(() => {});
+      return;
+    }
+  } else {
+    const d = await loadLast();
+    const info = d && seriesInfoFromTarget(d.targetId);
+    if (!info) {
+      await tg('sendMessage', { chat_id: chatId, text: rtl(d ? 'آخر عمل اشتغلت عليه فلم، والأسماء المثبّتة للمسلسلات فقط.' : 'ما في مسلسل شغّلته بعد.') + '\n' + rtl('ابعث معرّف المسلسل مع الأمر، مثال:') + '\n' + latin('/names tt0409591') }).catch(() => {});
+      return;
+    }
+    sid = info.seriesId;
+  }
+  await sendNamesView(chatId, sid);
+}
+
+async function namesAsk(cq, mode) {
+  if (mode === 's') {
+    pendingNames = { mode, at: Date.now() };
+    await editMsg(cq.message, [rtl('🔄 ابعث معرّف المسلسل:'), latin('tt0409591'), rtl('أو لمسلسلات kitsu:'), latin('kitsu:123')].join('\n'), { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'nm:n' }]] });
+    return;
+  }
+  if (!namesCur) { await answerCb(cq, 'ابعث /names من جديد'); return; }
+  pendingNames = { mode, sid: namesCur.sid, at: Date.now() };
+  const what = mode === 'p' ? '👤 ابعث اسم الشخص' : '📍 ابعث اسم المكان أو المنظمة';
+  await editMsg(cq.message, [rtl(what), rtl('(ممكن أكثر من واحد، كل اسم بسطر)'), rtl('عربي فقط، لحد 3 كلمات للاسم الواحد.')].join('\n'), { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'nm:n' }]] });
+}
+
+async function showNamesDelete(cq) {
+  if (!namesCur) { await answerCb(cq, 'ابعث /names من جديد'); return; }
+  const pins = await loadNamePins(namesCur.sid);
+  const all = [...pins.p.map((w, i) => ({ w, k: 'p', i })), ...pins.c.map((w, i) => ({ w, k: 'c', i }))];
+  if (!all.length) { await answerCb(cq, 'ما في أسماء مثبّتة'); return; }
+  const rows = [];
+  all.slice(0, 40).forEach((x, j) => {
+    const b = { text: '🗑 ' + (x.k === 'p' ? '👤 ' : '📍 ') + x.w, callback_data: 'nm:x:' + x.k + ':' + x.i };
+    if (j % 2 === 0) rows.push([b]); else rows[rows.length - 1].push(b);
+  });
+  rows.push([{ text: 'رجوع', callback_data: 'nm:b' }]);
+  await editMsg(cq.message, rtl('اضغط على اللي تريد تشيل تثبيته:'), { inline_keyboard: rows });
+}
+
+async function onNamesCallback(cq) {
+  const m = /^nm:([pcdsnbx])(?::([pc]):(\d+))?$/.exec(String(cq.data || ''));
+  if (!m) { await answerCb(cq, 'خيار غير صالح'); return; }
+  const op = m[1];
+  await answerCb(cq);
+  if (op === 'n') { pendingNames = null; await editMsg(cq.message, rtl('تم الإلغاء، ما تغيّر شي.')); return; }
+  if (op === 'p' || op === 'c' || op === 's') { await namesAsk(cq, op); return; }
+  if (op === 'd') { pendingNames = null; await showNamesDelete(cq); return; }
+  if (!namesCur) { await editMsg(cq.message, rtl('انتهت صلاحية الرسالة، ابعث /names من جديد.')); return; }
+  if (op === 'x') {
+    const pins = await loadNamePins(namesCur.sid);
+    const list = m[2] === 'p' ? pins.p : pins.c;
+    const w = list[Number(m[3])];
+    if (w == null) { await showNamesDelete(cq); return; }
+    list.splice(Number(m[3]), 1);
+    const ok = await db.savePins(namesCur.sid, { p: pins.p, c: pins.c });
+    if (!ok) { await editMsg(cq.message, rtl('⚠️ ما انحفظ التعديل (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.')); return; }
+    const v = await namesViewText(namesCur.sid, [rtl('🗑 انشال التثبيت: ' + w)]);
+    await editMsg(cq.message, v.text, namesKeyboard());
+    return;
+  }
+  const v = await namesViewText(namesCur.sid);
+  await editMsg(cq.message, v.text, namesKeyboard());
+}
+
+async function onNamesText(chatId, text) {
+  const pn = pendingNames;
+  if (!pn) return false;
+  if (pn.mode === 's') {
+    const sid = namesSidOf(String(text).trim().split(/\s+/)[0]);
+    pendingNames = null;
+    if (!sid) return false;
+    await sendNamesView(chatId, sid);
+    return true;
+  }
+  if (!/[ء-ي]/.test(String(text))) { pendingNames = null; return false; }
+  const kind = pn.mode;
+  const pins = await loadNamePins(pn.sid);
+  if (!pins.ok) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ ما قدرت أقرأ الأسماء المثبّتة (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.') }).catch(() => {});
+    return true;
+  }
+  const same = kind === 'p' ? pins.p : pins.c;
+  const other = kind === 'p' ? pins.c : pins.p;
+  const added = [], moved = [], dup = [], bad = [];
+  for (const raw of latinDigits(String(text)).split(/\r?\n/)) {
+    const w = raw.replace(/["'“”«»()\[\]]/g, '').replace(/[ً-ٰٟـ]/g, '').replace(/\s+/g, ' ').trim();
+    if (!w) continue;
+    if (!NAMES_AR_RE.test(w) || bookKey(w).replace(/ /g, '').length < 2) { bad.push(raw.trim()); continue; }
+    const key = bookKey(w);
+    if (same.some(x => bookKey(x) === key)) { dup.push(w); continue; }
+    const oi = other.findIndex(x => bookKey(x) === key);
+    if (oi >= 0) { other.splice(oi, 1); moved.push(w); } else added.push(w);
+    same.push(w);
+  }
+  if (pins.p.length + pins.c.length > NAMES_MAX_PINS) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ وصلت الحد الأعلى للأسماء المثبّتة (' + NAMES_MAX_PINS + ').') }).catch(() => {});
+    pendingNames = null;
+    return true;
+  }
+  const head = [];
+  const icon = kind === 'p' ? '👤' : '📍';
+  if (added.length || moved.length) {
+    const ok = await db.savePins(pn.sid, { p: pins.p, c: pins.c });
+    if (!ok) {
+      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ ما انحفظ (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.') }).catch(() => {});
+      return true;
+    }
+    head.push(rtl('✅ تثبّت للحلقات القادمة'));
+    for (const w of [...added, ...moved]) head.push(rtl(icon + ' ' + w));
+    if (moved.length) head.push(rtl('(' + moved.length + ' منها انتقل من القسم الثاني)'));
+  } else if (!bad.length) {
+    head.push(rtl('ما في جديد، الأسماء هذي مثبّتة أصلاً بهذا القسم.'));
+  } else {
+    head.push(rtl('⚠️ ما انثبّت شي.'));
+  }
+  if (bad.length) head.push(rtl('⚠️ تجاهلت (عربي فقط، لحد 3 كلمات): ' + bad.join(' ، ')));
+  pendingNames = (added.length || moved.length || dup.length) ? null : pn;
+  await sendNamesView(chatId, pn.sid, head);
+  return true;
 }
 
 async function getMeta(imdb) {
@@ -1684,6 +1891,7 @@ async function handleUpdate(u) {
     if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
     if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
     if (cq && /^pg:/.test(data)) return await onPurgeCallback(cq);
+    if (cq && /^nm:/.test(data)) return await onNamesCallback(cq);
     if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
     if (cq) return await onPanelCallback(cq);
     const text = String((u.message && u.message.text) || '').trim();
@@ -1691,6 +1899,9 @@ async function handleUpdate(u) {
       const pr = parsePurgeDates(text);
       if (pr) { await onPurgeDates(chatId, pr); return; }
     }
+    const nmc = /^\/names(?:@\w+)?(?:\s+(.*))?$/i.exec(text);
+    if (nmc) { await onNamesCmd(chatId, nmc[1] || ''); return; }
+    if (pendingNames && Date.now() - pendingNames.at < PENDING_TTL_MS && !/^\//.test(text)) { if (await onNamesText(chatId, text)) return; }
     const rq = parseRequest(text);
     const fq = rq ? null : parseFind(text);
     const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
@@ -1719,7 +1930,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
