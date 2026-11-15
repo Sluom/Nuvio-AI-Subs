@@ -256,4 +256,32 @@ async function stats() {
   return primary || tracks ? { primary, tracks } : null;
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink };
+// مسح بنطاق تاريخ (آخر تحديث): 'translations' = ترجمات الحساب الأساسي (كاش الأسطر + نتائج التراكات المترجمة فقط)
+// 'tracks' = ملفات التراكات الخام بحساب التراكات. أي شي ثاني ما يتمس. dryRun = عدّ بدون حذف.
+async function purgeRange(kind, from, to, dryRun) {
+  const range = { $gte: from, $lt: to };
+  const out = { docs: 0, maps: 0 };
+  const run = async (coll, filter) => {
+    if (dryRun) return await coll.countDocuments(filter);
+    const r = await coll.deleteMany(filter);
+    return (r && r.deletedCount) || 0;
+  };
+  try {
+    if (kind === 'tracks') {
+      const d = await getTracksDb();
+      if (!d) return null;
+      out.docs = await run(d.collection('docs'), { ns: RAW_NS, updatedAt: range });
+    } else {
+      const d = await getPrimaryDb();
+      if (!d) return null;
+      out.docs = await run(d.collection('docs'), { ns: 'job', 'value.content': { $exists: true }, updatedAt: range });
+      out.maps = await run(d.collection('maps'), { ns: 'line', updatedAt: range });
+    }
+    return out;
+  } catch (e) {
+    console.log(`[MongoDB] فشل المسح بالتاريخ (${kind}): ${e.message}`);
+    return null;
+  }
+}
+
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange };
