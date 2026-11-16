@@ -33,6 +33,7 @@ const ELLIPSIS_AUTO = true;
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
 const ASS_FONT_PCT = 7.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
+const ASS_MARGIN_V_PCT = 15;         // رفع الترجمة عن الحافة السفلية = PlayResY × هذي النسبة %. (القيمة هي المسافة من أسفل الشاشة لأسفل النص). 0 = ما ينلمس. جرّب بين 10 و20
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
 const ASS_MAIN_MIN_SHARE = 0.5;      // أقل حصة من أسطر الحوار لازم تغطيها مجموعة الستايلات ذات الحجم الواحد حتى ينكبر الملف (0.5 = 50%)
@@ -1068,6 +1069,17 @@ function applyAssFontSize(lines) {
     return { from: n, to };
   };
   const iBold = fmt.indexOf('bold');
+  const iAlign = fmt.indexOf('alignment'), iMv = fmt.indexOf('marginv');
+  const applyMargin = entry => {
+    if (!(ASS_MARGIN_V_PCT > 0) || iAlign < 0 || iMv < 0 || iAlign >= entry.vals.length || iMv >= entry.vals.length) return null;
+    const al = parseInt(entry.vals[iAlign], 10);
+    if (![1, 2, 3].includes(al)) return null;
+    const from = parseFloat(entry.vals[iMv]);
+    const to = Math.round(playResY * ASS_MARGIN_V_PCT / 100);
+    if (!(to > 0) || from === to) return null;
+    entry.vals[iMv] = lead(entry.vals[iMv]) + String(to);
+    return { from: isFinite(from) ? from : 0, to };
+  };
   const restyle = entry => {
     const r = { outline: null, shadow: null, bold: null };
     if (ASS_SCALE_OUTLINE) r.outline = scale(entry, iOut, ASS_OUTLINE_AMOUNT);
@@ -1080,7 +1092,8 @@ function applyAssFontSize(lines) {
     return r;
   };
   const main = restyle(st);
-  if (!sizeChanged && !main.bold) return fail(`الستايل ${top} حجمه أصلاً ${oldSize} (نفس الهدف، PlayResY=${playResY})`);
+  const marginMain = applyMargin(st);
+  if (!sizeChanged && !main.bold && !marginMain) return fail(`الستايل ${top} حجمه أصلاً ${oldSize} (نفس الهدف، PlayResY=${playResY})`);
   lines[st.i] = st.prefix + st.vals.join(',');
   const others = [];
   if (ASS_SCALE_OTHER_STYLES) {
@@ -1093,11 +1106,12 @@ function applyAssFontSize(lines) {
       if (parseFloat(sv.vals[iSize]) !== oldSize) continue;
       const before = sv.vals.join(',');
       restyle(sv);
+      applyMargin(sv);
       if (sv.vals.join(',') !== before) { lines[sv.i] = sv.prefix + sv.vals.join(','); others.push(nm); }
     }
   }
   const { outline, shadow, bold } = main;
-  return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, bold, others, share: topN / total });
+  return Object.assign(info, { changed: true, style: top, from: oldSize, to: target, playResY, usedFallback, outline, shadow, bold, margin: marginMain, others, share: topN / total });
 }
 function rebuildAss(parsed, texts) {
   const out = parsed.lines.slice();
