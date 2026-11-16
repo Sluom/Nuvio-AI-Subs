@@ -16,6 +16,7 @@ const DEFS = {
   ass_slots: { env: 'ASS_SLOTS', fromEnv: trimEnv, def: '' },
   srt_slots: { env: 'SRT_SLOTS', fromEnv: trimEnv, def: '' },
   search_model: { env: 'SEARCH_GEMINI_MODEL', fromEnv: trimEnv, def: '' },
+  serpapi_key: { env: 'SERPAPI_KEY', fromEnv: trimEnv, def: '' },
   search_grounding: { env: 'SEARCH_GROUNDING', fromEnv: v => /^(1|true|yes|on)$/i.test(trimEnv(v)), def: false },
   filler_skip: { env: 'FILLER_SKIP', fromEnv: v => v !== '0', def: true },
   show_ai_always: { env: 'SHOW_AI_ALWAYS', fromEnv: v => v === '1', def: false }
@@ -48,6 +49,10 @@ function validate(key, value) {
   if (key === 'search_model') {
     const v = trimEnv(value);
     return /^[A-Za-z0-9._\-\/]{0,80}$/.test(v) ? { ok: true, value: v } : { ok: false };
+  }
+  if (key === 'serpapi_key') {
+    const v = trimEnv(value);
+    return /^[A-Za-z0-9_\-]{0,128}$/.test(v) ? { ok: true, value: v } : { ok: false };
   }
   return { ok: true, value: !!value };
 }
