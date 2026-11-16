@@ -2057,9 +2057,205 @@ function settingsText() {
   L.push(rtl('المواقع: ') + latin(SRT_CHOICES.join(', ')));
   return L.join('\n');
 }
-
 function settingsKeyboard() {
   const slots = currentSlots();
   const srtSlots = currentSlots('srt_slots');
   const model = String(settings.get('search_model') || '').trim();
-  const tgl = (label, v, op)
+  const tgl = (label, v, op) => ({ text: label + ': ' + (v ? 'شغّال' : 'مطفأ'), callback_data: 'st:' + op });
+  const rows = [];
+  rows.push(slots.map((n, i) => ({ text: (i + 1) + ': ' + slotLabel(n), callback_data: 'st:s:' + i })));
+  rows.push([{ text: '↩️ ترتيب ASS الافتراضي', callback_data: 'st:sd' }]);
+  rows.push(srtSlots.map((n, i) => ({ text: 'SRT ' + (i + 1) + ': ' + slotLabel(n), callback_data: 'st:r:' + i })));
+  rows.push([{ text: '↩️ ترتيب SRT الافتراضي', callback_data: 'st:rd' }]);
+  const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
+  rows.push(mp.slice(0, 2), mp.slice(2));
+  rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
+  rows.push([tgl('⏭ تخطي الحشو', settings.get('filler_skip'), 'f'), tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
+  return { inline_keyboard: rows };
+}
+
+async function sendSettings(chatId) {
+  await tg('sendMessage', { chat_id: chatId, text: settingsText(), reply_markup: settingsKeyboard(), disable_web_page_preview: true });
+}
+
+async function onSettingsCallback(cq) {
+  const parts = String(cq.data || '').split(':');
+  const op = parts[1];
+  const arg = parts[2];
+  let r = null;
+  let note = 'تم ✅';
+  if (op === 's') {
+    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
+    const cur = currentSlots().map(x => (SLOT_CHOICES.includes(x) ? x : 'any'));
+    cur[i] = SLOT_CHOICES[(SLOT_CHOICES.indexOf(cur[i]) + 1) % SLOT_CHOICES.length];
+    r = await settings.set('ass_slots', cur.join(','));
+  } else if (op === 'r') {
+    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
+    const cur = currentSlots('srt_slots').map(x => (SRT_CHOICES.includes(x) ? x : 'any'));
+    cur[i] = SRT_CHOICES[(SRT_CHOICES.indexOf(cur[i]) + 1) % SRT_CHOICES.length];
+    r = await settings.set('srt_slots', cur.join(','));
+  } else if (op === 'rd') {
+    r = await settings.clear('srt_slots');
+  } else if (op === 'sd') {
+    r = await settings.clear('ass_slots');
+  } else if (op === 'm') {
+    const m = MODEL_PRESETS[clamp(parseInt(arg, 10) || 0, 0, MODEL_PRESETS.length - 1)];
+    r = await settings.set('search_model', m.id);
+  } else if (op === 'g') {
+    r = await settings.set('search_grounding', !settings.get('search_grounding'));
+  } else if (op === 'f') {
+    r = await settings.set('filler_skip', !settings.get('filler_skip'));
+  } else if (op === 'a') {
+    r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
+  } else {
+    await answerCb(cq);
+    return;
+  }
+  if (r && r.ok && r.saved === false) note = '⚠️ اشتغل لكن ما انحفظ بالقاعدة (يرجع للقديم بعد إعادة التشغيل)';
+  await editMsg(cq.message, settingsText(), settingsKeyboard());
+  await answerCb(cq, note);
+}
+
+async function onSlotsCmd(chatId, arg, key = 'ass_slots') {
+  const choices = key === 'srt_slots' ? SRT_CHOICES : SLOT_CHOICES;
+  if (!arg) { await sendSettings(chatId); return; }
+  if (/^(default|reset|افتراضي)$/i.test(arg)) {
+    await settings.clear(key);
+  } else {
+    const r = await settings.set(key, arg);
+    if (!r.ok) {
+      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ أسماء غير معروفة: ') + latin((r.bad || []).join(', ') || arg) + '\n' + rtl('المسموح: ') + latin(choices.join(', ')) });
+      return;
+    }
+  }
+  await sendSettings(chatId);
+}
+
+let searchBusy = false;
+let lastSearch = Promise.resolve();
+
+function startSearch(fn) {
+  if (searchBusy) return false;
+  searchBusy = true;
+  lastSearch = Promise.resolve().then(fn).catch(e => logErr('خطأ بالبحث', e)).finally(() => { searchBusy = false; });
+  return true;
+}
+
+const SEARCH_BUSY_TEXT = '⏳ في بحث شغال هسة، انتظر ينتهي وبعدها ابعث الجديد.';
+
+async function handleUpdate(u) {
+  try {
+    const cq = u && u.callback_query;
+    const msg = cq ? cq.message : (u && u.message);
+    const chatId = msg && msg.chat && msg.chat.id;
+    if (chatId == null || String(chatId) !== TG_CHAT) return;
+    const data = String((cq && cq.data) || '');
+    if (cq && /^go:/.test(data)) return await onGoCallback(cq);
+    if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
+    if (cq && /^fs:/.test(data)) {
+      if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);
+      return;
+    }
+    if (cq && /^st:/.test(data)) return await onSettingsCallback(cq);
+    if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
+    if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
+    if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
+    if (cq && /^pg:/.test(data)) return await onPurgeCallback(cq);
+    if (cq && /^nm:/.test(data)) return await onNamesCallback(cq);
+    if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
+    if (cq) return await onPanelCallback(cq);
+    const text = String((u.message && u.message.text) || '').trim();
+    const mm = u.message;
+    const isImg = !!(mm && ((Array.isArray(mm.photo) && mm.photo.length) || (mm.document && IMAGE_MIMES.test(String(mm.document.mime_type || '')))));
+    if (isImg) {
+      if (!startSearch(() => onImage(chatId, mm))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {});
+      return;
+    }
+    const skc = serpKeyCmd(text);
+    if (skc !== null) { await onSerpKeyCmd(chatId, skc, mm && mm.message_id); return; }
+    const acc = actorCmd(text);
+    if (acc !== null) {
+      if (!startSearch(() => onActor(chatId, acc))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {});
+      return;
+    }
+    if (pendingPurge && Date.now() - pendingPurge.at < PENDING_TTL_MS) {
+      const pr = parsePurgeDates(text);
+      if (pr) { await onPurgeDates(chatId, pr); return; }
+    }
+    const nmc = /^\/names(?:@\w+)?(?:\s+(.*))?$/i.exec(text);
+    if (nmc) { await onNamesCmd(chatId, nmc[1] || ''); return; }
+    if (pendingNames && Date.now() - pendingNames.at < PENDING_TTL_MS && !/^\//.test(text)) { if (await onNamesText(chatId, text)) return; }
+    const rq = parseRequest(text);
+    const fq = rq ? null : parseFind(text);
+    const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
+    const po = pendingOrder && Date.now() - pendingOrder.at < PENDING_TTL_MS;
+    if (rq && po) await onOrderTarget(chatId, rq);
+    else if (rq) { pendingEp = null; await onRequest(chatId, rq, takeCount()); }
+    else if (fq) { if (!startSearch(() => onFind(chatId, fq.q))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
+    else if (er) await onEpisodeReply(chatId, er);
+    else if (slotsCmd(text) !== null) await onSlotsCmd(chatId, slotsCmd(text));
+    else if (srtSlotsCmd(text) !== null) await onSlotsCmd(chatId, srtSlotsCmd(text), 'srt_slots');
+    else if (isSettingsCmd(text)) await sendSettings(chatId);
+    else if (isBatchCmd(text)) await askCount(chatId);
+    else if (isOrderCmd(text)) await askOrder(chatId);
+    else if (isPurgeCmd(text)) await askPurge(chatId);
+    else if (isStopCmd(text)) await stopBatch(chatId);
+    else if (isClearCmd(text)) await sendAskClear(chatId);
+    else if (isStartCmd(text)) await tg('sendMessage', { chat_id: chatId, text: [rtl('أهلاً 👋 الأوامر المتاحة:'), rtl('/find ابحث عن فلم أو مسلسل'), rtl('🖼 ابعث صورة (بوستر أو لقطة) أعرف شنو العمل'), rtl('/actor أعمال ممثل'), rtl('/serpkey مفتاح SerpApi (Lens)'), rtl('/settings الإعدادات'), rtl('/clear امسح ترجمة آخر حلقة'), rtl('/batch جهّز دفعة حلقات'), rtl('/order امسح ترتيب تراكات حلقة'), rtl('/stop أوقف الدفعة الشغالة')].join('\n') });
+    else if (isPlainSearchText(text)) { if (!startSearch(() => onFind(chatId, text))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
+  } catch (e) {
+    logErr('خطأ بمعالجة أمر', e);
+  }
+}
+
+let running = false;
+let stopped = false;
+
+async function loop() {
+  let offset = 0, fails = 0, drained = false;
+  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'actor', description: 'أعمال ممثل بالاسم' }, { command: 'serpkey', description: 'مفتاح SerpApi (Lens) للبحث بالصورة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }] }).catch(() => {});
+  while (!stopped) {
+    try {
+      if (!drained) {
+        const first = await tg('getUpdates', { offset: -1, limit: 1, timeout: 0 }, 10000, false);
+        if (Array.isArray(first) && first.length) offset = first[first.length - 1].update_id + 1;
+        drained = true;
+        fails = 0;
+        continue;
+      }
+      const ups = await tg('getUpdates', { offset, timeout: POLL_SEC, allowed_updates: ['message', 'callback_query'] }, (POLL_SEC + 10) * 1000, false);
+      fails = 0;
+      if (Array.isArray(ups)) {
+        for (const u of ups) {
+          offset = Math.max(offset, u.update_id + 1);
+          await handleUpdate(u);
+        }
+      }
+    } catch (e) {
+      fails++;
+      if (e && e.status === 409) logErr('تعارض: نسخة ثانية أو webhook يسأل نفس البوت', e);
+      else if (e && e.status === 401) logErr('الرمز غير صحيح', e);
+      else logErr('تعذر الاستماع', e);
+      await sleep(e && e.status === 409 ? 5000 : e && e.status === 401 ? 60000 : Math.min(30000, 1000 * Math.pow(2, Math.min(fails, 5))));
+    }
+  }
+  running = false;
+}
+
+function start() {
+  if (!ENABLED || running) return;
+  running = true;
+  stopped = false;
+  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /find أو /clear.');
+  startDbWatch();
+  loop().catch(() => { running = false; });
+}
+
+function stop() { stopped = true; }
+
+loadCtx().catch(() => {});
+
+module.exports = {
+  start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
+  _t: { sendSettings, onSettingsCallback, onSlotsCmd, settingsText, settingsKeyboard, currentSlots, handleUpdate, keyOf, hashOf, panels, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
+};
