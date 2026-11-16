@@ -534,13 +534,24 @@ function applyPins(book, pins) {
   const places = Array.isArray(pins.c) ? pins.c : [];
   if (!persons.length && !places.length) return book;
   if (!book) { book = makeBook(new Map()); book.complete = false; }
+  const variants = [];
   for (const [list, kind] of [[persons, 'person'], [places, 'entity']]) {
     for (const w of list) {
       if (typeof w !== 'string') continue;
       const k = bookKey(w);
       if (!k || k.split(' ').length > 3) continue;
       book.map.set(k, { kind, ambig: false, pinned: true });
+      // الكلمة المفردة تنثبّت بشكلين: بـ"ال" التعريف وبدونها (العبارات من أكثر من كلمة تبقى كما كتبها)
+      if (!k.includes(' ')) {
+        if (k.startsWith('ال')) { if (k.length - 2 >= 3) variants.push([k.slice(2), kind]); }
+        else variants.push(['ال' + k, kind]);
+      }
     }
+  }
+  for (const [vk, kind] of variants) {
+    const ex = book.map.get(vk);
+    if (ex && ex.pinned) continue; // تثبيت صريح من المستخدم يغلب النسخة التلقائية
+    book.map.set(vk, { kind, ambig: false, pinned: true });
   }
   book.size = book.map.size;
   return book;
