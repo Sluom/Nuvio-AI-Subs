@@ -10,6 +10,7 @@ try { filler = require('./filler'); } catch (e) { filler = null; }
 let shared = null;
 try { shared = require('./ai').shared; } catch (e) { shared = null; }
 const settings = require('./settings');
+const imageSearch = require('./imageSearch');
 const { seriesInfoFromTarget, bookKey } = require('./name-book');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -1336,7 +1337,7 @@ const GROUNDING_QUOTA_COOLDOWN_MS = 20 * 60 * 1000;
 let groundingBlockedUntil = 0;
 const groundingBlockedMin = () => Math.max(0, Math.ceil((groundingBlockedUntil - Date.now()) / 60000));
 
-async function searchGemini({ prompt, deadline, wantJson, grounding, temperature, thinking }) {
+async function searchGemini({ prompt, deadline, wantJson, grounding, temperature, thinking, image }) {
   const S = shared;
   if (!S || !S.acquireKey || !S.axios) return { err: 'nocfg' };
   const ks = await searchKeys();
@@ -1352,7 +1353,9 @@ async function searchGemini({ prompt, deadline, wantJson, grounding, temperature
     const key = await S.acquireKey(ks.keys, Math.min(8000, remaining));
     if (!key) return { err: 'busy', why };
     const variants = genVariants(model, wantJson, grounded, temperature == null ? 0.2 : temperature);
-    const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: variants[Math.min(vi, variants.length - 1)], safetySettings: S.SAFETY_SETTINGS_OFF };
+    const parts = [{ text: prompt }];
+    if (image && image.data) parts.push({ inlineData: { mimeType: image.mime || 'image/jpeg', data: image.data } });
+    const body = { contents: [{ parts }], generationConfig: variants[Math.min(vi, variants.length - 1)], safetySettings: S.SAFETY_SETTINGS_OFF };
     if (grounded) body.tools = [{ google_search: {} }];
     try {
       const r = await S.axios.post(url, body, {
@@ -1440,8 +1443,7 @@ async function freeSearch(p) {
 
 async function understand(raw, p, deadline) {
   const env = searchEnv();
-  const curYear = new Date().getFullYear();
-  const hints = [p.kind ? 'type=' + p.kind : '', p.year ? 'year=' + p.year : ''].filter(Boolean).join(', ');
+  const hints =[p.kind ? 'type=' + p.kind : '', p.year ? 'year=' + p.year : ''].filter(Boolean).join(', ');
   const prompt = [
     'You are the search engine of a movie / TV series / anime lookup bot. The user wrote the message below in Arabic or English. It may contain typos, a partial title, a transliterated title, or a description from memory (plot, scenes, characters, actors, country, era).',
     'Task: identify up to ' + SMART_MAX + ' movies, TV series or anime this message most likely refers to, best match first.',
@@ -1465,7 +1467,13 @@ async function understand(raw, p, deadline) {
   if (!r.text) return { err: r.err || 'empty', why: r.why || '' };
   const j = extractJson(r.text);
   if (!j || typeof j !== 'object') return { err: 'empty' };
-  const arr = Array.isArray(j) ? j : (Array.isArray(j.candidates) ? j.candidates : []);
+  const cands = candsFromJson(j);
+  return { mode: j.mode === 'description' ? 'description' : 'title', vague: !!j.vague || !cands.length, cands: cands.slice(0, SMART_MAX), grounded: !!r.grounded };
+}
+
+function candsFromJson(j) {
+  const curYear = new Date().getFullYear();
+  const arr = Array.isArray(j) ? j : (j && Array.isArray(j.candidates) ? j.candidates : []);
   const seen = new Set();
   const cands = [];
   for (const c of arr) {
@@ -1477,10 +1485,10 @@ async function understand(raw, p, deadline) {
     if (seen.has(key)) continue;
     seen.add(key);
     const conf = Number(c.confidence);
-    cands.push({ title, original: cleanTitle(c.original_title), year, type: c.type === 'movie' || c.type === 'series' ? c.type : '', confidence: Number.isFinite(conf) ? clamp(conf, 0, 100) : 50 });
+    cands.push({ title, original: cleanTitle(c.original_title), year, type: c.type === 'movie' || c.type === 'series' ? c.type : '', confidence: Number.isFinite(conf) ? clamp(conf, 0, 100) : 50, why: trunc(String(c.why || '').replace(/\s+/g, ' ').trim(), 70) });
   }
   cands.sort((a, b) => b.confidence - a.confidence);
-  return { mode: j.mode === 'description' ? 'description' : 'title', vague: !!j.vague || !cands.length, cands: cands.slice(0, SMART_MAX), grounded: !!r.grounded };
+  return cands;
 }
 
 async function resolveCandidate(c) {
@@ -1575,13 +1583,15 @@ async function showResults(chatId, o) {
   const desc = smart && mode === 'description';
   const tags = [{ movie: 'فلم', series: 'مسلسل', anime: 'أنمي' }[p.kind] || '', p.year ? String(p.year) : ''].filter(Boolean);
   const out = [];
-  if (desc) out.push(rtl('🧠 رشحت لك حسب وصفك (الأقرب أول):'));
+  if (o.header) out.push(rtl(o.header));
+  else if (desc) out.push(rtl('🧠 رشحت لك حسب وصفك (الأقرب أول):'));
   else out.push(rtl('🔎 نتائج ' + latin('«' + (smart && hasArabic(p.name) ? items[0].name : p.name) + '»') + (tags.length ? ' (' + tags.join(' · ') + ')' : '')));
   if (smart && !desc && hasArabic(p.name) && p.name.length <= 40) out.push(rtl('🌐 ' + p.name + ' ← ' + latin(items[0].name)));
   if (o.yearMiss) out.push(rtl('ما لقيت بسنة ' + p.year + '، هذي أقرب النتائج:'));
   if (o.note) out.push(rtl(o.note));
+  if (o.sources) out.push(rtl(o.sources));
   if (desc) {
-    items.forEach((x, i) => out.push(rtl((i + 1) + '. ' + (x.score >= 75 ? '✅' : x.score >= 50 ? '🔸' : '▫️') + ' ' + latin(x.name + (x.year ? ' (' + x.year + ')' : '')) + (x.why ? ' — ' + x.why : ''))));
+    items.forEach((x, i) => out.push(rtl((i + 1) + '. ' + (x.score >= 75 ? '✅' : x.score >= 50 ? '🔸' : '▫️') + ' ' + latin(x.name + (x.year ? ' (' + x.year + ')' : '')) + (x.why ? ' — ' + (hasArabic(x.why) ? x.why : latin(x.why)) : ''))));
     out.push(rtl('✅ قوي · 🔸 محتمل · ▫️ ضعيف'));
   }
   out.push(rtl('🎬 فلم · 📺 مسلسل. اختر العمل الصحيح:'));
@@ -1720,6 +1730,265 @@ async function onSmartCallback(cq) {
   await runSearch(cq.message.chat.id, f.raw, { forceSmart: true });
 }
 
+// ===== البحث بالصورة: Lens (SerpApi) + trace.moe بالتوازي ← طلب جمناي واحد (الصورة + الأدلة + وصفك) =====
+const IMAGE_MAX_BYTES = 15 * 1024 * 1024;
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 20000;
+const IMAGE_GEMINI_BUDGET_MS = 40000;
+const IMAGE_CAPTION_MAX = 300;
+const IMAGE_MIMES = /^image\/(jpeg|png|webp|heic|heif)$/i;
+const MERGE_SIM = 0.85;
+
+function imageOf(m) {
+  if (!m) return null;
+  if (m.video || m.animation || m.video_note) return { unsupported: true };
+  if (Array.isArray(m.photo) && m.photo.length) {
+    const area = p => (p.width || 0) * (p.height || 0);
+    const sizes = m.photo.slice().sort((a, b) => area(a) - area(b));
+    const main = sizes[sizes.length - 1];
+    const fits = p => (p.file_size ? p.file_size <= imageSearch.LENS_MAX_BYTES : (p.width || 0) <= 800);
+    const small = main && fits(main) ? null : sizes.slice().reverse().find(fits);
+    return { main: main.file_id, lens: small ? small.file_id : null, mime: 'image/jpeg' };
+  }
+  const d = m.document;
+  if (d && IMAGE_MIMES.test(String(d.mime_type || ''))) {
+    const th = d.thumbnail || d.thumb;
+    const small = d.file_size && d.file_size > imageSearch.LENS_MAX_BYTES && th ? th.file_id : null;
+    return { main: d.file_id, lens: small, mime: String(d.mime_type).toLowerCase(), size: d.file_size || 0 };
+  }
+  return null;
+}
+
+async function tgDownload(fileId, maxBytes) {
+  const f = await tg('getFile', { file_id: fileId });
+  if (!f || !f.file_path) throw new Error('getFile');
+  if (f.file_size && f.file_size > maxBytes) throw new Error('big');
+  try {
+    const r = await axios.get('https://api.telegram.org/file/bot' + TG_TOKEN + '/' + f.file_path, { responseType: 'arraybuffer', timeout: IMAGE_DOWNLOAD_TIMEOUT_MS, maxContentLength: maxBytes });
+    return Buffer.from(r.data);
+  } catch (e) {
+    throw new Error(scrub(e && e.message));
+  }
+}
+
+function mergeImageCands(gemini, trace) {
+  const out = gemini.map(c => Object.assign({}, c));
+  for (const t of trace) {
+    const hit = out.find(c => titleSim(c.title, t.title) >= MERGE_SIM);
+    if (hit) {
+      hit.confidence = clamp(Math.max(hit.confidence, t.confidence) + 5, 0, 100);
+      hit.why = (hit.why ? hit.why + ' · ' : '') + t.why;
+      if (!hit.year && t.year) hit.year = t.year;
+    } else {
+      out.push(Object.assign({}, t));
+    }
+  }
+  out.sort((a, b) => b.confidence - a.confidence);
+  return out.slice(0, SMART_MAX);
+}
+
+async function onImage(chatId, m) {
+  const send = (text, markup) => tg('sendMessage', { chat_id: chatId, text, reply_markup: markup, disable_web_page_preview: true });
+  let waitId = 0;
+  const clearWait = async () => {
+    if (!waitId) return;
+    const id = waitId;
+    waitId = 0;
+    await tg('deleteMessage', { chat_id: chatId, message_id: id }).catch(() => {});
+  };
+  try {
+    pendingEp = null;
+    const im = imageOf(m);
+    if (!im || im.unsupported) return;
+    const caption = String(m.caption || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/^\/find(?:@\w+)?\s*/i, '').replace(/\s+/g, ' ').trim().slice(0, IMAGE_CAPTION_MAX);
+    const wait = await send(rtl('🖼 جاري تحليل الصورة (Lens + trace.moe + جمناي)...'));
+    waitId = (wait && wait.message_id) || 0;
+
+    let main;
+    try {
+      main = await tgDownload(im.main, IMAGE_MAX_BYTES);
+    } catch (e) {
+      await clearWait();
+      await send(rtl(e && e.message === 'big' ? '⚠️ الصورة كبيرة (أكثر من 15MB)، صغّرها وابعثها.' : '⚠️ ما كدرت أنزّل الصورة من تلغرام، ابعثها مرة ثانية.'));
+      return;
+    }
+    let lensBuf = main.length <= imageSearch.LENS_MAX_BYTES ? main : null;
+    if (!lensBuf && im.lens) lensBuf = await tgDownload(im.lens, imageSearch.LENS_MAX_BYTES).catch(() => null);
+    const serpKey = String(settings.get('serpapi_key') || '').trim();
+    const ev = await imageSearch.gather({ buf: main, mime: im.mime, lensBuf, lensMime: lensBuf === main ? im.mime : 'image/jpeg', serpKey });
+    if (ev.lens && ev.lens.err) console.log('[بحث صورة] Lens فشل: ' + ev.lens.err);
+    if (ev.trace && ev.trace.err) console.log('[بحث صورة] trace.moe فشل: ' + ev.trace.err);
+
+    const ks = (await withTimeout(searchKeys(), 4000)) || { keys: [], err: 'nocfg' };
+    const canSmart = ks.keys.length > 0;
+    let gCands = [];
+    let gerr = '';
+    if (canSmart) {
+      const prompt = imageSearch.buildPrompt({ caption, lens: ev.lens, trace: ev.trace, maxCands: SMART_MAX, today: new Date().toISOString().slice(0, 10) });
+      const r = await searchGemini({ prompt, deadline: Date.now() + IMAGE_GEMINI_BUDGET_MS, wantJson: true, grounding: true, temperature: 0.2, thinking: '', image: { mime: im.mime, data: main.toString('base64') } });
+      const j = r.text ? extractJson(r.text) : null;
+      if (j && typeof j === 'object') gCands = candsFromJson(j);
+      else gerr = r.err || 'empty';
+      if (gerr) console.log('[بحث صورة] جمناي فشل: ' + gerr + (r.why ? ' | ' + r.why : ''));
+    }
+    const cands = mergeImageCands(gCands, imageSearch.traceCands(ev.trace, cleanTitle));
+    const sm = imageSearch.summary(ev);
+    const srcLine = '🧩 جمناي ' + (!canSmart ? '⛔' : gerr ? '⚠️' : '✅') + ' · Lens ' + sm.L + ' · trace.moe ' + sm.T;
+    console.log('[بحث صورة] Lens=' + sm.L + ' | trace=' + sm.T + ' | جمناي=' + (canSmart ? (gerr ? 'فشل' : gCands.length + ' مرشح') : 'بدون مفاتيح') + ' | بعد الدمج=' + cands.length);
+
+    if (!cands.length) {
+      await clearWait();
+      if (!canSmart) { await send(rtl('⚠️ ' + SMART_FAIL[ks.err === 'nocfg' ? 'nocfg' : 'nokeys'])); return; }
+      await send([rtl('🖼 ما كدرت أحدد العمل من هذي الصورة.'), rtl(srcLine), rtl('جرّب لقطة أوضح، أو ابعثها ومعها وصف (نص من الحوار، البلد، النوع، السنة) بالكابشن.')].join('\n'));
+      return;
+    }
+    const resolvedAll = (await Promise.all(cands.map(async c => {
+      const x = await resolveCandidate(c);
+      return x ? Object.assign(x, { why: c.why }) : null;
+    }))).filter(Boolean);
+    const byId = new Map();
+    for (const x of resolvedAll) if (!byId.has(x.id) || byId.get(x.id).c1 < x.c1) byId.set(x.id, x);
+    const items = [...byId.values()].sort((a, b) => b.c1 - a.c1).slice(0, SMART_MAX).map(x => Object.assign(x, { score: clamp(Math.round(x.c1), 0, 100) }));
+    if (!items.length) {
+      await clearWait();
+      await send([rtl('رشحت هذي الأعمال، بس ما لقيتها بـ Cinemeta:'), ...cands.map(c => rtl('• ' + latin(c.title + (c.year ? ' (' + c.year + ')' : '')))), rtl(srcLine)].join('\n'));
+      return;
+    }
+    await clearWait();
+    await showResults(chatId, { items, p: { name: caption || 'image', kind: '', year: 0 }, raw: caption || 'image', smart: true, canSmart: false, mode: 'description', header: '🖼 رشحت لك من الصورة (الأقرب أول):', sources: srcLine });
+  } catch (e) {
+    logErr('خطأ بالبحث بالصورة', e);
+    await clearWait();
+    try { await send(rtl('⚠️ صار خطأ أثناء تحليل الصورة، جرّب مرة ثانية.')); } catch (e2) {}
+  }
+}
+
+const serpKeyCmd = t => { const m = /^\/serpkey(?:@\w+)?(?:\s+(\S+))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
+const maskKey = k => (k ? '…' + String(k).slice(-4) : '');
+
+async function onSerpKeyCmd(chatId, arg, msgId) {
+  const send = text => tg('sendMessage', { chat_id: chatId, text }).catch(() => {});
+  const cur = String(settings.get('serpapi_key') || '').trim();
+  if (!arg) {
+    await send(cur
+      ? rtl('🖼 مفتاح SerpApi (Lens) شغّال ✅ ') + latin(maskKey(cur)) + '\n' + rtl('للتغيير: ') + latin('/serpkey KEY') + rtl(' وللمسح: ') + latin('/serpkey off')
+      : rtl('🖼 Lens غير مفعّل ⛔ (البحث بالصورة يشتغل بجمناي و trace.moe فقط).') + '\n' + rtl('لتفعيله ابعث: ') + latin('/serpkey KEY'));
+    return;
+  }
+  if (/^(off|clear|مسح|حذف|ايقاف)$/i.test(arg)) {
+    await settings.clear('serpapi_key');
+    await send(rtl('تم مسح مفتاح SerpApi ⛔ البحث بالصورة يكمل بجمناي و trace.moe بدون Lens.'));
+    return;
+  }
+  if (msgId) tg('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+  const r = await settings.set('serpapi_key', arg);
+  if (!r.ok || !r.value) { await send(rtl('⚠️ المفتاح غير صالح (أحرف وأرقام فقط)، ما انحفظ.')); return; }
+  await send(rtl('✅ انحفظ مفتاح SerpApi ') + latin(maskKey(r.value)) + rtl(' وانمسحت رسالتك من المحادثة.') + (r.saved === false ? '\n' + rtl('⚠️ اشتغل لكن ما انحفظ بالقاعدة (يرجع للقديم بعد إعادة التشغيل).') : ''));
+}
+
+// ===== /actor: بحث نصي عن أعمال ممثل (TMDB) =====
+const COUNTRY_WORDS = [
+  [/^(كوري|كورية|korean)$/i, 'KR', 'ko'], [/^(تركي|تركية|turkish)$/i, 'TR', 'tr'], [/^(ياباني|يابانية|japanese)$/i, 'JP', 'ja'],
+  [/^(هندي|هندية|indian)$/i, 'IN', 'hi'], [/^(اسباني|إسباني|اسبانية|إسبانية|spanish)$/i, 'ES', 'es'], [/^(فرنسي|فرنسية|french)$/i, 'FR', 'fr'],
+  [/^(ايطالي|إيطالي|ايطالية|إيطالية|italian)$/i, 'IT', 'it'], [/^(الماني|ألماني|المانية|ألمانية|german)$/i, 'DE', 'de'], [/^(صيني|صينية|chinese)$/i, 'CN', 'zh'],
+  [/^(امريكي|أمريكي|امريكية|أمريكية|american)$/i, 'US', 'en'], [/^(بريطاني|بريطانية|british)$/i, 'GB', 'en'], [/^(مصري|مصرية|egyptian)$/i, 'EG', 'ar'], [/^(عربي|عربية|arabic)$/i, '', 'ar']
+];
+const ACTOR_SKIP_GENRES = new Set([10767, 10763, 10764]);
+const actorCmd = t => { const m = /^\/actor(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
+const ACTOR_RESOLVE_MAX = 12;
+
+function tmdbKeyFromCtx() {
+  try {
+    const d = JSON.parse(decodeURIComponent(ctx.rawConfig));
+    return String(d.tmdbKey || '').replace(/["'\s]/g, '').replace(/^Bearer/i, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+async function tmdbGet(path, params) {
+  const key = tmdbKeyFromCtx();
+  if (!key) { const e = new Error('nokey'); e.code = 'nokey'; throw e; }
+  const auth = key.length > 40 ? { headers: { Authorization: 'Bearer ' + key }, params: {} } : { headers: {}, params: { api_key: key } };
+  try {
+    const r = await axios.get('https://api.themoviedb.org/3' + path, { headers: auth.headers, params: Object.assign({}, auth.params, params), timeout: 8000 });
+    return r.data;
+  } catch (e) {
+    throw new Error('tmdb HTTP ' + ((e && e.response && e.response.status) || 'net'));
+  }
+}
+
+async function onActor(chatId, argRaw) {
+  const send = text => tg('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
+  try {
+    const p0 = parseQuery(argRaw, MAX_RAW);
+    let country = null;
+    const words = [];
+    for (const w of String(p0.name || '').split(' ').filter(Boolean)) {
+      const c = !country && COUNTRY_WORDS.find(x => x[0].test(w));
+      if (c) country = c; else words.push(w);
+    }
+    const name = words.join(' ').trim();
+    if (!name) {
+      await send([rtl('🎭 البحث عن أعمال ممثل (بالاسم النصي):'), latin('/actor Tom Hanks'), latin('/actor Tom Hanks 2000'), rtl('وتكدر تضيف: فلم / مسلسل، أو سنة، أو جنسية العمل (كوري، تركي، ياباني...)')].join('\n'));
+      return;
+    }
+    if (!ctx) await loadCtx();
+    if (!ctx) { await send(rtl('افتح حلقة من Nuvio مرة وحدة أول حتى أعرف إعداداتك (مفتاح TMDB).')); return; }
+    if (!tmdbKeyFromCtx()) { await send(rtl('ما لقيت مفتاح TMDB بإعدادات الإضافة، أضفه وجرّب مرة ثانية.')); return; }
+    const wait = await send(rtl('🎭 جاري البحث عن أعمال ' + latin(name) + '...'));
+    const waitId = (wait && wait.message_id) || 0;
+    const clearWait = () => (waitId ? tg('deleteMessage', { chat_id: chatId, message_id: waitId }).catch(() => {}) : Promise.resolve());
+    try {
+      const found = await tmdbGet('/search/person', { query: name, language: 'en-US', include_adult: 'false' });
+      const people = (found && found.results) || [];
+      const person = people.find(x => x.known_for_department === 'Acting') || people[0];
+      if (!person) { await clearWait(); await send(rtl('ما لقيت ممثل باسم ') + latin('«' + name + '»') + rtl('، جرّب الاسم بالإنجليزي.')); return; }
+      const cr = await tmdbGet('/person/' + person.id + '/combined_credits', { language: 'en-US' });
+      const seen = new Set();
+      const list = [];
+      for (const c of ((cr && cr.cast) || [])) {
+        const isMovie = c.media_type === 'movie';
+        if (!isMovie && c.media_type !== 'tv') continue;
+        if (p0.kind === 'movie' && !isMovie) continue;
+        if ((p0.kind === 'series' || p0.kind === 'anime') && isMovie) continue;
+        if (/\b(self|himself|herself|themselves)\b/i.test(String(c.character || ''))) continue;
+        if ((c.genre_ids || []).some(g => ACTOR_SKIP_GENRES.has(g))) continue;
+        if ((c.vote_count || 0) < 30) continue;
+        const title = String((isMovie ? c.title : c.name) || '').trim();
+        const date = String((isMovie ? c.release_date : c.first_air_date) || '');
+        const year = parseInt(date.slice(0, 4), 10) || 0;
+        if (!title || (p0.year && year !== p0.year)) continue;
+        if (country) {
+          const okC = (c.origin_country || []).includes(country[1]) || c.original_language === country[2];
+          if (!okC) continue;
+        }
+        const key = (isMovie ? 'm' : 't') + c.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        list.push({ title, original: String((isMovie ? c.original_title : c.original_name) || '').trim(), year, type: isMovie ? 'movie' : 'series', pop: c.popularity || 0 });
+      }
+      list.sort((a, b) => b.pop - a.pop);
+      const resolved = (await Promise.all(list.slice(0, ACTOR_RESOLVE_MAX).map(async c => {
+        const x = await resolveCandidate({ title: cleanTitle(c.title) || c.title, original: cleanTitle(c.original), year: c.year, type: c.type, confidence: 50 });
+        return x;
+      }))).filter(Boolean);
+      const byId = new Map();
+      for (const x of resolved) if (!byId.has(x.id)) byId.set(x.id, x);
+      const items = [...byId.values()].slice(0, FIND_MAX_RESULTS);
+      await clearWait();
+      if (!items.length) { await send(rtl('لقيت ') + latin(person.name) + rtl(' بس ما لقيت أعمال تطابق الفلتر. جرّب بدون سنة أو جنسية.')); return; }
+      const tags = [{ movie: 'فلم', series: 'مسلسل', anime: 'أنمي' }[p0.kind] || '', p0.year ? String(p0.year) : '', country ? country[1] || 'AR' : ''].filter(Boolean);
+      await showResults(chatId, { items, p: { name, kind: p0.kind, year: p0.year }, raw: argRaw, smart: false, canSmart: false, header: '🎭 أعمال ' + latin(person.name) + (tags.length ? ' (' + tags.join(' · ') + ')' : '') + ' — الأشهر أول:' });
+    } catch (e) {
+      await clearWait();
+      logErr('خطأ بـ /actor', e);
+      await send(rtl('⚠️ تعذر جلب أعمال الممثل من TMDB، جرّب بعد شوي.'));
+    }
+  } catch (e) {
+    logErr('خطأ بـ /actor', e);
+  }
+}
+
 async function onEpisodeReply(chatId, er) {
   const p = pendingEp;
   if (!p) return;
@@ -1776,6 +2045,8 @@ function settingsText() {
   L.push(rtl('🎞 ترتيب ASS (' + SRC_NAME[settings.source('ass_slots')] + '): ') + (slots.length ? latin(slots.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('📄 ترتيب SRT (' + SRC_NAME[settings.source('srt_slots')] + '): ') + (srtS.length ? latin(srtS.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
+  const serp = String(settings.get('serpapi_key') || '').trim();
+  L.push(rtl('🖼 Lens للبحث بالصورة (' + SRC_NAME[settings.source('serpapi_key')] + '): ') + (serp ? latin(maskKey(serp)) + rtl(' ✅') : rtl('غير مفعّل ⛔ (ابعث ') + latin('/serpkey KEY') + rtl(')')));
   L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))) + (settings.get('search_grounding') && groundingBlockedMin() > 0 ? rtl(' ⏳ الحصة خلصت، يرجع بعد ') + latin(groundingBlockedMin() + '') + rtl(' دقيقة') : ''));
   L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
@@ -1791,188 +2062,4 @@ function settingsKeyboard() {
   const slots = currentSlots();
   const srtSlots = currentSlots('srt_slots');
   const model = String(settings.get('search_model') || '').trim();
-  const tgl = (label, v, op) => ({ text: label + ': ' + (v ? 'شغّال' : 'مطفأ'), callback_data: 'st:' + op });
-  const rows = [];
-  rows.push(slots.map((n, i) => ({ text: (i + 1) + ': ' + slotLabel(n), callback_data: 'st:s:' + i })));
-  rows.push([{ text: '↩️ ترتيب ASS الافتراضي', callback_data: 'st:sd' }]);
-  rows.push(srtSlots.map((n, i) => ({ text: 'SRT ' + (i + 1) + ': ' + slotLabel(n), callback_data: 'st:r:' + i })));
-  rows.push([{ text: '↩️ ترتيب SRT الافتراضي', callback_data: 'st:rd' }]);
-  const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
-  rows.push(mp.slice(0, 2), mp.slice(2));
-  rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
-  rows.push([tgl('⏭ تخطي الحشو', settings.get('filler_skip'), 'f'), tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
-  return { inline_keyboard: rows };
-}
-
-async function sendSettings(chatId) {
-  await tg('sendMessage', { chat_id: chatId, text: settingsText(), reply_markup: settingsKeyboard(), disable_web_page_preview: true });
-}
-
-async function onSettingsCallback(cq) {
-  const parts = String(cq.data || '').split(':');
-  const op = parts[1];
-  const arg = parts[2];
-  let r = null;
-  let note = 'تم ✅';
-  if (op === 's') {
-    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
-    const cur = currentSlots().map(x => (SLOT_CHOICES.includes(x) ? x : 'any'));
-    cur[i] = SLOT_CHOICES[(SLOT_CHOICES.indexOf(cur[i]) + 1) % SLOT_CHOICES.length];
-    r = await settings.set('ass_slots', cur.join(','));
-  } else if (op === 'r') {
-    const i = clamp(parseInt(arg, 10) || 0, 0, 3);
-    const cur = currentSlots('srt_slots').map(x => (SRT_CHOICES.includes(x) ? x : 'any'));
-    cur[i] = SRT_CHOICES[(SRT_CHOICES.indexOf(cur[i]) + 1) % SRT_CHOICES.length];
-    r = await settings.set('srt_slots', cur.join(','));
-  } else if (op === 'rd') {
-    r = await settings.clear('srt_slots');
-  } else if (op === 'sd') {
-    r = await settings.clear('ass_slots');
-  } else if (op === 'm') {
-    const m = MODEL_PRESETS[clamp(parseInt(arg, 10) || 0, 0, MODEL_PRESETS.length - 1)];
-    r = await settings.set('search_model', m.id);
-  } else if (op === 'g') {
-    r = await settings.set('search_grounding', !settings.get('search_grounding'));
-  } else if (op === 'f') {
-    r = await settings.set('filler_skip', !settings.get('filler_skip'));
-  } else if (op === 'a') {
-    r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
-  } else {
-    await answerCb(cq);
-    return;
-  }
-  if (r && r.ok && r.saved === false) note = '⚠️ اشتغل لكن ما انحفظ بالقاعدة (يرجع للقديم بعد إعادة التشغيل)';
-  await editMsg(cq.message, settingsText(), settingsKeyboard());
-  await answerCb(cq, note);
-}
-
-async function onSlotsCmd(chatId, arg, key = 'ass_slots') {
-  const choices = key === 'srt_slots' ? SRT_CHOICES : SLOT_CHOICES;
-  if (!arg) { await sendSettings(chatId); return; }
-  if (/^(default|reset|افتراضي)$/i.test(arg)) {
-    await settings.clear(key);
-  } else {
-    const r = await settings.set(key, arg);
-    if (!r.ok) {
-      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ أسماء غير معروفة: ') + latin((r.bad || []).join(', ') || arg) + '\n' + rtl('المسموح: ') + latin(choices.join(', ')) });
-      return;
-    }
-  }
-  await sendSettings(chatId);
-}
-
-let searchBusy = false;
-let lastSearch = Promise.resolve();
-
-function startSearch(fn) {
-  if (searchBusy) return false;
-  searchBusy = true;
-  lastSearch = Promise.resolve().then(fn).catch(e => logErr('خطأ بالبحث', e)).finally(() => { searchBusy = false; });
-  return true;
-}
-
-const SEARCH_BUSY_TEXT = '⏳ في بحث شغال هسة، انتظر ينتهي وبعدها ابعث الجديد.';
-
-async function handleUpdate(u) {
-  try {
-    const cq = u && u.callback_query;
-    const msg = cq ? cq.message : (u && u.message);
-    const chatId = msg && msg.chat && msg.chat.id;
-    if (chatId == null || String(chatId) !== TG_CHAT) return;
-    const data = String((cq && cq.data) || '');
-    if (cq && /^go:/.test(data)) return await onGoCallback(cq);
-    if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
-    if (cq && /^fs:/.test(data)) {
-      if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);
-      return;
-    }
-    if (cq && /^st:/.test(data)) return await onSettingsCallback(cq);
-    if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
-    if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
-    if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
-    if (cq && /^pg:/.test(data)) return await onPurgeCallback(cq);
-    if (cq && /^nm:/.test(data)) return await onNamesCallback(cq);
-    if (cq && /^rt:/.test(data)) return await onRetryCallback(cq);
-    if (cq) return await onPanelCallback(cq);
-    const text = String((u.message && u.message.text) || '').trim();
-    if (pendingPurge && Date.now() - pendingPurge.at < PENDING_TTL_MS) {
-      const pr = parsePurgeDates(text);
-      if (pr) { await onPurgeDates(chatId, pr); return; }
-    }
-    const nmc = /^\/names(?:@\w+)?(?:\s+(.*))?$/i.exec(text);
-    if (nmc) { await onNamesCmd(chatId, nmc[1] || ''); return; }
-    if (pendingNames && Date.now() - pendingNames.at < PENDING_TTL_MS && !/^\//.test(text)) { if (await onNamesText(chatId, text)) return; }
-    const rq = parseRequest(text);
-    const fq = rq ? null : parseFind(text);
-    const er = (!rq && !fq && pendingEp && Date.now() - pendingEp.at < PENDING_TTL_MS) ? parseEpisode(text) : null;
-    const po = pendingOrder && Date.now() - pendingOrder.at < PENDING_TTL_MS;
-    if (rq && po) await onOrderTarget(chatId, rq);
-    else if (rq) { pendingEp = null; await onRequest(chatId, rq, takeCount()); }
-    else if (fq) { if (!startSearch(() => onFind(chatId, fq.q))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
-    else if (er) await onEpisodeReply(chatId, er);
-    else if (slotsCmd(text) !== null) await onSlotsCmd(chatId, slotsCmd(text));
-    else if (srtSlotsCmd(text) !== null) await onSlotsCmd(chatId, srtSlotsCmd(text), 'srt_slots');
-    else if (isSettingsCmd(text)) await sendSettings(chatId);
-    else if (isBatchCmd(text)) await askCount(chatId);
-    else if (isOrderCmd(text)) await askOrder(chatId);
-    else if (isPurgeCmd(text)) await askPurge(chatId);
-    else if (isStopCmd(text)) await stopBatch(chatId);
-    else if (isClearCmd(text)) await sendAskClear(chatId);
-    else if (isStartCmd(text)) await tg('sendMessage', { chat_id: chatId, text: [rtl('أهلاً 👋 الأوامر المتاحة:'), rtl('/find ابحث عن فلم أو مسلسل'), rtl('/settings الإعدادات'), rtl('/clear امسح ترجمة آخر حلقة'), rtl('/batch جهّز دفعة حلقات'), rtl('/order امسح ترتيب تراكات حلقة'), rtl('/stop أوقف الدفعة الشغالة')].join('\n') });
-    else if (isPlainSearchText(text)) { if (!startSearch(() => onFind(chatId, text))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
-  } catch (e) {
-    logErr('خطأ بمعالجة أمر', e);
-  }
-}
-
-let running = false;
-let stopped = false;
-
-async function loop() {
-  let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }] }).catch(() => {});
-  while (!stopped) {
-    try {
-      if (!drained) {
-        const first = await tg('getUpdates', { offset: -1, limit: 1, timeout: 0 }, 10000, false);
-        if (Array.isArray(first) && first.length) offset = first[first.length - 1].update_id + 1;
-        drained = true;
-        fails = 0;
-        continue;
-      }
-      const ups = await tg('getUpdates', { offset, timeout: POLL_SEC, allowed_updates: ['message', 'callback_query'] }, (POLL_SEC + 10) * 1000, false);
-      fails = 0;
-      if (Array.isArray(ups)) {
-        for (const u of ups) {
-          offset = Math.max(offset, u.update_id + 1);
-          await handleUpdate(u);
-        }
-      }
-    } catch (e) {
-      fails++;
-      if (e && e.status === 409) logErr('تعارض: نسخة ثانية أو webhook يسأل نفس البوت', e);
-      else if (e && e.status === 401) logErr('الرمز غير صحيح', e);
-      else logErr('تعذر الاستماع', e);
-      await sleep(e && e.status === 409 ? 5000 : e && e.status === 401 ? 60000 : Math.min(30000, 1000 * Math.pow(2, Math.min(fails, 5))));
-    }
-  }
-  running = false;
-}
-
-function start() {
-  if (!ENABLED || running) return;
-  running = true;
-  stopped = false;
-  console.log('[بوت التحكم] تيليغرام يسمع أوامرك ⟵ ابعث /find أو /clear.');
-  startDbWatch();
-  loop().catch(() => { running = false; });
-}
-
-function stop() { stopped = true; }
-
-loadCtx().catch(() => {});
-
-module.exports = {
-  start, stop, noteTrack, noteContext, onDrop, enabled: ENABLED,
-  _t: { sendSettings, onSettingsCallback, onSlotsCmd, settingsText, settingsKeyboard, currentSlots, handleUpdate, keyOf, hashOf, panels, parseRequest, fetchTracks, startPath, leftInSeason, nextOf, getMeta, clearEpisode, clearTrack, clearOrder, configWithModel, swapPathConfig, trackRows, askOrder, onOrderTarget, orderAsks, getPendingOrder: () => pendingOrder, checkDbSize, reqs, finds, parseFind, parseQuery, parseEpisode, isPlainSearchText, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems, onFind, getPendingEp: () => pendingEp, idle: () => lastSearch, isSearchBusy: () => searchBusy, getCtx: () => ctx, isBatchActive: () => !!activeBatch }
-};
+  const tgl = (label, v, op)
