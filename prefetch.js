@@ -1,5 +1,7 @@
 const axios = require('axios');
 const { skipFillerAhead } = require('./filler');
+let settings = null;
+try { settings = require('./settings'); } catch (e) { settings = null; }
 
 const NEXT_EP_DELAY_MS = 3 * 60 * 1000;
 const MAX_PREFETCHED_SET = 1000;
@@ -13,6 +15,21 @@ const LABEL_TO_STREAM_PATH = {
     'SRT': '/stream-ai.srt',
     'ASS': '/stream-ai.ass'
 };
+
+// زر تلغرام (prefetch_ass): يوقف تجهيز الحلقة التالية التلقائي لتراكات ASS فقط.
+// SRT ودفعات تلغرام (/batch وطلبات البوت nopf=1) ما تمرّ من هنا فلا تتأثر.
+function isAssLabel(label) {
+    const p = LABEL_TO_STREAM_PATH[label];
+    return !!(p && p.endsWith('.ass'));
+}
+
+function assPrefetchOff(label) {
+    try {
+        return isAssLabel(label) && !!settings && settings.get('prefetch_ass') === false;
+    } catch (e) {
+        return false;
+    }
+}
 
 function getNextEpisodeTargetId(targetId) {
     if (!targetId) return null;
@@ -102,6 +119,10 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 async function runNextEpisodePrefetch(info) {
     const { targetId, label, trackNum, rawConfig, kitsuId, kitsuEp, proto, host, port } = info;
     nextEpTimers.delete(targetId);
+    if (assPrefetchOff(label)) {
+        console.log('[تجهيز] تجهيز ASS بالخلفية مطفأ (من تلغرام) ⟵ ألغيت التجهيز بعد ' + targetId + ' (' + label + ' مسار ' + trackNum + ')');
+        return;
+    }
     let nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
 
@@ -138,6 +159,11 @@ async function runNextEpisodePrefetch(info) {
 
     const expectedStreamPath = LABEL_TO_STREAM_PATH[label];
     if (!expectedStreamPath) return;
+
+    if (assPrefetchOff(label)) {
+        console.log('[تجهيز] تجهيز ASS بالخلفية انطفأ أثناء التحضير ⟵ ألغيت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
+        return;
+    }
 
     const serverPort = port || process.env.PORT || 7000;
     const mediaType = nextTargetId.startsWith('kitsu') ? 'anime' : 'series';
@@ -205,6 +231,13 @@ function scheduleNextEpisodePrefetch(info) {
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
     if (prefetchedNextSet.has(prefetchKey)) return;
 
+    if (assPrefetchOff(label)) {
+        const ex = nextEpTimers.get(targetId);
+        if (ex && isAssLabel(ex.label)) cancelNextEpisodePrefetch(targetId);
+        console.log('[تجهيز] تجهيز ASS بالخلفية مطفأ (من تلغرام) ⟵ ما جدولت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
+        return;
+    }
+
     const existing = nextEpTimers.get(targetId);
     if (existing) {
         if (existing.timer) clearTimeout(existing.timer);
@@ -229,6 +262,10 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
     if (!existing || existing.timer) return;
 
     if (existing.label === label && String(existing.trackNum) === String(trackNum)) {
+        if (assPrefetchOff(label)) {
+            cancelNextEpisodePrefetch(targetId);
+            return;
+        }
         const nextTargetId = getNextEpisodeTargetId(targetId);
         if (!nextTargetId) return;
         existing.timer = setTimeout(() => {
