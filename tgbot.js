@@ -582,11 +582,11 @@ async function onRequest(chatId, rq, count) {
     if (!tracks) { await finish(head.concat(rtl('⚠️ تعذر جلب قائمة التراكات، جرّب بعد شوي.')).join('\n')); return; }
     if (!tracks.length) { await finish(head.concat(rtl('ما لقيت تراكات عربية لهذا العمل.')).join('\n')); return; }
     const h = crypto.createHash('sha1').update(rq.targetId + ':' + Date.now()).digest('hex').slice(0, 8);
-    reqs.set(h, { targetId: rq.targetId, head, tracks, count: count || 0, model: '' });
+    reqs.set(h, { targetId: rq.targetId, head, tracks, count: count || 0, model: '', gapMin: 0, lineIdx: -1 });
     while (reqs.size > MAX_REQS) reqs.delete(reqs.keys().next().value);
     const rows = trackRows(h, reqs.get(h));
-    if (count) head.push(rtl('📦 دفعة: ' + count + ' حلقات (حلقة كل ' + (batchGapMs(count) / 60000) + ' دقائق، وتتوقف بنهاية الموسم)'));
-    await finish(head.concat(rtl(count ? 'اختر التراك لبدء الدفعة (الموديل من الأزرار تحت):' : 'اختر التراك اللي تريد تجهزه:')).join('\n'), { inline_keyboard: rows });
+    if (count) { reqs.get(h).lineIdx = head.length; head.push(rtl(batchLineText(count, 0))); }
+    await finish(head.concat(rtl(count ? BATCH_PICK_TEXT : 'اختر التراك اللي تريد تجهزه:')).join('\n'), { inline_keyboard: rows });
   } catch (e) {
     try { await send(rtl('⚠️ صار خطأ أثناء الطلب، جرّب مرة ثانية.')); } catch (e2) {}
   }
@@ -608,6 +608,7 @@ function trackRows(h, r) {
     for (let k = 0; k < row.length; k += 2) rows.push(row.slice(k, k + 2));
   }
   if (r.count) rows.push(BATCH_MODELS.map(m => ({ text: ((r.model || '') === m.model ? '✅ ' : '') + '🧠 ' + m.label, callback_data: 'bm:' + h + ':' + m.code })));
+  if (r.count) rows.push(GAP_CHOICES_MIN.map(min => ({ text: (gapMinOf(r.count, r.gapMin) === min ? '✅ ' : '') + '⏱ ' + min + ' دقائق', callback_data: 'bg:' + h + ':' + min })));
   return rows;
 }
 
@@ -619,6 +620,16 @@ async function onModelCallback(cq) {
   r.model = opt.model;
   await answerCb(cq, 'الموديل: ' + opt.label);
   await editMsg(cq.message, String((cq.message && cq.message.text) || ''), { inline_keyboard: trackRows(m[1], r) });
+}
+
+async function onGapCallback(cq) {
+  const m = /^bg:([0-9a-f]{8}):(5|10)$/.exec(String(cq.data || ''));
+  const r = m && reqs.get(m[1]);
+  if (!r || !r.count) { await answerCb(cq, 'انتهت صلاحية هذي القائمة، ابعث الرقم من جديد'); return; }
+  r.gapMin = +m[2];
+  await answerCb(cq, 'الفاصل: ' + r.gapMin + ' دقائق');
+  if (r.lineIdx >= 0 && r.head[r.lineIdx] !== undefined) r.head[r.lineIdx] = rtl(batchLineText(r.count, r.gapMin));
+  await editMsg(cq.message, r.head.concat(rtl(BATCH_PICK_TEXT)).join('\n'), { inline_keyboard: trackRows(m[1], r) });
 }
 
 // نبدّل حقل model داخل الإعداد (JSON) فقط، بدون ما نغيّر الإعداد المحفوظ
@@ -655,7 +666,7 @@ async function onGoCallback(cq) {
     reqs.delete(m[1]);
     const opt = BATCH_MODELS.find(x => x.model === (r.model || ''));
     const head = r.model ? r.head.concat(rtl('🧠 الموديل: ' + latin(opt ? opt.label : r.model))) : r.head;
-    await startBatch({ chat: cq.message && cq.message.chat, messageId: cq.message && cq.message.message_id, targetId: r.targetId, head, track: t, count: r.count, model: r.model || '' });
+    await startBatch({ chat: cq.message && cq.message.chat, messageId: cq.message && cq.message.message_id, targetId: r.targetId, head, track: t, count: r.count, model: r.model || '', gapMs: r.gapMin ? r.gapMin * 60000 : 0 });
     return;
   }
   const started = await startPath(t.path, true);
@@ -675,6 +686,11 @@ const COUNTS = [4, 6, 8, 10, 20];
 const GAP_SMALL_MS = 5 * 60 * 1000;   // دفعة 4 حلقات او اقل
 const GAP_BIG_MS = 10 * 60 * 1000;    // دفعة اكثر من 4 حلقات
 function batchGapMs(count) { return (count || 0) <= 4 ? GAP_SMALL_MS : GAP_BIG_MS; }
+// اختيار الفاصل لكل دفعة (5 او 10 دقائق)؛ اذا ما اختار المستخدم يبقى الافتراضي حسب العدد
+const GAP_CHOICES_MIN = [5, 10];
+const gapMinOf = (count, chosen) => chosen || (batchGapMs(count) / 60000);
+const batchLineText = (count, chosen) => '📦 دفعة: ' + count + ' حلقات (حلقة كل ' + gapMinOf(count, chosen) + ' دقائق، وتتوقف بنهاية الموسم)';
+const BATCH_PICK_TEXT = 'اختر التراك لبدء الدفعة (الموديل والفاصل من الأزرار تحت):';
 const READY_GAP_MS = 3000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const META_TTL_MS = 6 * 3600 * 1000;
@@ -1054,7 +1070,7 @@ async function runBatch(b) {
       started++;
       b.lines.push((res ? '⏳ ' : '✅ جاهزة أصلاً: ') + started + '. ' + txt);
       console.log('[دفعة] ' + started + '/' + b.count + ' ' + cur + (res ? ': بدأ التجهيز' : ': جاهزة أصلاً'));
-      b.nextAt = Date.now() + (res ? batchGapMs(b.count) : READY_GAP_MS);
+      b.nextAt = Date.now() + (res ? (b.gapMs || batchGapMs(b.count)) : READY_GAP_MS);
       if (started >= b.count) break;
       await pushBatch(b);
     }
@@ -1070,7 +1086,7 @@ async function runBatch(b) {
   await batchNotice(b, ['📦 انتهت الدفعة', ...b.head.slice(0, 1), b.final.replace(/^[^ ]+ /, '')]);
 }
 
-async function startBatch({ chat, messageId, targetId, head, track, count, model }) {
+async function startBatch({ chat, messageId, targetId, head, track, count, model, gapMs }) {
   if (activeBatch) {
     if (chat) await tg('sendMessage', { chat_id: chat.id, text: rtl('في دفعة شغالة حالياً، اكتب /stop لإيقافها قبل ما تبدأ ثانية.') }).catch(() => {});
     return;
@@ -1089,9 +1105,9 @@ async function startBatch({ chat, messageId, targetId, head, track, count, model
     }
     if (!firstPath) { await fail('تعذر تجهيز مسار التراك بالموديل المختار.'); return; }
   }
-  const b = { chat, messageId, targetId, head, ext: track.ext, track: track.track, firstPath, count, model: model || '', rawOverride, lines: [], final: '', nextAt: 0, stopped: false, timer: null, wake: null };
+  const b = { chat, messageId, targetId, head, ext: track.ext, track: track.track, firstPath, count, gapMs: gapMs || 0, model: model || '', rawOverride, lines: [], final: '', nextAt: 0, stopped: false, timer: null, wake: null };
   activeBatch = b;
-  console.log('[دفعة] بدأت: ' + targetId + ' ' + b.ext.toUpperCase() + ' ' + b.track + ' × ' + count + (model ? ' | موديل ' + model : ''));
+  console.log('[دفعة] بدأت: ' + targetId + ' ' + b.ext.toUpperCase() + ' ' + b.track + ' × ' + count + ' | فاصل ' + ((gapMs || batchGapMs(count)) / 60000) + ' د' + (model ? ' | موديل ' + model : ''));
   runBatch(b).catch(() => { if (activeBatch === b) activeBatch = null; });
 }
 
@@ -1308,6 +1324,7 @@ async function handleUpdate(u) {
     if (cq && /^st:/.test(data)) return await onSettingsCallback(cq);
     if (cq && /^bn:/.test(data)) return await onCountCallback(cq);
     if (cq && /^bm:/.test(data)) return await onModelCallback(cq);
+    if (cq && /^bg:/.test(data)) return await onGapCallback(cq);
     if (cq && /^od:/.test(data)) return await onOrderCallback(cq);
     if (cq && /^pg:/.test(data)) return await onPurgeCallback(cq);
     if (cq && /^nm:/.test(data)) return await onNamesCallback(cq);
