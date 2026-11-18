@@ -1211,6 +1211,7 @@ function settingsText() {
   L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
   L.push(rtl('⏩ تجهيز ASS بالخلفية للحلقة التالية (' + SRC_NAME[settings.source('prefetch_ass')] + '): ' + onOff(settings.get('prefetch_ass'))));
+  L.push(rtl('⏩ تجهيز SRT بالخلفية للحلقة التالية (' + SRC_NAME[settings.source('prefetch_srt')] + '): ' + onOff(settings.get('prefetch_srt'))));
   L.push(rtl('(الإيقاف يخص التجهيز التلقائي من المشغل فقط، ودفعات تلغرام تبقى شغالة)'));
   L.push('');
   L.push(rtl('الترتيب يشمل الحلقات الجديدة فقط، والمثبتة تحتاج /clear.'));
@@ -1233,7 +1234,7 @@ function settingsKeyboard() {
   rows.push(mp.slice(0, 2), mp.slice(2));
   rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
   rows.push([tgl('⏭ تخطي الحشو', settings.get('filler_skip'), 'f'), tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
-  rows.push([tgl('⏩ تجهيز ASS بالخلفية', settings.get('prefetch_ass'), 'p')]);
+  rows.push([tgl('⏩ ASS بالخلفية', settings.get('prefetch_ass'), 'p'), tgl('⏩ SRT بالخلفية', settings.get('prefetch_srt'), 'q')]);
   return { inline_keyboard: rows };
 }
 
@@ -1272,6 +1273,8 @@ async function onSettingsCallback(cq) {
     r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
   } else if (op === 'p') {
     r = await settings.set('prefetch_ass', !settings.get('prefetch_ass'));
+  } else if (op === 'q') {
+    r = await settings.set('prefetch_srt', !settings.get('prefetch_srt'));
   } else {
     await answerCb(cq);
     return;
