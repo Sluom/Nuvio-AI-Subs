@@ -16,16 +16,18 @@ const LABEL_TO_STREAM_PATH = {
     'ASS': '/stream-ai.ass'
 };
 
-// زر تلغرام (prefetch_ass): يوقف تجهيز الحلقة التالية التلقائي لتراكات ASS فقط.
-// SRT ودفعات تلغرام (/batch وطلبات البوت nopf=1) ما تمرّ من هنا فلا تتأثر.
-function isAssLabel(label) {
+// أزرار تلغرام (prefetch_ass / prefetch_srt): توقف تجهيز الحلقة التالية التلقائي لنوع التراك (ASS او SRT) كلٌ على حدة.
+// دفعات تلغرام (/batch وطلبات البوت nopf=1) ما تمرّ من هنا فلا تتأثر.
+function prefetchKind(label) {
     const p = LABEL_TO_STREAM_PATH[label];
-    return !!(p && p.endsWith('.ass'));
+    if (!p) return null;
+    return p.endsWith('.ass') ? 'ass' : (p.endsWith('.srt') ? 'srt' : null);
 }
 
-function assPrefetchOff(label) {
+function prefetchOff(label) {
     try {
-        return isAssLabel(label) && !!settings && settings.get('prefetch_ass') === false;
+        const kind = prefetchKind(label);
+        return !!kind && !!settings && settings.get('prefetch_' + kind) === false;
     } catch (e) {
         return false;
     }
@@ -119,8 +121,8 @@ function cancelNextEpisodePrefetch(targetId, reason = '') {
 async function runNextEpisodePrefetch(info) {
     const { targetId, label, trackNum, rawConfig, kitsuId, kitsuEp, proto, host, port } = info;
     nextEpTimers.delete(targetId);
-    if (assPrefetchOff(label)) {
-        console.log('[تجهيز] تجهيز ASS بالخلفية مطفأ (من تلغرام) ⟵ ألغيت التجهيز بعد ' + targetId + ' (' + label + ' مسار ' + trackNum + ')');
+    if (prefetchOff(label)) {
+        console.log('[تجهيز] تجهيز ' + prefetchKind(label).toUpperCase() + ' بالخلفية مطفأ (من تلغرام) ⟵ ألغيت التجهيز بعد ' + targetId + ' (' + label + ' مسار ' + trackNum + ')');
         return;
     }
     let nextTargetId = await resolveNextEpisodeTargetId(targetId);
@@ -160,8 +162,8 @@ async function runNextEpisodePrefetch(info) {
     const expectedStreamPath = LABEL_TO_STREAM_PATH[label];
     if (!expectedStreamPath) return;
 
-    if (assPrefetchOff(label)) {
-        console.log('[تجهيز] تجهيز ASS بالخلفية انطفأ أثناء التحضير ⟵ ألغيت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
+    if (prefetchOff(label)) {
+        console.log('[تجهيز] تجهيز ' + prefetchKind(label).toUpperCase() + ' بالخلفية انطفأ أثناء التحضير ⟵ ألغيت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
         return;
     }
 
@@ -231,10 +233,10 @@ function scheduleNextEpisodePrefetch(info) {
     const prefetchKey = [nextTargetId, label, 'track' + trackNum].join('_');
     if (prefetchedNextSet.has(prefetchKey)) return;
 
-    if (assPrefetchOff(label)) {
+    if (prefetchOff(label)) {
         const ex = nextEpTimers.get(targetId);
-        if (ex && isAssLabel(ex.label)) cancelNextEpisodePrefetch(targetId);
-        console.log('[تجهيز] تجهيز ASS بالخلفية مطفأ (من تلغرام) ⟵ ما جدولت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
+        if (ex && prefetchKind(ex.label) === prefetchKind(label)) cancelNextEpisodePrefetch(targetId);
+        console.log('[تجهيز] تجهيز ' + prefetchKind(label).toUpperCase() + ' بالخلفية مطفأ (من تلغرام) ⟵ ما جدولت تجهيز ' + nextTargetId + ' (' + label + ' مسار ' + trackNum + ')');
         return;
     }
 
@@ -262,7 +264,7 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
     if (!existing || existing.timer) return;
 
     if (existing.label === label && String(existing.trackNum) === String(trackNum)) {
-        if (assPrefetchOff(label)) {
+        if (prefetchOff(label)) {
             cancelNextEpisodePrefetch(targetId);
             return;
         }
