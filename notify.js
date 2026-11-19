@@ -545,9 +545,8 @@ const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subs'], ['opensubtitles', 
 function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch, abs }) {
   const has = season != null && episode != null && season !== '' && episode !== '';
   const id = imdbId + (has ? ':' + season + ':' + episode : '');
-  const main = (title ? title + ' - ' : '') + id;
+  const main = (title ? title + ' - ' : '') + id + (abs ? ' > 1:' + abs : '');
   const extras = [];
-  if (abs) extras.push('S01E' + String(abs).padStart(2, '0'));
   if (isPrefetch) extras.push('bg');
   const tail = extras.length ? '| ' + extras.join(' | ') : '';
   const head = tail ? (main.length + tail.length > 46 ? main + '\n' + tail : main + ' ' + tail) : main;
