@@ -541,13 +541,13 @@ function startDailySummary() {
 }
 
 // تقرير المواقع لكل طلب جديد: جلب ← بقى (كل المواقع تظهر حتى الصفر، بدون نص أخطاء)
-const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subsource'], ['opensubtitles', 'os'], ['oscom', 'com'], ['os_legacy', 'org'], ['wyzie', 'wyzie']];
+const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subs'], ['opensubtitles', 'os'], ['oscom', 'com'], ['os_legacy', 'org'], ['wyzie', 'wyzie']];
 function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch }) {
   const ep = (season != null && episode != null && season !== '' && episode !== '') ? ' S' + season + 'E' + episode : '';
   const head = '[المواقع] ' + (title ? title + ' — ' : '') + imdbId + ep + (isPrefetch ? ' (خلفية)' : '');
-  const w = Math.max(...SITE_ROWS.map(r => r[1].length));
-  const rows = SITE_ROWS.map(([k, label]) => '  ' + label.padEnd(w + 2) + 'جلب ' + String(fetched[k] || 0).padEnd(3) + '← بقى ' + (kept[k] || 0));
-  return rtl(head) + '\n' + rows.map(r => LRI + r + PDI).join('\n');
+  const cell = ([k, label]) => label + ' ' + (fetched[k] || 0) + '=' + (kept[k] || 0);
+  const line = arr => LRI + arr.map(cell).join(' · ') + PDI;
+  return rtl(head) + '\n' + line(SITE_ROWS.slice(0, 3)) + '\n' + line(SITE_ROWS.slice(3));
 }
 async function sourcesReport(info) {
   if (!ENABLED) return;
