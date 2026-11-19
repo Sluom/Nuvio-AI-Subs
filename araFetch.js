@@ -986,6 +986,16 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         strictDedupe: isPrefetch
     });
 
+    // تقرير المواقع بتلغرام: جلب (قبل التصفية) ← بقى (بالقائمة النهائية)
+    try {
+        const kept = {};
+        for (const x of [...value.ass, ...value.srt]) if (x && x._site) kept[x._site] = (kept[x._site] || 0) + 1;
+        require('./notify').sourcesEvent({
+            imdbId, type, season, episode, isPrefetch, kept,
+            fetched: { os_legacy: osLegacyList.length, opensubtitles: osMirrorList.length, subdl: subdlRawList.length, subsource: subsourceRawList.length, oscom: oscomRawList.length, wyzie: wyzieRawList.length }
+        });
+    } catch (_) {}
+
     // سطر تشخيص مؤقت لـ subsource (يُحذف بعد الفحص)
     try {
         const ssReady = [...value.ass, ...value.srt].filter(x => x && x._site === 'subsource').length;

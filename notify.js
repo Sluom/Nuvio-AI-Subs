@@ -540,6 +540,25 @@ function startDailySummary() {
   arm();
 }
 
+// تقرير المواقع لكل طلب جديد: جلب ← بقى (كل المواقع تظهر حتى الصفر، بدون نص أخطاء)
+const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subsource'], ['opensubtitles', 'os'], ['oscom', 'com'], ['os_legacy', 'org'], ['wyzie', 'wyzie']];
+function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch }) {
+  const ep = (season != null && episode != null && season !== '' && episode !== '') ? ' S' + season + 'E' + episode : '';
+  const head = '[المواقع] ' + (title ? title + ' — ' : '') + imdbId + ep + (isPrefetch ? ' (خلفية)' : '');
+  const w = Math.max(...SITE_ROWS.map(r => r[1].length));
+  const rows = SITE_ROWS.map(([k, label]) => '  ' + label.padEnd(w + 2) + 'جلب ' + String(fetched[k] || 0).padEnd(3) + '← بقى ' + (kept[k] || 0));
+  return rtl(head) + '\n' + rows.map(r => LRI + r + PDI).join('\n');
+}
+async function sourcesReport(info) {
+  if (!ENABLED) return;
+  let title = null;
+  try { title = await titleOf(info.imdbId, info.type); } catch (e) {}
+  enqueue(sourcesText({ ...info, title }));
+}
+function sourcesEvent(info) {
+  try { sourcesReport(info).catch(() => {}); } catch (e) {}
+}
+
 function trackEvent(ev) {
   try {
     report(ev).catch(() => {});
@@ -555,4 +574,4 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, modelEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
+module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sourcesText, sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
