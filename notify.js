@@ -558,7 +558,18 @@ async function sourcesReport(info) {
   if (!ENABLED) return;
   let title = null;
   try { title = await titleOf(info.imdbId, info.type); } catch (e) {}
-  enqueue(sourcesText({ ...info, title }));
+  // الطلب جاء بترقيم مطلق (موسم 1 وحلقة أكبر من حلقات الموسم 1) ⟵ نعرض ترقيم المواسم أولاً ثم السهم للمطلق
+  let shown = info;
+  try {
+    const s = parseInt(info.season, 10);
+    const e = parseInt(info.episode, 10);
+    if (!info.abs && s === 1 && e > 1 && /^tt\d+$/.test(String(info.imdbId || ''))) {
+      const d = await describeEpisode(info.imdbId + ':1:' + e);
+      const m = d && d.alt && /^tt\d+:(\d+):(\d+)$/.exec(d.alt.id);
+      if (m && parseInt(m[1], 10) > 1) shown = { ...info, season: parseInt(m[1], 10), episode: parseInt(m[2], 10), abs: e };
+    }
+  } catch (e) {}
+  enqueue(sourcesText({ ...shown, title }));
 }
 function sourcesEvent(info) {
   try { sourcesReport(info).catch(() => {}); } catch (e) {}
