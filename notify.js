@@ -542,12 +542,18 @@ function startDailySummary() {
 
 // تقرير المواقع لكل طلب جديد: جلب ← بقى (كل المواقع تظهر حتى الصفر، بدون نص أخطاء)
 const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subs'], ['opensubtitles', 'os'], ['oscom', 'com'], ['os_legacy', 'org'], ['wyzie', 'wyzie']];
-function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch }) {
-  const ep = (season != null && episode != null && season !== '' && episode !== '') ? ' S' + season + 'E' + episode : '';
-  const head = '[المواقع] ' + (title ? title + ' — ' : '') + imdbId + ep + (isPrefetch ? ' (خلفية)' : '');
+function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch, abs }) {
+  const has = season != null && episode != null && season !== '' && episode !== '';
+  const id = imdbId + (has ? ':' + season + ':' + episode : '');
+  const main = (title ? title + ' - ' : '') + id;
+  const extras = [];
+  if (abs) extras.push('S01E' + String(abs).padStart(2, '0'));
+  if (isPrefetch) extras.push('bg');
+  const tail = extras.length ? '| ' + extras.join(' | ') : '';
+  const head = tail ? (main.length + tail.length > 46 ? main + '\n' + tail : main + ' ' + tail) : main;
   const cell = ([k, label]) => label + ' ' + (fetched[k] || 0) + '=' + (kept[k] || 0);
-  const line = arr => LRI + arr.map(cell).join(' · ') + PDI;
-  return rtl(head) + '\n' + line(SITE_ROWS.slice(0, 3)) + '\n' + line(SITE_ROWS.slice(3));
+  const line = arr => arr.map(cell).join(' · ');
+  return LRI + head + '\n' + line(SITE_ROWS.slice(0, 3)) + '\n' + line(SITE_ROWS.slice(3)) + PDI;
 }
 async function sourcesReport(info) {
   if (!ENABLED) return;

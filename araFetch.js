@@ -919,12 +919,14 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         imdbId, season, episode, type, subdlKey, subsourceKey, isPrefetch
     });
 
+    let absUsedEp = null;
     const totalInitial = osLegacyList.length + osMirrorList.length + subdlRawList.length + subsourceRawList.length;
     if (season != null && parseInt(season, 10) > 1 && totalInitial < 2) {
         const absEp = await getAbsoluteEpisodeNumber(imdbId, season, episode);
         if (absEp) {
             console.log('[ترقيم مطلق 🔄] الموسم ' + season + ' الحلقة ' + episode + ' لم يرجع ترجمات كافية (' + totalInitial + '). جاري البحث بالرقم المطلق: الموسم 1 الحلقة ' + absEp + '...');
             const absOverride = { season: '1', episode: String(absEp) };
+            absUsedEp = absEp;
             const absRes = await fetchAllSourcesOnce({
                 imdbId, season: 1, episode: absEp, type, subdlKey, subsourceKey, isPrefetch
             });
@@ -991,7 +993,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         const kept = {};
         for (const x of [...value.ass, ...value.srt]) if (x && x._site) kept[x._site] = (kept[x._site] || 0) + 1;
         require('./notify').sourcesEvent({
-            imdbId, type, season, episode, isPrefetch, kept,
+            imdbId, type, season, episode, isPrefetch, kept, abs: absUsedEp,
             fetched: { os_legacy: osLegacyList.length, opensubtitles: osMirrorList.length, subdl: subdlRawList.length, subsource: subsourceRawList.length, oscom: oscomRawList.length, wyzie: wyzieRawList.length }
         });
     } catch (_) {}
