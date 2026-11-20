@@ -1321,6 +1321,7 @@ async function handleUpdate(u) {
     const data = String((cq && cq.data) || '');
     if (cq && /^go:/.test(data)) return await onGoCallback(cq);
     if (cq && /^gt:/.test(data)) return await getter.onGetCallback(cq);
+    if (cq && /^dl:/.test(data)) return await getter.onDlCallback(cq);
     if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
     if (cq && /^fs:/.test(data)) {
       if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);

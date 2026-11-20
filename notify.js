@@ -341,6 +341,10 @@ async function report(ev) {
     const row = retryKinds.map(k => ({ text: ev.kind === 'partial' ? '🔁 أكمل الناقص فقط' : '🔁 أعد المحاولة', callback_data: cb(k) }));
     if (row.every(b => Buffer.byteLength(b.callback_data) <= 64)) markup = { inline_keyboard: [row] };
   }
+  if (ev.kind === 'done' && slot && ev.targetId && /^\d+$/.test(String(ev.trackNum))) {
+    const dl = 'dl:' + slot + ':' + ev.trackNum + ':' + ev.targetId;
+    if (Buffer.byteLength(dl) <= 64) markup = { inline_keyboard: [[{ text: '📥 تحميل ' + kindName + ' تراك ' + ev.trackNum, callback_data: dl }]] };
+  }
   enqueue(lines.join('\n'), markup);
 }
 

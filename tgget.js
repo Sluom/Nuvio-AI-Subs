@@ -261,4 +261,45 @@ async function sendLink(cq, chatId, g, it, res) {
   await H.tg('sendMessage', { chat_id: chatId, text: lines.join('\n'), disable_web_page_preview: true });
 }
 
-module.exports = { init, getCmd, onGetCmd, onGetCallback, classify, keyboardOf, slugTitle, fileNameOf, gets };
+const SITE_LABELS = { subdl: 'subdl', subsource: 'subsource', os_legacy: 'opensubtitles.org', os_mirror: 'opensubtitles', opensubtitles: 'opensubtitles', oscom: 'opensubtitles.com', wyzie: 'wyzie' };
+
+// زر "📥 تحميل" تحت إشعار الاكتمال: callback_data = dl:<s|a>:<تراك>:<targetId> (بدون حالة، يشتغل حتى بعد إعادة تشغيل السيرفر)
+async function onDlCallback(cq) {
+  const m = /^dl:([sa]):(\d+):(.+)$/.exec(String(cq.data || ''));
+  if (!m) return;
+  const ext = m[1] === 'a' ? 'ass' : 'srt';
+  const label = ext === 'ass' ? 'ARA-ASS' : 'ARA-SRT';
+  const track = +m[2];
+  const targetId = m[3];
+  const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  try {
+    const doc = await H.withTimeout(db.loadDoc('job', trackKey(label, targetId, track)), STEP_TIMEOUT_MS);
+    if (!doc || !doc.content) { await H.answerCb(cq, 'هذا التراك غير محفوظ (انمسح أو ما اكتمل)'); return; }
+    const buf = Buffer.from(String(doc.content), 'utf8');
+    if (buf.length > MAX_FILE_BYTES) { await H.answerCb(cq, 'الملف كبير جداً'); return; }
+    let site = '';
+    let rel = '';
+    try {
+      const pins = await H.withTimeout(db.loadDoc('job', 'corr_pins_' + targetId + TRACKS_TAG), STEP_TIMEOUT_MS);
+      const it = pins && Array.isArray(pins[ext]) ? pins[ext][track - 1] : null;
+      if (it) {
+        const raw = it._site || it._source || '';
+        site = SITE_LABELS[raw] || raw;
+        rel = String(it.name || '').trim();
+      }
+    } catch (e) {}
+    const imdb = String(targetId).split(':')[0];
+    const isMovie = /^tt\d+$/.test(targetId);
+    let title = null;
+    try { title = notify && notify.titleOf ? await notify.titleOf(targetId, isMovie ? 'movie' : 'series') : null; } catch (e) { title = null; }
+    await H.answerCb(cq, 'جاري الإرسال 📥');
+    const name = fileNameOf(slugTitle(title, imdb), targetId, site, ext);
+    const caption = 'trans-' + (site || 'sub') + '-ara-' + ext + '-' + track + (rel ? ' · ' + rel : '');
+    await sendDoc(chatId, name, buf, caption);
+  } catch (e) {
+    H.logErr('خطأ بزر التحميل', e);
+    await H.answerCb(cq, 'تعذر التحميل، جرّب مرة ثانية');
+  }
+}
+
+module.exports = { init, getCmd, onGetCmd, onGetCallback, onDlCallback, classify, keyboardOf, slugTitle, fileNameOf, gets };
