@@ -11,6 +11,7 @@ let shared = null;
 try { shared = require('./ai').shared; } catch (e) { shared = null; }
 const settings = require('./settings');
 const search = require('./tgsearch');
+const getter = require('./tgget');
 const { finds, latinDigits, clamp, maskKey, groundingBlockedMin, onFindCallback, onSmartCallback, IMAGE_MIMES, onImage, serpKeyCmd, onSerpKeyCmd, actorCmd, onActor, parseFind, parseEpisode, onFind, isPlainSearchText, parseQuery, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems } = search;
 const { seriesInfoFromTarget, bookKey } = require('./name-book');
 
@@ -1319,6 +1320,7 @@ async function handleUpdate(u) {
     if (chatId == null || String(chatId) !== TG_CHAT) return;
     const data = String((cq && cq.data) || '');
     if (cq && /^go:/.test(data)) return await onGoCallback(cq);
+    if (cq && /^gt:/.test(data)) return await getter.onGetCallback(cq);
     if (cq && /^fd:/.test(data)) return await onFindCallback(cq);
     if (cq && /^fs:/.test(data)) {
       if (!startSearch(() => onSmartCallback(cq))) await answerCb(cq, SEARCH_BUSY_TEXT);
@@ -1340,6 +1342,8 @@ async function handleUpdate(u) {
       if (!startSearch(() => onImage(chatId, mm))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {});
       return;
     }
+    const gc = getter.getCmd(text);
+    if (gc !== null) { await getter.onGetCmd(chatId, gc); return; }
     const skc = serpKeyCmd(text);
     if (skc !== null) { await onSerpKeyCmd(chatId, skc, mm && mm.message_id); return; }
     const acc = actorCmd(text);
@@ -1370,7 +1374,7 @@ async function handleUpdate(u) {
     else if (isPurgeCmd(text)) await askPurge(chatId);
     else if (isStopCmd(text)) await stopBatch(chatId);
     else if (isClearCmd(text)) await sendAskClear(chatId);
-    else if (isStartCmd(text)) await tg('sendMessage', { chat_id: chatId, text: [rtl('أهلاً 👋 الأوامر المتاحة:'), rtl('/find ابحث عن فلم أو مسلسل'), rtl('🖼 ابعث صورة (بوستر أو لقطة) أعرف شنو العمل'), rtl('/actor أعمال ممثل'), rtl('/serpkey مفتاح SerpApi (Lens)'), rtl('/settings الإعدادات'), rtl('/clear امسح ترجمة آخر حلقة'), rtl('/batch جهّز دفعة حلقات'), rtl('/order امسح ترتيب تراكات حلقة'), rtl('/stop أوقف الدفعة الشغالة')].join('\n') });
+    else if (isStartCmd(text)) await tg('sendMessage', { chat_id: chatId, text: [rtl('أهلاً 👋 الأوامر المتاحة:'), rtl('/find ابحث عن فلم أو مسلسل'), rtl('🖼 ابعث صورة (بوستر أو لقطة) أعرف شنو العمل'), rtl('/actor أعمال ممثل'), rtl('/get حمّل ترجمات حلقة كملفات'), rtl('/serpkey مفتاح SerpApi (Lens)'), rtl('/settings الإعدادات'), rtl('/clear امسح ترجمة آخر حلقة'), rtl('/batch جهّز دفعة حلقات'), rtl('/order امسح ترتيب تراكات حلقة'), rtl('/stop أوقف الدفعة الشغالة')].join('\n') });
     else if (isPlainSearchText(text)) { if (!startSearch(() => onFind(chatId, text))) await tg('sendMessage', { chat_id: chatId, text: rtl(SEARCH_BUSY_TEXT) }).catch(() => {}); }
   } catch (e) {
     logErr('خطأ بمعالجة أمر', e);
@@ -1382,7 +1386,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }, { command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'actor', description: 'أعمال ممثل بالاسم' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }, { command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'actor', description: 'أعمال ممثل بالاسم' }, { command: 'get', description: 'حمّل ترجمات حلقة كملفات' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {
@@ -1423,6 +1427,7 @@ function start() {
 function stop() { stopped = true; }
 
 search.init({ tg, withTimeout, logErr, answerCb, scrub, loadCtx, getCtx: () => ctx, getMeta, onRequest, takeCount });
+getter.init({ tg, withTimeout, logErr, answerCb, scrub, loadCtx, getCtx: () => ctx, parseRequest, loadLast, idsOf });
 loadCtx().catch(() => {});
 
 module.exports = {

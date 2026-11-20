@@ -1174,7 +1174,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                     id: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx,
                     url: baseUrl + streamRawAss + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx
+                    title: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx,
+                    ...(fromBot ? { rel: nameOf(sub) } : {})
                 });
             }
         }
@@ -1189,7 +1190,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                     id: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx,
                     url: baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx
+                    title: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx,
+                    ...(fromBot ? { rel: nameOf(sub) } : {})
                 });
             }
         }
@@ -1212,7 +1214,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                     id: corrName,
                     url: baseUrl + streamAraSrt + '?url=' + encodeURIComponent(corrSrtList[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: corrName
+                    title: corrName,
+                    ...(fromBot ? { rel: nameOf(corrSrtList[i]) } : {})
                 });
             }
         }
@@ -1224,7 +1227,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                     id: corrName,
                     url: baseUrl + streamAraAss + '?url=' + encodeURIComponent(corrAssList[i].url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: corrName
+                    title: corrName,
+                    ...(fromBot ? { rel: nameOf(corrAssList[i]) } : {})
                 });
             }
         }
