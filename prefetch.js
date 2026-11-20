@@ -92,6 +92,18 @@ async function getSeasonInfo(imdbId) {
     }
 }
 
+// هل الحلقة موجودة بحسب Cinemeta؟ (موسم 1 مع مواسم أخرى ⟵ قد يكون ترقيماً مطلقاً للأنمي فنقارن بمجموع كل الحلقات)
+function episodeExists(counts, season, ep) {
+    const max = counts.get(season);
+    if (max !== undefined && ep <= max) return true;
+    if (season === 1 && counts.size > 1) {
+        let total = 0;
+        for (const n of counts.values()) total += n;
+        return ep <= total;
+    }
+    return false;
+}
+
 async function resolveNextEpisodeTargetId(targetId) {
     const simple = getNextEpisodeTargetId(targetId);
     if (!simple) return null;
@@ -148,6 +160,20 @@ async function runNextEpisodePrefetch(info) {
             const relMs = await getReleaseMs(np[0], parseInt(np[1], 10), parseInt(np[2], 10));
             if (relMs != null && relMs > Date.now()) {
                 console.log('[تجهيز تلقائي] ' + nextTargetId + ' لم تُعرض بعد (' + new Date(relMs).toISOString().slice(0, 10) + ') ⟵ لا أجهّزها.');
+                return;
+            }
+        }
+    } catch (e) {}
+
+    // لا نجهّز حلقة غير موجودة أصلاً بـ Cinemeta (مثلاً بعد آخر حلقة بالموسم ولا يوجد موسم تالي) ⟵ نتوقف بصمت
+    try {
+        const np = String(nextTargetId).split(':');
+        if (np[0].startsWith('tt') && np.length >= 3) {
+            const info = await getSeasonInfo(np[0]);
+            const s = parseInt(np[1], 10);
+            const e = parseInt(np[2], 10);
+            if (info && info.counts && !isNaN(s) && !isNaN(e) && s >= 1 && !episodeExists(info.counts, s, e)) {
+                console.log('[تجهيز تلقائي] ' + nextTargetId + ' غير موجودة بـ Cinemeta (' + targetId + ' آخر حلقة معروفة) ⟵ لا أجهّزها.');
                 return;
             }
         }
@@ -278,6 +304,7 @@ function activatePendingNextEpTimer(targetId, label, trackNum) {
 }
 
 module.exports = {
+    episodeExists,
     getReleaseMs,
     getNextEpisodeTargetId,
     resolveNextEpisodeTargetId,
