@@ -229,8 +229,38 @@ function spellDetail(spell) {
   ];
 }
 
+const modelWon = new Map();
+const MODEL_WON_TTL_MS = 6 * 3600 * 1000;
+function shortModelName(m) {
+  const s = String(m || '').replace(/^models\//, '').trim();
+  let r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash-lite/i);
+  if (r) return r[1] + ' لايت';
+  r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash/i);
+  if (r) return r[1] + ' فلاش';
+  return s;
+}
+function modelWonKey(ev) { return [ev && ev.label, ev && ev.targetId, ev && ev.trackNum].join('|'); }
+function rememberModelWon(ev, name) {
+  try {
+    const n = String(name || '').trim();
+    if (!n) return;
+    const now = Date.now();
+    if (modelWon.size >= 100) for (const [k, v] of modelWon) if (now - v.at > MODEL_WON_TTL_MS) modelWon.delete(k);
+    if (modelWon.size >= 100) modelWon.clear();
+    modelWon.set(modelWonKey(ev), { name: n, at: now });
+  } catch (e) {}
+}
+function takeModelWon(ev) {
+  const key = modelWonKey(ev);
+  const hit = modelWon.get(key);
+  modelWon.delete(key);
+  if (hit && Date.now() - hit.at < MODEL_WON_TTL_MS) return hit.name;
+  return ev && ev.model ? shortModelName(ev.model) : '';
+}
+
 async function report(ev) {
   statTrack(ev);
+  const doneBy = takeModelWon(ev);
   let ep;
   try { ep = await describeEpisode(ev.targetId); } catch (e) { ep = null; }
   if (!ep) ep = { text: String(ev.targetId || ''), alt: null };
@@ -264,7 +294,7 @@ async function report(ev) {
     title1 = 'اكتمل: ' + tgHead;
     detail = ['work', 'ep', 'src',
       '📄 الأسطر: ' + (ev.total || 0) + (ev.rejected > 0 ? ' — مرفوض: ' + ev.rejected : ''),
-      '⏱ الوقت: ' + arSeconds(secs), ...spellDetail(ev.spell)];
+      '⏱ الوقت: ' + arSeconds(secs) + (doneBy ? ' | بواسطة ' + latin(doneBy) : ''), ...spellDetail(ev.spell)];
     if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
     detail.push('🔔 ' + why);
   } else if (ev.kind === 'partial') {
@@ -273,7 +303,7 @@ async function report(ev) {
     const fi = ev.failInfo;
     const allFailed = !!(fi && fi.all);
     title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
-    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...spellDetail(ev.spell)];
+    detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...(doneBy ? ['🧠 بواسطة ' + latin(doneBy)] : []), ...spellDetail(ev.spell)];
     if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
       detail.push('🧩 الأسطر الناقصة: ' + fi.ranges.slice(0, 6).map(r => latin(r[0] === r[1] ? String(r[0]) : r[0] + '–' + r[1])).join('، ') + (fi.ranges.length > 6 ? ' ...' : ''));
       if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
@@ -354,6 +384,7 @@ async function modelReport(ev) {
   if (!ENABLED) return;
   const kind = String(ev && ev.kind || '');
   statModel(kind, ev && ev.model);
+  if (kind === 'choke' || kind === 'fallback-won') return;
   const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
   const now = Date.now();
   const last = modelSeen.get(key);
@@ -374,13 +405,7 @@ async function modelReport(ev) {
   const trk = (KIND[ev.label] || ev.label || '') ? 'تراك ' + (ev.trackNum || '؟') + ' ' + latin(KIND[ev.label] || ev.label) : '';
 
   const out = [];
-  if (kind === 'choke') {
-    out.push('⚠️ اختناق الموديل');
-    const f = ev.fails || 2;
-    out.push('🧠 الموديل ' + m1 + ' فشل ' + (f === 2 ? 'مرتين' : f <= 10 ? f + ' مرات' : f + ' مرة') + ' على نفس الدفعة');
-  } else if (kind === 'fallback-won') {
-    out.push('✅ الاحتياطي ' + m1 + ' سبق وأنجز الدفعة');
-  } else if (kind === 'both-failed') {
+  if (kind === 'both-failed') {
     out.push('❌ الموديلان ' + m1 + ' و' + m2 + ' فشلا');
   } else if (kind === 'rescue') {
     out.push('🚑 إنقاذ تلقائي');
@@ -391,13 +416,17 @@ async function modelReport(ev) {
   out.push('🎬 ' + latin(title ? title + ' (' + workId + ')' : workId));
   if (!isMovie && ep) out.push('📺 ' + ep.text + (trk ? ' — ' + trk : ''));
   else if (trk) out.push('📺 ' + trk);
-  if (kind === 'choke') out.push('↪️ شغّلت الموديل ' + m2 + ' جنبه، والأسرع يفوز');
   if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
   enqueue(out.map(rtl).join('\n'));
 }
 
 function modelEvent(ev) {
-  try { modelReport(ev || {}).catch(() => {}); } catch (e) {}
+  try {
+    const k = ev && ev.kind;
+    if (k === 'fallback-won') rememberModelWon(ev, ev.model);
+    else if (k === 'rescue') rememberModelWon(ev, ev.other);
+    modelReport(ev || {}).catch(() => {});
+  } catch (e) {}
 }
 
 const STATS_TZ_MS = 3 * 3600 * 1000;

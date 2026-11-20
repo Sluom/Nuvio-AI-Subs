@@ -317,7 +317,7 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
             if (!healKind) return;
             try {
                 notify.trackEvent({
-                    kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey,
+                    kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey, model: userModel,
                     ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, rejected: r && r.rejected, failInfo: r && r.failInfo,
                     spell: spellAcc.size ? [...spellAcc.entries()].sort((a, b) => b[1] - a[1]) : null,
                     healTried, healed, rounds: MAX_BACKGROUND_ROUNDS,
