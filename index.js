@@ -1266,6 +1266,36 @@ const sendSub = (res, mime, name, body) => {
     res.send(body);
 };
 
+// حاجز الانفجار: تراك جديد بنفس الحلقة يوصل خلال BURST_GUARD_MS من آخر تراك انقبل يُتجاهل (كأنه ما صار).
+// يمنع فقط بدء تصحيح جديد؛ التراك الجاهز أو اللي يشتغل أصلاً ما يتأثر. البوت والدفعات والخلفية مستثناة من الرفض (بس تفتح العداد).
+const BURST_GUARD_MS = 10000;
+const burstLast = new Map();
+const burstGuardOn = () => settings.get('burst_guard') !== false;
+
+function burstSrc(req) {
+    const h = (req && req.headers) || {};
+    const ip = String(h['x-forwarded-for'] || (req && req.ip) || '').split(',')[0].trim() || '?';
+    const ua = String(h['user-agent'] || '-').replace(/\s+/g, ' ').slice(0, 90);
+    const extra = [];
+    for (const k of ['sec-purpose', 'purpose', 'sec-fetch-dest', 'sec-fetch-mode']) {
+        if (h[k]) extra.push(k + '=' + String(h[k]).slice(0, 30));
+    }
+    return 'ip=' + ip + ' | ua=' + ua + (extra.length ? ' | ' + extra.join(' ') : '') + ' | ' + ((req && req.method) || '?');
+}
+
+function burstCheck(targetId, desc, exempt) {
+    const now = Date.now();
+    const last = burstLast.get(targetId);
+    if (!exempt && burstGuardOn() && last && now - last.at < BURST_GUARD_MS) {
+        return { blocked: true, ms: now - last.at, last };
+    }
+    burstLast.set(targetId, { at: now, desc });
+    if (burstLast.size > 300) {
+        for (const [k, v] of burstLast) if (now - v.at > 60000) burstLast.delete(k);
+    }
+    return { blocked: false, last };
+}
+
 function parseEpInfoFromTargetId(targetId) {
     if (!targetId) return null;
     const parts = String(targetId).split(':');
@@ -1341,6 +1371,16 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
                 console.log('[MongoDB] ' + label + ' Track ' + trackNum + ': جاهز من mongo');
             } else {
                 const cfg = parseConfig(req.params.config);
+                if (targetId) {
+                    const exempt = isPrefetch || String(req.query.nopf || '') === '1';
+                    const g = burstCheck(targetId, label + ' ' + trackNum, exempt);
+                    if (g.blocked) {
+                        console.log('[حاجز] تجاهلت ' + label + ' Track ' + trackNum + ' للحلقة ' + targetId + ': وصل بعد ' + (g.ms / 1000).toFixed(1) + ' ث من ' + g.last.desc + ' ⟵ ' + burstSrc(req));
+                        res.setHeader('Cache-Control', 'no-store');
+                        return sendSub(res, mime, 'Trans-Wait-' + label + '.' + ext, waitBody);
+                    }
+                    console.log('[بدء] ' + label + ' Track ' + trackNum + ' ' + targetId + (isPrefetch ? ' (خلفية)' : (exempt ? ' (بوت)' : '')) + ' ⟵ ' + burstSrc(req));
+                }
                 startTranslationJob({
                     cacheKey: primaryCacheKey, handler, targetUrl,
                     userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
