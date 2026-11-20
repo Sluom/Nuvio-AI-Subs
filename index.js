@@ -1570,7 +1570,8 @@ app.get(['/check/:type/:reqId(*)', '/:config/check/:type/:reqId(*)'], async (req
     if (!targetId) return res.status(400).send('<!DOCTYPE html><meta charset="utf-8"><p dir="rtl">اكتب معرّف العمل بعد check/' + checkEsc(type) + '/ مثل tt21097264:1:2</p>');
     const proto = req.headers['x-forwarded-proto'] || 'https';
     const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '') + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json';
+    // صفحة الفحص تطلب القائمة بنفس أسلوب بوت تلغرام (جودة الخلفية، بلا حد 5-6 ثواني) ليطلع نفس التصفية والنتائج
+    const subsPath = (rawConfig ? '/' + encodeURIComponent(rawConfig) : '') + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json?bgq=1';
     let subs = [], error = '', displayTitle = '';
     try {
         const [r, resolvedTitle] = await Promise.all([
