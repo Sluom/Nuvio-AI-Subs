@@ -480,7 +480,7 @@ async function loadCtx() {
 
 function noteContext(req) {
   try {
-    if (req && req.headers && req.headers['x-nuvio-nonote']) return;   // طلبات الدفعة بموديل مختار: لا تغيّر الإعداد المحفوظ
+    if (req && req.headers && req.headers['x-nuvio-nonote']) return;
     const raw = req && req.params && req.params.config;
     if (!raw) return;
     ctx = {
@@ -592,7 +592,6 @@ async function onRequest(chatId, rq, count) {
   }
 }
 
-// اختيار الموديل يظهر فقط بقائمة تراكات الدفعة (الافتراضي = موديل رابطك)
 const BATCH_MODELS = [
   { code: 'd', model: '', label: 'الافتراضي' },
   { code: '1', model: 'gemini-3.1-flash-lite', label: '3.1 لايت' },
@@ -632,7 +631,6 @@ async function onGapCallback(cq) {
   await editMsg(cq.message, r.head.concat(rtl(BATCH_PICK_TEXT)).join('\n'), { inline_keyboard: trackRows(m[1], r) });
 }
 
-// نبدّل حقل model داخل الإعداد (JSON) فقط، بدون ما نغيّر الإعداد المحفوظ
 function configWithModel(raw, model) {
   try {
     let d;
@@ -643,7 +641,6 @@ function configWithModel(raw, model) {
   } catch (e) { return null; }
 }
 
-// مسار التراك أوله الإعداد: نبدّله بالإعداد الجديد (يرجع null اذا شكل المسار غير متوقع)
 function swapPathConfig(path, newRaw) {
   try {
     if (!ctx || !ctx.rawConfig || path[0] !== '/') return null;
@@ -683,10 +680,9 @@ async function onGoCallback(cq) {
 }
 
 const COUNTS = [4, 6, 8, 10, 20];
-const GAP_SMALL_MS = 5 * 60 * 1000;   // دفعة 4 حلقات او اقل
-const GAP_BIG_MS = 10 * 60 * 1000;    // دفعة اكثر من 4 حلقات
+const GAP_SMALL_MS = 5 * 60 * 1000;
+const GAP_BIG_MS = 10 * 60 * 1000;
 function batchGapMs(count) { return (count || 0) <= 4 ? GAP_SMALL_MS : GAP_BIG_MS; }
-// اختيار الفاصل لكل دفعة (5 او 10 دقائق)؛ اذا ما اختار المستخدم يبقى الافتراضي حسب العدد
 const GAP_CHOICES_MIN = [5, 10];
 const gapMinOf = (count, chosen) => chosen || (batchGapMs(count) / 60000);
 const batchLineText = (count, chosen) => '📦 دفعة: ' + count + ' حلقات (حلقة كل ' + gapMinOf(count, chosen) + ' دقائق، وتتوقف بنهاية الموسم)';
@@ -1169,7 +1165,6 @@ const isPurgeCmd = t => /^\/purge(@\w+)?$/i.test(t);
 const isStopCmd = t => /^\/stop(@\w+)?$/i.test(t) || t === 'ايقاف' || t === 'إيقاف';
 const isStartCmd = t => /^\/start(@\w+)?$/i.test(t);
 
-// ===== الإعدادات: تتغير من هنا وتنحفظ بـ Mongo (تعديل تلغرام ← متغير ريندر ← الافتراضي) =====
 const SLOT_CHOICES = settings.ASS_SLOT_CHOICES;
 const SRT_CHOICES = settings.SRT_SLOT_CHOICES;
 const SLOT_FIX = { subs: 'subsource', wyz: 'wyzie', wiz: 'wyzie', legacy: 'org', os_legacy: 'org', oscom: 'com', mirror: 'os', opensubtitles: 'os', '*': 'any' };

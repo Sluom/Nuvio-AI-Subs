@@ -4,7 +4,7 @@ const axios = require('axios');
 
 const MAP_URL = process.env.CEE_MAP_URL || 'https://sluom.github.io/cinemana-catalog/cee-map.json';
 const CEE_BASE = (process.env.CEE_BASE || 'https://cee.buzz').replace(/\/+$/, '');
-const LIVE_ENABLED = false; // مثبّت مطفي (كان CEE_LIVE=0)
+const LIVE_ENABLED = false;
 const REFRESH_MS = 60 * 60 * 1000;
 const RETRY_MS = 2 * 60 * 1000;
 const LIVE_OK_MS = 6 * 60 * 60 * 1000;
@@ -90,7 +90,7 @@ async function resolveLive(nb) {
             imdbId = imdbOf(rd);
             title = str(rd.en_title) || str(rd.ar_title) || title;
             year = str(rd.year) || year;
-        } catch (e) { /* نكمل بدون رقم */ }
+        } catch (e) { }
     }
     return {
         ok: true,

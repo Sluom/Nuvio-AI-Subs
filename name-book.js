@@ -527,7 +527,6 @@ function applyNameBook(texts, eligible, book, flagsArr = null) {
   const allowUnwrap = book.complete !== false;
   return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
-// تثبيت يدوي: pins = { p: [أشخاص], c: [أماكن/منظمات] } ⟵ يُضاف للقاموس قبل التنصيص، ولا يدخل بتصويت ذاكرة المسلسل
 function applyPins(book, pins) {
   if (!pins || typeof pins !== 'object') return book;
   const persons = Array.isArray(pins.p) ? pins.p : [];
@@ -541,7 +540,6 @@ function applyPins(book, pins) {
       const k = bookKey(w);
       if (!k || k.split(' ').length > 3) continue;
       book.map.set(k, { kind, ambig: false, pinned: true });
-      // الكلمة المفردة تنثبّت بشكلين: بـ"ال" التعريف وبدونها (العبارات من أكثر من كلمة تبقى كما كتبها)
       if (!k.includes(' ')) {
         if (k.startsWith('ال')) { if (k.length - 2 >= 3) variants.push([k.slice(2), kind]); }
         else variants.push(['ال' + k, kind]);
@@ -550,7 +548,7 @@ function applyPins(book, pins) {
   }
   for (const [vk, kind] of variants) {
     const ex = book.map.get(vk);
-    if (ex && ex.pinned) continue; // تثبيت صريح من المستخدم يغلب النسخة التلقائية
+    if (ex && ex.pinned) continue;
     book.map.set(vk, { kind, ambig: false, pinned: true });
   }
   book.size = book.map.size;

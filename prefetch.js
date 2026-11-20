@@ -16,8 +16,6 @@ const LABEL_TO_STREAM_PATH = {
     'ASS': '/stream-ai.ass'
 };
 
-// أزرار تلغرام (prefetch_ass / prefetch_srt): توقف تجهيز الحلقة التالية التلقائي لنوع التراك (ASS او SRT) كلٌ على حدة.
-// دفعات تلغرام (/batch وطلبات البوت nopf=1) ما تمرّ من هنا فلا تتأثر.
 function prefetchKind(label) {
     const p = LABEL_TO_STREAM_PATH[label];
     if (!p) return null;
@@ -54,7 +52,6 @@ async function getSeasonCounts(imdbId) {
     return e ? e.counts : null;
 }
 
-// تاريخ عرض حلقة (ms) من Cinemeta، أو null إذا غير معروف
 async function getReleaseMs(imdbId, season, ep) {
     const e = await getSeasonInfo(imdbId);
     if (!e || !e.rel) return null;
@@ -92,7 +89,6 @@ async function getSeasonInfo(imdbId) {
     }
 }
 
-// هل الحلقة موجودة بحسب Cinemeta؟ (موسم 1 مع مواسم أخرى ⟵ قد يكون ترقيماً مطلقاً للأنمي فنقارن بمجموع كل الحلقات)
 function episodeExists(counts, season, ep) {
     const max = counts.get(season);
     if (max !== undefined && ep <= max) return true;
@@ -140,7 +136,6 @@ async function runNextEpisodePrefetch(info) {
     let nextTargetId = await resolveNextEpisodeTargetId(targetId);
     if (!nextTargetId) return;
 
-    // تجاوز حلقات الحشو (في الخلفية فقط): إن كانت الحلقة التالية حشواً نجهّز أقرب حلقة غير حشو بعدها
     try {
         const skip = await skipFillerAhead(targetId, kitsuId, kitsuEp);
         if (skip) {
@@ -153,7 +148,6 @@ async function runNextEpisodePrefetch(info) {
         console.error('[تجهيز تلقائي] فحص الحشو فشل (' + e.message + ') ⟵ أكمل بالحلقة التالية العادية.');
     }
 
-    // لا نجهّز حلقة لم تُعرض بعد (وإلا تُحفظ ترجمات غلط مرفوعة على حلقة غير منشورة)
     try {
         const np = String(nextTargetId).split(':');
         if (np[0].startsWith('tt') && np.length >= 3) {
@@ -165,7 +159,6 @@ async function runNextEpisodePrefetch(info) {
         }
     } catch (e) {}
 
-    // لا نجهّز حلقة غير موجودة أصلاً بـ Cinemeta (مثلاً بعد آخر حلقة بالموسم ولا يوجد موسم تالي) ⟵ نتوقف بصمت
     try {
         const np = String(nextTargetId).split(':');
         if (np[0].startsWith('tt') && np.length >= 3) {

@@ -211,7 +211,6 @@ async function deleteMap(ns, key) {
   }
 }
 
-// روابط الإعداد القصيرة: مجموعة منفصلة بدون انتهاء (TTL) حتى ما يختفي الرابط
 async function saveLink(id, value) {
   const d = await getPrimaryDb();
   if (!d) return false;
@@ -228,7 +227,6 @@ async function saveLink(id, value) {
   }
 }
 
-// يرجع { ok:false } اذا القاعدة غير متاحة، و{ ok:true, value:null } اذا الرابط غير موجود
 async function loadLink(id) {
   const d = await getPrimaryDb();
   if (!d) return { ok: false, value: null };
@@ -256,7 +254,6 @@ async function stats() {
   return primary || tracks ? { primary, tracks } : null;
 }
 
-// أسماء/أماكن مثبّتة يدوياً لكل مسلسل: مجموعة منفصلة بدون انتهاء (TTL) مثل الروابط القصيرة
 async function savePins(sid, value) {
   const d = await getPrimaryDb();
   if (!d) return false;
@@ -285,8 +282,6 @@ async function loadPins(sid) {
   }
 }
 
-// مسح بنطاق تاريخ (آخر تحديث): 'translations' = ترجمات الحساب الأساسي (كاش الأسطر + نتائج التراكات المترجمة فقط)
-// 'tracks' = ملفات التراكات الخام بحساب التراكات. أي شي ثاني ما يتمس. dryRun = عدّ بدون حذف.
 async function purgeRange(kind, from, to, dryRun) {
   const range = { $gte: from, $lt: to };
   const out = { docs: 0, maps: 0 };

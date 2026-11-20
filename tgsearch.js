@@ -1,6 +1,4 @@
 'use strict';
-// ===== البحث بالاسم / الصورة / الممثل (انتقل من tgbot.js، بدون تغيير بالسلوك) =====
-// الدوال المشتركة مع tgbot.js (tg, logErr, ...) تُمرَّر مرة وحدة عبر init() عند تحميل tgbot.js.
 const axios = require('axios');
 const crypto = require('crypto');
 const settings = require('./settings');
@@ -629,7 +627,6 @@ async function onSmartCallback(cq) {
   await runSearch(cq.message.chat.id, f.raw, { forceSmart: true });
 }
 
-// ===== البحث بالصورة: Lens (SerpApi) + trace.moe بالتوازي ← طلب جمناي واحد (الصورة + الأدلة + وصفك) =====
 const IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 20000;
 const IMAGE_GEMINI_BUDGET_MS = 40000;
@@ -784,7 +781,6 @@ async function onSerpKeyCmd(chatId, arg, msgId) {
   await send(rtl('✅ انحفظ مفتاح SerpApi ') + latin(maskKey(r.value)) + rtl(' وانمسحت رسالتك من المحادثة.') + (r.saved === false ? '\n' + rtl('⚠️ اشتغل لكن ما انحفظ بالقاعدة (يرجع للقديم بعد إعادة التشغيل).') : ''));
 }
 
-// ===== /actor: بحث نصي عن أعمال ممثل (TMDB) =====
 const COUNTRY_WORDS = [
   [/^(كوري|كورية|korean)$/i, 'KR', 'ko'], [/^(تركي|تركية|turkish)$/i, 'TR', 'tr'], [/^(ياباني|يابانية|japanese)$/i, 'JP', 'ja'],
   [/^(هندي|هندية|indian)$/i, 'IN', 'hi'], [/^(اسباني|إسباني|اسبانية|إسبانية|spanish)$/i, 'ES', 'es'], [/^(فرنسي|فرنسية|french)$/i, 'FR', 'fr'],

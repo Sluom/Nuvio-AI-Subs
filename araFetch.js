@@ -55,7 +55,6 @@ function parseAssSlots(raw, max) {
     return { slots: slots.some(x => x !== 'any') ? slots : [], bad };
 }
 
-// ترتيب ASS/SRT يُقرأ لحظياً: تعديل تلغرام ← متغير ريندر ← فاضي (الترتيب القديم)
 const slotStates = {};
 function currentSlotsFor(key, label) {
     const raw = String(settings.get(key) || '');
@@ -988,7 +987,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         strictDedupe: isPrefetch
     });
 
-    // تقرير المواقع بتلغرام: جلب (قبل التصفية) ← بقى (بالقائمة النهائية)
     try {
         const kept = {};
         for (const x of [...value.ass, ...value.srt]) if (x && x._site) kept[x._site] = (kept[x._site] || 0) + 1;
@@ -998,7 +996,6 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         });
     } catch (_) {}
 
-    // سطر تشخيص مؤقت لـ subsource (يُحذف بعد الفحص)
     try {
         const ssReady = [...value.ass, ...value.srt].filter(x => x && x._site === 'subsource').length;
         console.log('[subsource] جلب ' + subsourceRawList.length + ' → بعد التصفية ' + (subsourcePre.assList.length + subsourcePre.srtList.length) + ' | جاهز (' + ssReady + ')' + (isPrefetch ? ' [تحميل مسبق]' : ''));

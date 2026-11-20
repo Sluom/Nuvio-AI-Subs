@@ -540,7 +540,6 @@ function startDailySummary() {
   arm();
 }
 
-// تقرير المواقع لكل طلب جديد: جلب ← بقى (كل المواقع تظهر حتى الصفر، بدون نص أخطاء)
 const SITE_ROWS = [['subdl', 'subdl'], ['subsource', 'subs'], ['opensubtitles', 'os'], ['oscom', 'com'], ['os_legacy', 'org'], ['wyzie', 'wyzie']];
 function sourcesText({ title, imdbId, season, episode, fetched, kept, isPrefetch, abs }) {
   const has = season != null && episode != null && season !== '' && episode !== '';
@@ -558,7 +557,6 @@ async function sourcesReport(info) {
   if (!ENABLED) return;
   let title = null;
   try { title = await titleOf(info.imdbId, info.type); } catch (e) {}
-  // الطلب جاء بترقيم مطلق (موسم 1 وحلقة أكبر من حلقات الموسم 1) ⟵ نعرض ترقيم المواسم أولاً ثم السهم للمطلق
   let shown = info;
   try {
     const s = parseInt(info.season, 10);

@@ -2,7 +2,6 @@
 
 const NS = 'cfg';
 const KEY = 'settings';
-// docs عليها انتهاء 120 يوم (TTL) ⟵ نجدد وقت الحفظ كل 7 أيام حتى ما تنمسح الإعدادات بصمت
 const TOUCH_MS = 7 * 24 * 60 * 60 * 1000;
 
 const ASS_SLOT_CHOICES = ['subdl', 'subsource', 'wyzie', 'org', 'any'];
@@ -74,7 +73,6 @@ function get(key) {
   return d.fromEnv(raw);
 }
 
-// من أين جاءت القيمة الحالية: tg | env | def
 function source(key) {
   if (Object.prototype.hasOwnProperty.call(overrides, key)) return 'tg';
   const raw = envRaw(key);
@@ -114,7 +112,6 @@ async function clear(key) {
 
 async function load() {
   const ok = await loadOnce();
-  // لو Mongo ما كان جاهز عند التشغيل: نعيد القراءة مرتين إذا ما في تعديلات بالذاكرة
   for (const ms of [45000, 300000]) {
     const t = setTimeout(() => { if (!Object.keys(overrides).length) loadOnce().catch(() => {}); }, ms);
     if (t.unref) t.unref();

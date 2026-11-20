@@ -7,7 +7,7 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const SOURCE = String(process.env.WYZIE_SOURCE || 'all').trim() || 'all';
 const SOURCE_COST = SOURCE === 'all' ? 3 : Math.max(1, SOURCE.split(',').filter(Boolean).length);
 const DAILY_UNITS = Math.max(30, parseInt(process.env.WYZIE_DAILY_UNITS || '1000', 10) || 1000);
-const ALL_TITLES = true; // للاختبار: ويز لكل الأعمال (ارجعها false ليرجع للأنمي فقط)
+const ALL_TITLES = true;
 
 const MAX_RESULTS = 3;
 const SEARCH_TIMEOUT_MS = 3000;
