@@ -248,10 +248,11 @@ async function getAbsoluteEpisodeNumber(imdbId, season, episode) {
     return absEp > eNum ? absEp : null;
 }
 
-function withTimeout(promise, ms, name) {
+function withTimeout(promise, ms, name, flag) {
     let timer;
     const timeout = new Promise(resolve => {
         timer = setTimeout(() => {
+            if (flag) flag.hit = true;
             console.log('[جلب عربي - ' + name + '] تجاوز ' + (ms / 1000).toFixed(1) + ' ثانية، تجاهلته وكملت بالباقي.');
             resolve([]);
         }, ms);
@@ -883,8 +884,9 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         { key: 'oscom', name: 'opensubtitles.com', run: () => getOsCom({ imdbId, season, episode }) },
         { key: 'wyzie', name: 'Wyzie', run: () => getWyzieAss({ imdbId, season, episode, type, isPrefetch }) }
     ];
+    const timeoutFlag = { hit: false };
     const settled = await Promise.allSettled(
-        sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), timeouts[d.key], d.name))
+        sourceDefs.map(d => withTimeout(Promise.resolve().then(d.run), timeouts[d.key], d.name, timeoutFlag))
     );
     const getList = idx => (settled[idx].status === 'fulfilled' && Array.isArray(settled[idx].value) ? settled[idx].value : []);
     const osPart = (name, list) => {
@@ -900,7 +902,8 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
         subdlRawList: getList(2),
         subsourceRawList: getList(3),
         oscomRawList: getList(4),
-        wyzieRawList: getList(5)
+        wyzieRawList: getList(5),
+        timedOut: timeoutFlag.hit
     };
 }
 
@@ -914,7 +917,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         if (!isPrefetch || hit.isComplete) return hit.value;
     }
 
-    let { osLegacyList, osMirrorList, subdlRawList, subsourceRawList, oscomRawList, wyzieRawList } = await fetchAllSourcesOnce({
+    let { osLegacyList, osMirrorList, subdlRawList, subsourceRawList, oscomRawList, wyzieRawList, timedOut } = await fetchAllSourcesOnce({
         imdbId, season, episode, type, subdlKey, subsourceKey, isPrefetch
     });
 
@@ -929,6 +932,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
             const absRes = await fetchAllSourcesOnce({
                 imdbId, season: 1, episode: absEp, type, subdlKey, subsourceKey, isPrefetch
             });
+            if (absRes.timedOut) timedOut = true;
             const tagAbs = list => list.map(item => {
                 if (item && item.url) rememberUrlEpOverride(item.url, absOverride);
                 return { ...item, _epOverride: absOverride };
@@ -986,6 +990,7 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         verifiedZipItems: snapshot,
         strictDedupe: isPrefetch
     });
+    if (timedOut) value.partial = true;
 
     try {
         const kept = {};
