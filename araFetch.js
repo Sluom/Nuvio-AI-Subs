@@ -8,7 +8,7 @@ const { hasEgyptianSpelling } = require('./arabic-spelling');
 const settings = require('./settings');
 const srcpins = require('./srcpins');
 
-module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, applySiteSlots, parseAssSlots } };
+module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, applySiteSlots, parseAssSlots, markRetryRecovered } };
 
 const cleanPath = p => String(p || '').split('?')[0];
 
@@ -1093,6 +1093,17 @@ srcpins.onChange(() => pinRetryDone.clear());
 const pinRetrySleep = ms => new Promise(r => setTimeout(r, ms));
 const readyCount = v => ((v && v.ass && v.ass.length) || 0) + ((v && v.srt && v.srt.length) || 0);
 
+function markRetryRecovered(before, v) {
+    const still = new Set((v.pinMissing || []).map(p => p.kind + ':' + p.track));
+    for (const p of before || []) {
+        if (still.has(p.kind + ':' + p.track)) continue;
+        const list = (p.kind === 'ass' ? v.ass : v.correctorSrt) || [];
+        const at = list[p.track - 1];
+        const item = (at && srcpins.matches(p, at)) ? at : list.find(x => srcpins.matches(p, x));
+        if (item) item._pinRetry = true;
+    }
+}
+
 async function retryForPins(args, first, key, t0) {
     const tag = args.imdbId + ' ' + args.season + ':' + args.episode;
     const names = first.pinMissing.map(p => (p.kind === 'ass' ? 'ASS' : 'SRT') + ' تراك ' + p.track).join('، ');
@@ -1106,6 +1117,7 @@ async function retryForPins(args, first, key, t0) {
         let v = null;
         try { v = await getArabicSubsForCorrectionOnce({ ...args, noCache: true, retryPending: !last }); } catch (e) { v = null; }
         if (!v) continue;
+        markRetryRecovered(first.pinMissing, v);
         if (!v.pinMissing || !v.pinMissing.length) {
             best = v;
             ok = true;

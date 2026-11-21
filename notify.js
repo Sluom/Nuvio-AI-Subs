@@ -272,10 +272,12 @@ async function pinStatus(ev, slot) {
       if (it && it.url && pins.packOf(it.url) === pins.packOf(ev.url)) {
         item.name = it.name;
         item._site = it._site || it._source;
+        item._retry = !!it._pinRetry;
       }
     } catch (e) { doc = null; }
   }
   const st = pins.statusFor(ev.targetId, kind, ev.trackNum, item);
+  if (st.state === 'on' && item._retry) st.retry = true;
   if (st.state === 'missing' && st.pin && doc && Array.isArray(doc[kind])) {
     const idx = doc[kind].findIndex(x => x && x.url && pins.matches(st.pin, { url: x.url, name: x.name, _site: x._site || x._source }));
     if (idx >= 0) return { state: 'moved', pin: st.pin, at: idx + 1 };
@@ -389,7 +391,7 @@ async function report(ev) {
   const lines = [rtl(badge + ' ' + title1)];
   for (const d of detail) {
     if (d === 'src') {
-      lines.push(rtl('📦 المصدر: ' + latin(src) + (pinSt.state === 'on' ? ' 📌 مثبّت' : '')));
+      lines.push(rtl('📦 المصدر: ' + latin(src) + (pinSt.state === 'on' ? ' 📌' : '')));
     } else if (d === 'work') {
       lines.push(rtl(workLine));
     } else if (d === 'ep') {
@@ -418,7 +420,7 @@ async function report(ev) {
       if (pinSt.state === 'none' || pinSt.state === 'on') {
         const tail = pinSlot + ':' + ev.trackNum + ':' + ev.targetId;
         const cb = (pinSt.state === 'on' ? 'pu:' : 'pn:') + tail;
-        if (Buffer.byteLength(cb) <= 64) rows.push([{ text: pinSt.state === 'on' ? '📌 مثبّت ✓ (اضغط للإلغاء)' : '📌 ثبّت هذا المصدر', callback_data: cb }]);
+        if (Buffer.byteLength(cb) <= 64) rows.push([{ text: pinSt.state === 'on' ? '📌 مثبّت ✓ (اضغط للإلغاء)' + (pinSt.retry ? ' 🔄' : '') : '📌 ثبّت هذا المصدر', callback_data: cb }]);
       }
       markup = { inline_keyboard: rows };
     }

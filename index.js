@@ -36,7 +36,8 @@ function makePinEntry(item) {
     url: item.url,
     _source: item._source || item._site || 'subdl',
     _site: item._site || item._source || 'subdl',
-    name: nameOf(item)
+    name: nameOf(item),
+    ...(item._pinRetry ? { _pinRetry: true } : {})
   };
 }
 
@@ -400,7 +401,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshSrt) {
         if (finalSrt.length >= 4) break;
         if (item && item.url && !usedSrtUrls.has(item.url)) {
-            finalSrt.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: nameOf(item) });
+            finalSrt.push(makePinEntry(item));
             usedSrtUrls.add(item.url);
             changed = true;
         }
@@ -416,7 +417,7 @@ async function resolvePinnedCorrectorTracks(targetId, freshSrtList, freshAssList
     for (const item of freshAss) {
         if (finalAss.length >= 4) break;
         if (item && item.url && !usedAssUrls.has(item.url)) {
-            finalAss.push({ url: item.url, _source: item._source || item._site || 'subdl', _site: item._site || item._source || 'subdl', name: nameOf(item) });
+            finalAss.push(makePinEntry(item));
             usedAssUrls.add(item.url);
             changed = true;
         }
