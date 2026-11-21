@@ -355,4 +355,56 @@ async function deleteLists(ids) {
   }
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange, savePins, loadPins, loadList, saveList, deleteLists };
+async function saveSrcPins(imdb, value) {
+  const d = await getPrimaryDb();
+  if (!d) return false;
+  try {
+    await d.collection('srcpins').updateOne(
+      { _id: String(imdb) },
+      { $set: { value, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+      { upsert: true }
+    );
+    return true;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حفظ تثبيت المصدر: ${e.message}`);
+    return false;
+  }
+}
+
+async function loadSrcPins(imdb) {
+  const d = await getPrimaryDb();
+  if (!d) return { ok: false, value: null };
+  try {
+    const doc = await d.collection('srcpins').findOne({ _id: String(imdb) });
+    return { ok: true, value: doc ? doc.value : null };
+  } catch (e) {
+    console.log(`[MongoDB] فشلت قراءة تثبيت المصدر: ${e.message}`);
+    return { ok: false, value: null };
+  }
+}
+
+async function listSrcPins() {
+  const d = await getPrimaryDb();
+  if (!d) return { ok: false, rows: [] };
+  try {
+    const docs = await d.collection('srcpins').find({}).limit(200).toArray();
+    return { ok: true, rows: docs.map(x => ({ imdb: String(x._id), value: x.value })) };
+  } catch (e) {
+    console.log(`[MongoDB] فشلت قراءة قائمة تثبيت المصادر: ${e.message}`);
+    return { ok: false, rows: [] };
+  }
+}
+
+async function deleteSrcPins(imdb) {
+  const d = await getPrimaryDb();
+  if (!d) return false;
+  try {
+    await d.collection('srcpins').deleteOne({ _id: String(imdb) });
+    return true;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حذف تثبيت المصدر: ${e.message}`);
+    return false;
+  }
+}
+
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange, savePins, loadPins, loadList, saveList, deleteLists, saveSrcPins, loadSrcPins, listSrcPins, deleteSrcPins };

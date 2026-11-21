@@ -258,6 +258,25 @@ function takeModelWon(ev) {
   return ev && ev.model ? shortModelName(ev.model) : '';
 }
 
+async function pinStatus(ev, slot) {
+  const pins = require('./srcpins');
+  await pins.forSeries(ev.targetId);
+  const kind = slot === 'a' ? 'ass' : 'srt';
+  const item = { url: ev.url };
+  if (typeof ev.loadDoc === 'function') {
+    try {
+      const tag = require('./corrector').TRACKS_TAG || '';
+      const doc = await ev.loadDoc('corr_pins_' + ev.targetId + tag);
+      const it = doc && Array.isArray(doc[kind]) ? doc[kind][Number(ev.trackNum) - 1] : null;
+      if (it && it.url && pins.packOf(it.url) === pins.packOf(ev.url)) {
+        item.name = it.name;
+        item._site = it._site || it._source;
+      }
+    } catch (e) { /* لا شيء */ }
+  }
+  return pins.statusFor(ev.targetId, kind, ev.trackNum, item);
+}
+
 async function report(ev) {
   statTrack(ev);
   const doneBy = takeModelWon(ev);
@@ -286,6 +305,12 @@ async function report(ev) {
 
   const tgHead = 'تراك ' + ev.trackNum + ' ' + latin(kindName);
 
+  const pinSlot = ev.label === 'ARA-ASS' ? 'a' : ev.label === 'ARA-SRT' ? 's' : '';
+  let pinSt = { state: 'off', pin: null };
+  if (ev.kind === 'done' && pinSlot && !isMovie && ev.targetId && /^\d+$/.test(String(ev.trackNum))) {
+    try { pinSt = await pinStatus(ev, pinSlot); } catch (e) { pinSt = { state: 'none', pin: null }; }
+  }
+
   if (ev.kind === 'done') {
     line = head + ' | ' + ep.text + ' | ' + src + ' | ' + secs + ' ثانية | ' + (ev.total || 0) + ' سطر'
       + (ev.rejected > 0 ? ' | ' + ev.rejected + ' مرفوض' : '')
@@ -297,6 +322,11 @@ async function report(ev) {
       '⏱ الوقت: ' + arSeconds(secs) + (doneBy ? ' | بواسطة ' + latin(doneBy) : ''), ...spellDetail(ev.spell)];
     if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
     detail.push('🔔 ' + why);
+    if (pinSt.state === 'missing' && pinSt.pin) {
+      warn = true; badge = '⚠️';
+      const si = detail.indexOf('src');
+      detail.splice(si + 1, 0, '📌 المثبّت (' + latin(pinSt.pin.site + ' ' + (pinSt.pin.pack || pinSt.pin.name)) + ') غير موجود بهالحلقة ⟵ استعملت ترتيب الخانات العادي');
+    }
   } else if (ev.kind === 'partial') {
     warn = true; badge = '⚠️';
     line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
@@ -349,7 +379,7 @@ async function report(ev) {
   const lines = [rtl(badge + ' ' + title1)];
   for (const d of detail) {
     if (d === 'src') {
-      lines.push(rtl('📦 المصدر: ' + latin(src)));
+      lines.push(rtl('📦 المصدر: ' + latin(src) + (pinSt.state === 'on' ? ' 📌 مثبّت' : '')));
     } else if (d === 'work') {
       lines.push(rtl(workLine));
     } else if (d === 'ep') {
@@ -373,7 +403,15 @@ async function report(ev) {
   }
   if (ev.kind === 'done' && slot && ev.targetId && /^\d+$/.test(String(ev.trackNum))) {
     const dl = 'dl:' + slot + ':' + ev.trackNum + ':' + ev.targetId;
-    if (Buffer.byteLength(dl) <= 64) markup = { inline_keyboard: [[{ text: '📥 تحميل ' + kindName + ' تراك ' + ev.trackNum, callback_data: dl }]] };
+    if (Buffer.byteLength(dl) <= 64) {
+      const rows = [[{ text: '📥 تحميل ' + kindName + ' تراك ' + ev.trackNum, callback_data: dl }]];
+      if (pinSt.state === 'none' || pinSt.state === 'on') {
+        const tail = pinSlot + ':' + ev.trackNum + ':' + ev.targetId;
+        const cb = (pinSt.state === 'on' ? 'pu:' : 'pn:') + tail;
+        if (Buffer.byteLength(cb) <= 64) rows.push([{ text: pinSt.state === 'on' ? '📌 مثبّت ✓ (اضغط للإلغاء)' : '📌 ثبّت هذا المصدر', callback_data: cb }]);
+      }
+      markup = { inline_keyboard: rows };
+    }
   }
   enqueue(lines.join('\n'), markup);
 }

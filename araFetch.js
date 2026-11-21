@@ -6,6 +6,7 @@ const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 const { getWyzieAss } = require('./wyzie');
 const { hasEgyptianSpelling } = require('./arabic-spelling');
 const settings = require('./settings');
+const srcpins = require('./srcpins');
 
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, applySiteSlots, parseAssSlots } };
 
@@ -114,6 +115,17 @@ function applySiteSlots(list, slots, label) {
 
 const resultCache = new Map();
 settings.onChange(k => { if (k === 'ass_slots' || k === 'srt_slots') resultCache.clear(); });
+srcpins.onChange(() => resultCache.clear());
+
+function logPinResult(label, res) {
+    for (const pl of res.placed) {
+        const p = pl.pin;
+        console.log('[تثبيت 📌] ' + label + ' تراك ' + p.track + ' ⟵ ' + p.site + ' ' + (srcpins.packOf(pl.item && pl.item.url) || p.pack || p.name) + (pl.track !== p.track ? ' (وقع بتراك ' + pl.track + ' لقلة الترجمات)' : ''));
+    }
+    for (const p of res.missing) {
+        console.log('[تثبيت ⚠️] ' + label + ' تراك ' + p.track + ': المثبّت (' + p.site + ' ' + (p.pack || p.name) + ') غير موجود بهالحلقة ⟵ ترتيب الخانات العادي');
+    }
+}
 const MAX_RAW_CACHE = 150;
 const rawTextCache = new Map();
 const seriesMetaCache = new Map();
@@ -687,14 +699,16 @@ function lightweightPreFilter(list, siteKey) {
     };
 }
 
-function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [], srtList: [] }, verifiedZipItems, strictDedupe = false }) {
+function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [], srtList: [] }, verifiedZipItems, strictDedupe = false, pins = [], quietPins = false }) {
     const verifiedUrls = new Set();
     for (const v of verifiedZipItems) {
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
     }
 
     let globalAssCount = 0;
-    const assSlotSites = currentAssSlots().sites;
+    const assPins = pins.filter(p => p && p.kind === 'ass');
+    const srtPins = pins.filter(p => p && p.kind === 'srt');
+    const assSlotSites = new Set([...currentAssSlots().sites, ...assPins.map(p => p.site).filter(Boolean)]);
     const globalSeenSrtSigs = new Set();
 
     function collectSiteAss(siteKey, preAssList) {
@@ -802,12 +816,17 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         ...collectSiteAss('oscom', oscomPre.assList),
         ...collectSiteAss('wyzie', wyziePre.assList)
     ];
-    const allAss = applyAssSlots([
+    let allAss = applyAssSlots([
         ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && !x._badSpelling),
         ...rawAllAss.filter(x => !isHearingImpairedMeta(x) && x._badSpelling),
         ...rawAllAss.filter(x => isHearingImpairedMeta(x) && !x._badSpelling),
         ...rawAllAss.filter(x => isHearingImpairedMeta(x) && x._badSpelling)
     ]);
+    if (assPins.length) {
+        const res = srcpins.applyPins(allAss, assPins, 'ass');
+        allAss = res.list;
+        if (!quietPins) logPinResult('ASS', res);
+    }
 
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
     const subsourceSrt = collectSiteSrt('subsource', subsourcePre.srtList);
@@ -823,7 +842,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const seenCorrNames = new Set();
     const correctorSrt = [];
     const srtSlots = currentSrtSlots().slots;
-    const poolLimit = srtSlots.length ? 40 : CORRECTOR_MAX;
+    const poolLimit = (srtSlots.length || srtPins.length) ? 40 : CORRECTOR_MAX;
     const pickInto = pool => {
         for (const allowSdh of [false, true]) {
             for (const allowBad of [false, true]) {
@@ -852,8 +871,14 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     const isStremLink = c => String(c.url || '').includes('strem.top');
     pickInto([...subdlSrt.filter(c => !isStremLink(c)), ...subsourceSrt, ...subdlSrt.filter(isStremLink)]);
     if (correctorSrt.length < poolLimit) pickInto([...osSrt, ...legacySrt, ...oscomSrt, ...wyzieSrt]);
-    if (srtSlots.length) {
-        const picked = applySiteSlots(correctorSrt, srtSlots, 'SRT').slice(0, CORRECTOR_MAX);
+    if (srtSlots.length || srtPins.length) {
+        let picked = srtSlots.length ? applySiteSlots(correctorSrt, srtSlots, 'SRT') : correctorSrt.slice();
+        if (srtPins.length) {
+            const res = srcpins.applyPins(picked, srtPins, 'srt');
+            picked = res.list;
+            if (!quietPins) logPinResult('SRT', res);
+        }
+        picked = picked.slice(0, CORRECTOR_MAX);
         correctorSrt.length = 0;
         correctorSrt.push(...picked);
     }
@@ -985,10 +1010,15 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     await job.windowPromise;
 
     const snapshot = job.verified.slice();
+    let seriesPins = [];
+    if (type === 'series' || (season != null && episode != null)) {
+        try { seriesPins = await srcpins.forSeries(imdbId); } catch (_) { seriesPins = []; }
+    }
     const value = buildFinalArabicLists({
         legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre,
         verifiedZipItems: snapshot,
-        strictDedupe: isPrefetch
+        strictDedupe: isPrefetch,
+        pins: seriesPins
     });
     if (timedOut) value.partial = true;
 
@@ -1016,7 +1046,9 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
                 const updated = buildFinalArabicLists({
                     legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre,
                     verifiedZipItems: job.verified,
-                    strictDedupe: true
+                    strictDedupe: true,
+                    pins: seriesPins,
+                    quietPins: true
                 });
                 setResultCache(cacheKey, updated, true);
             }
