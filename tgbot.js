@@ -347,7 +347,7 @@ async function onPurgeCallback(cq) {
 
 async function clearOrder(targetId) {
   const ids = await idsOf(targetId);
-  const res = { ids, pins: 0, tracks: 0, failed: 0 };
+  const res = { ids, pins: 0, tracks: 0, raws: 0, lists: 0, failed: 0 };
   const jobs = [];
   for (const id of ids) {
     const pinKey = 'corr_pins_' + id + TRACKS_TAG;
@@ -360,7 +360,14 @@ async function clearOrder(targetId) {
         jobs.push(withTimeout(db.deleteDoc('job', key), STEP_TIMEOUT_MS).then(r => ({ kind: 'tracks', r })));
       }
     }
+    for (const prefix of ['', 'ass_']) {
+      for (let n = 1; n <= MAX_TRACK; n++) {
+        const rawKey = prefix + id + '_track' + n + TRACKS_TAG;
+        jobs.push(withTimeout(db.deleteDoc('rawsrt', rawKey), STEP_TIMEOUT_MS).then(r => ({ kind: 'raws', r })));
+      }
+    }
   }
+  jobs.push(withTimeout(db.deleteLists(ids), STEP_TIMEOUT_MS).then(r => ({ kind: 'lists', r })));
   const done = await Promise.all(jobs);
   for (const x of done) {
     if (typeof x.r !== 'number' || x.r < 0) res.failed++;
@@ -385,7 +392,7 @@ async function onOrderTarget(chatId, rq) {
   if (orderAsks.size > 20) orderAsks.delete(orderAsks.keys().next().value);
   await tg('sendMessage', {
     chat_id: chatId,
-    text: rtl('تأكيد مسح ترتيب التراكات لهذي الحلقة:') + '\n' + latin(rq.targetId) + '\n' + rtl('(تنمسح التراكات المثبتة + نتائجها؛ كاش الأسطر يبقى)'),
+    text: rtl('تأكيد مسح ترتيب التراكات لهذي الحلقة:') + '\n' + latin(rq.targetId) + '\n' + rtl('(تنمسح التراكات المثبتة + نتائجها + الملفات الأصلية المحفوظة + القائمة المحفوظة؛ كاش الأسطر يبقى)'),
     reply_markup: { inline_keyboard: [[{ text: '🧹 امسح الترتيب', callback_data: 'od:y:' + h }, { text: 'إلغاء', callback_data: 'od:n:' + h }]] }
   }).catch(() => {});
 }
@@ -404,12 +411,14 @@ async function onOrderCallback(cq) {
   orderAsks.delete(m[2]);
   await answerCb(cq, 'جاري المسح...');
   const r = await clearOrder(a.targetId);
-  console.log('[بوت التحكم] مسح ترتيب التراكات ' + r.ids.join(' + ') + ': ' + r.pins + ' ترتيب، ' + r.tracks + ' تراك' + (r.failed ? ' | ' + r.failed + ' خطوة فشلت' : ''));
+  console.log('[بوت التحكم] مسح ترتيب التراكات ' + r.ids.join(' + ') + ': ' + r.pins + ' ترتيب، ' + r.tracks + ' تراك، ' + r.raws + ' ملف أصلي، ' + r.lists + ' قائمة' + (r.failed ? ' | ' + r.failed + ' خطوة فشلت' : ''));
   const out = [rtl('🧹 تم مسح ترتيب التراكات'), latin(a.targetId),
     rtl('📌 ترتيب انمسح: ' + r.pins),
-    rtl('🎞 تراكات انمسحت: ' + r.tracks)];
+    rtl('🎞 تراكات انمسحت: ' + r.tracks),
+    rtl('📦 ملفات أصلية انمسحت: ' + r.raws),
+    rtl('🗂 قوائم محفوظة انمسحت: ' + r.lists)];
   if (r.failed) out.push(rtl('⚠️ ' + r.failed + ' خطوة ما انمسحت (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.'));
-  else if (!r.pins && !r.tracks) out.push(rtl('ما كان في ترتيب محفوظ لهذي الحلقة.'));
+  else if (!r.pins && !r.tracks && !r.raws && !r.lists) out.push(rtl('ما كان في ترتيب محفوظ لهذي الحلقة.'));
   else out.push(rtl('أول مرة تشغّل الحلقة من Nuvio ينبني الترتيب من جديد.'));
   await editMsg(cq.message, out.join('\n'));
 }
@@ -500,10 +509,10 @@ function parseRequest(text) {
   return m[2] ? { imdb, season: +m[2], episode: +m[3], targetId: imdb + ':' + +m[2] + ':' + +m[3] } : { imdb, targetId: imdb };
 }
 
-async function fetchTracks(type, targetId, rawOverride) {
+async function fetchTracks(type, targetId, rawOverride, batch) {
   const rawCfg = rawOverride || ctx.rawConfig;
   const path = (rawCfg ? '/' + encodeURIComponent(rawCfg) : '')
-    + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json?bgq=1';
+    + '/subtitles/' + type + '/' + encodeURIComponent(targetId).replace(/%3A/gi, ':') + '.json?bgq=1' + (batch ? '&batch=1' : '');
   const hdrs = { 'x-forwarded-host': ctx.host || ('127.0.0.1:' + PORT), 'x-forwarded-proto': ctx.proto };
   if (rawOverride) hdrs['x-nuvio-nonote'] = '1';
   const r = await axios.get('http://127.0.0.1:' + PORT + path, {
@@ -569,7 +578,7 @@ async function onRequest(chatId, rq, count) {
       return;
     }
     const wait = await send(rtl('🔎 جاري جلب التراكات لـ ' + latin(title) + '... (جودة التجهيز بالخلفية، قد ياخذ حتى دقيقة)'));
-    const tracks = await fetchTracks(type, rq.targetId);
+    const tracks = await fetchTracks(type, rq.targetId, undefined, !!count);
     const head = [rtl('🎬 ' + latin(title) + ' ' + latin('(' + rq.imdb + ')'))];
     if (isEp) {
       let ep = null;
@@ -1048,7 +1057,7 @@ async function runBatch(b) {
         if (nx.end) { b.final = '🏁 ' + nx.end + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
         await sleepFor(b, b.nextAt - Date.now());
         if (b.stopped) break;
-        const tracks = await fetchTracks('series', nx.id, b.rawOverride).catch(() => null);
+        const tracks = await fetchTracks('series', nx.id, b.rawOverride, true).catch(() => null);
         const t = tracks && tracks.find(x => x.ext === b.ext && x.track === b.track);
         if (!t) { b.final = '⏹ توقفت: ما لقيت ' + b.ext.toUpperCase() + ' ' + b.track + ' بالحلقة ' + nx.id.split(':').slice(1).join(':') + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
         path = t.path;
@@ -1096,7 +1105,7 @@ async function startBatch({ chat, messageId, targetId, head, track, count, model
     if (!rawOverride) { await fail('تعذر تبديل الموديل بإعدادك.'); return; }
     firstPath = swapPathConfig(track.path, rawOverride);
     if (!firstPath) {
-      const tr = await fetchTracks(/^tt\d+$/.test(targetId) ? 'movie' : 'series', targetId, rawOverride).catch(() => null);
+      const tr = await fetchTracks(/^tt\d+$/.test(targetId) ? 'movie' : 'series', targetId, rawOverride, true).catch(() => null);
       const t2 = tr && tr.find(x => x.ext === track.ext && x.track === track.track);
       firstPath = t2 ? t2.path : '';
     }
