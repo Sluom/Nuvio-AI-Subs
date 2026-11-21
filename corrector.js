@@ -32,7 +32,7 @@ const TRACKS_TAG = (TRACKS_REV && TRACKS_REV !== '0') ? '_t' + TRACKS_REV : '';
 const ELLIPSIS_AUTO = true;
 const DROP_DRAWINGS = true;
 // ===== حجم خط ASS (غيّر الأرقام من هنا) =====
-const ASS_FONT_PCT = 7.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
+const ASS_FONT_PCT = 8.4;            // حجم خط الحوار الرئيسي = PlayResY × هذي النسبة %. إذا شفته كبير صغّرها، وإذا صغير كبّرها
 const ASS_MARGIN_V_PCT = 11;         // رفع الترجمة عن الحافة السفلية = PlayResY × هذي النسبة %. (القيمة هي المسافة من أسفل الشاشة لأسفل النص). 0 = ما ينلمس. جرّب بين 10 و20
 const ASS_FALLBACK_PLAYRESY = 288;   // إذا الملف ما فيه PlayResY
 const ASS_FONT_DECIMALS = 0;         // 0 = رقم صحيح، 1 = يسمح بكسر عشري (مثل 22.5)
