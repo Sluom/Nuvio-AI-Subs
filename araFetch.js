@@ -117,11 +117,12 @@ const resultCache = new Map();
 settings.onChange(k => { if (k === 'ass_slots' || k === 'srt_slots') resultCache.clear(); });
 srcpins.onChange(() => resultCache.clear());
 
-function logPinResult(label, res) {
+function logPinResult(label, res, quietMissing = false) {
     for (const pl of res.placed) {
         const p = pl.pin;
         console.log('[تثبيت 📌] ' + label + ' تراك ' + p.track + ' ⟵ ' + p.site + ' ' + (srcpins.packOf(pl.item && pl.item.url) || p.pack || p.name) + (pl.track !== p.track ? ' (وقع بتراك ' + pl.track + ' لقلة الترجمات)' : ''));
     }
+    if (quietMissing) return;
     for (const p of res.missing) {
         console.log('[تثبيت ⚠️] ' + label + ' تراك ' + p.track + ': المثبّت (' + p.site + ' ' + (p.pack || p.name) + ') غير موجود بهالحلقة ⟵ ترتيب الخانات العادي');
     }
@@ -699,13 +700,14 @@ function lightweightPreFilter(list, siteKey) {
     };
 }
 
-function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [], srtList: [] }, verifiedZipItems, strictDedupe = false, pins = [], quietPins = false }) {
+function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre = { assList: [], srtList: [] }, verifiedZipItems, strictDedupe = false, pins = [], quietPins = false, quietMissing = false }) {
     const verifiedUrls = new Set();
     for (const v of verifiedZipItems) {
         if (v && v.url) verifiedUrls.add(cleanPath(v.url));
     }
 
     let globalAssCount = 0;
+    const pinMissing = [];
     const assPins = pins.filter(p => p && p.kind === 'ass');
     const srtPins = pins.filter(p => p && p.kind === 'srt');
     const assSlotSites = new Set([...currentAssSlots().sites, ...assPins.map(p => p.site).filter(Boolean)]);
@@ -825,7 +827,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
     if (assPins.length) {
         const res = srcpins.applyPins(allAss, assPins, 'ass');
         allAss = res.list;
-        if (!quietPins) logPinResult('ASS', res);
+        pinMissing.push(...res.missing);
+        if (!quietPins) logPinResult('ASS', res, quietMissing);
     }
 
     const subdlSrt = collectSiteSrt('subdl', subdlPre.srtList);
@@ -876,7 +879,8 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         if (srtPins.length) {
             const res = srcpins.applyPins(picked, srtPins, 'srt');
             picked = res.list;
-            if (!quietPins) logPinResult('SRT', res);
+            pinMissing.push(...res.missing);
+            if (!quietPins) logPinResult('SRT', res, quietMissing);
         }
         picked = picked.slice(0, CORRECTOR_MAX);
         correctorSrt.length = 0;
@@ -887,6 +891,7 @@ function buildFinalArabicLists({ legacyPre, osPre, subdlPre, subsourcePre, oscom
         ass: allAss,
         srt: readySrt,
         correctorSrt,
+        pinMissing,
         counts: {
             ass: allAss.length,
             subdlSrt: subdlSrt.length,
@@ -932,13 +937,30 @@ async function fetchAllSourcesOnce({ imdbId, season, episode, type, subdlKey, su
     };
 }
 
-async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdlKey, subsourceKey, isPrefetch = false }) {
+function resultKeyOf({ imdbId, season, episode, subdlKey, subsourceKey }) {
     const rawKeysStr = [subdlKey || '', subsourceKey || ''].join('|');
     const keyHash = crypto.createHash('md5').update(rawKeysStr).digest('hex').slice(0, 8);
-    const cacheKey = [imdbId, season, episode, keyHash].join(':');
+    return [imdbId, season, episode, keyHash].join(':');
+}
+
+function logPinDiag(missing, preLists) {
+    for (const p of missing) {
+        let found = null;
+        for (const pre of preLists) {
+            if (!pre) continue;
+            found = [...(pre.assList || []), ...(pre.srtList || [])].find(x => x && x.url && srcpins.matches(p, x));
+            if (found) break;
+        }
+        const why = !found ? 'ما كان بقائمة الجلب أصلاً' : (found._bad ? 'كان بالقائمة وفشل التحقق منه (ملف غير صالح)' : 'كان بالقائمة بس ما دخل التراكات (حدّ العدد أو الوقت)');
+        console.log('[تثبيت 🔍] ' + (p.kind === 'ass' ? 'ASS' : 'SRT') + ' تراك ' + p.track + ': المثبّت (' + p.site + ' ' + (p.pack || p.name) + ') ' + why);
+    }
+}
+
+async function getArabicSubsForCorrectionOnce({ imdbId, season, episode, type, subdlKey, subsourceKey, isPrefetch = false, noCache = false, retryPending = false }) {
+    const cacheKey = resultKeyOf({ imdbId, season, episode, subdlKey, subsourceKey });
     const hit = resultCache.get(cacheKey);
 
-    if (hit && Date.now() - hit.time < RESULT_TTL) {
+    if (!noCache && hit && Date.now() - hit.time < RESULT_TTL) {
         if (!isPrefetch || hit.isComplete) return hit.value;
     }
 
@@ -1018,11 +1040,15 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
         legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre,
         verifiedZipItems: snapshot,
         strictDedupe: isPrefetch,
-        pins: seriesPins
+        pins: seriesPins,
+        quietMissing: retryPending
     });
     if (timedOut) value.partial = true;
+    if (value.pinMissing && value.pinMissing.length) {
+        try { logPinDiag(value.pinMissing, [legacyPre, osPre, subdlPre, subsourcePre, oscomPre, wyziePre]); } catch (_) {}
+    }
 
-    try {
+    if (!noCache) try {
         const kept = {};
         for (const x of [...value.ass, ...value.srt]) if (x && x._site) kept[x._site] = (kept[x._site] || 0) + 1;
         require('./notify').sourcesEvent({
@@ -1056,4 +1082,57 @@ async function getArabicSubsForCorrection({ imdbId, season, episode, type, subdl
     }
 
     return value;
+}
+
+const PIN_RETRY_WAITS_MS = [10000, 20000];
+const PIN_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
+const PIN_RETRY_BUDGET_MS = 60 * 1000;
+const pinRetryInflight = new Map();
+const pinRetryDone = new Map();
+srcpins.onChange(() => pinRetryDone.clear());
+const pinRetrySleep = ms => new Promise(r => setTimeout(r, ms));
+const readyCount = v => ((v && v.ass && v.ass.length) || 0) + ((v && v.srt && v.srt.length) || 0);
+
+async function retryForPins(args, first, key, t0) {
+    const tag = args.imdbId + ' ' + args.season + ':' + args.episode;
+    const names = first.pinMissing.map(p => (p.kind === 'ass' ? 'ASS' : 'SRT') + ' تراك ' + p.track).join('، ');
+    let best = first;
+    let ok = false;
+    for (let i = 0; i < PIN_RETRY_WAITS_MS.length && !ok; i++) {
+        const last = i === PIN_RETRY_WAITS_MS.length - 1;
+        if (Date.now() - t0 + PIN_RETRY_WAITS_MS[i] > PIN_RETRY_BUDGET_MS) break;
+        console.log('[تثبيت 🔁] ' + tag + ': المثبّت (' + names + ') ما نزل ⟵ أعيد الجلب بعد ' + (PIN_RETRY_WAITS_MS[i] / 1000) + ' ث (محاولة ' + (i + 1) + ' من ' + PIN_RETRY_WAITS_MS.length + ')');
+        await pinRetrySleep(PIN_RETRY_WAITS_MS[i]);
+        let v = null;
+        try { v = await getArabicSubsForCorrectionOnce({ ...args, noCache: true, retryPending: !last }); } catch (e) { v = null; }
+        if (!v) continue;
+        if (!v.pinMissing || !v.pinMissing.length) {
+            best = v;
+            ok = true;
+            console.log('[تثبيت ✅🔁] ' + tag + ': رجع المثبّت بالمحاولة ' + (i + 1));
+        } else if (readyCount(v) >= readyCount(best)) {
+            best = v;
+        }
+    }
+    if (!ok) {
+        pinRetryDone.set(key, Date.now());
+        console.log('[تثبيت ❌🔁] ' + tag + ': المثبّت ما رجع بعد ' + PIN_RETRY_WAITS_MS.length + ' محاولات ⟵ ترتيب الخانات العادي');
+    }
+    if (readyCount(best) > 0) setResultCache(key, best, true);
+    return best;
+}
+
+async function getArabicSubsForCorrection(args) {
+    const t0 = Date.now();
+    const key = resultKeyOf(args);
+    const canRetry = !!args.isPrefetch && !(pinRetryDone.get(key) && Date.now() - pinRetryDone.get(key) < PIN_RETRY_COOLDOWN_MS);
+    const running = pinRetryInflight.get(key);
+    if (running && canRetry) return running;
+    const first = await getArabicSubsForCorrectionOnce({ ...args, retryPending: canRetry });
+    if (!canRetry || !first || !first.pinMissing || !first.pinMissing.length) return first;
+    const again = pinRetryInflight.get(key);
+    if (again) return again;
+    const p = retryForPins(args, first, key, t0).finally(() => pinRetryInflight.delete(key));
+    pinRetryInflight.set(key, p);
+    return p;
 }
