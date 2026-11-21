@@ -10,6 +10,8 @@ const TRACKS_DB = 'nuvio_tracks';
 const CACHE_VERSION = 'v1';
 const TTL_DAYS = 120;
 const TRACKS_TTL_DAYS = 90;
+const LISTS_TTL_DAYS = 4;
+const LISTS_COLL = 'lists';
 const RAW_NS = 'rawsrt';
 const DAY_SECONDS = 24 * 60 * 60;
 const RETRY_AFTER_MS = 30000;
@@ -89,6 +91,7 @@ async function getTracksDb() {
         const d = client.db(TRACKS_DB);
         const ttlSeconds = TRACKS_TTL_DAYS * DAY_SECONDS;
         await ensureTtlIndex(d, 'docs', 'updatedAt_1', ttlSeconds);
+        await ensureTtlIndex(d, LISTS_COLL, 'updatedAt_1', LISTS_TTL_DAYS * DAY_SECONDS);
         tracksDb = d;
         if (!announcing) console.log(`[MongoDB] متصل ✅ تراكات ${TRACKS_TTL_DAYS} يوم`);
         return d;
@@ -308,4 +311,48 @@ async function purgeRange(kind, from, to, dryRun) {
   }
 }
 
-module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange, savePins, loadPins };
+const listId = (ep, keyHash) => crypto.createHash('sha1').update(`${CACHE_VERSION}|list|${ep}|${keyHash}`).digest('hex');
+
+async function loadList(ep, keyHash) {
+  const d = await getTracksDb();
+  if (!d) return null;
+  try {
+    const doc = await d.collection(LISTS_COLL).findOne({ _id: listId(ep, keyHash) });
+    return doc ? doc.value : null;
+  } catch (e) {
+    console.log(`[MongoDB] فشلت قراءة القائمة المحفوظة: ${e.message}`);
+    return null;
+  }
+}
+
+async function saveList(ep, keyHash, fin, value) {
+  const d = await getTracksDb();
+  if (!d) return false;
+  try {
+    await d.collection(LISTS_COLL).updateOne(
+      { _id: listId(ep, keyHash) },
+      { $set: { ep: String(ep), fin: String(fin || ep), value, updatedAt: new Date() } },
+      { upsert: true }
+    );
+    return true;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حفظ القائمة: ${e.message}`);
+    return false;
+  }
+}
+
+async function deleteLists(ids) {
+  const arr = [...new Set((ids || []).map(String).filter(Boolean))];
+  if (!arr.length) return 0;
+  const d = await getTracksDb();
+  if (!d) return -1;
+  try {
+    const r = await d.collection(LISTS_COLL).deleteMany({ $or: [{ ep: { $in: arr } }, { fin: { $in: arr } }] });
+    return (r && r.deletedCount) || 0;
+  } catch (e) {
+    console.log(`[MongoDB] فشل حذف القوائم المحفوظة: ${e.message}`);
+    return -1;
+  }
+}
+
+module.exports = { init, loadDoc, saveDoc, loadMap, saveMap, deleteDoc, deleteMap, stats, saveLink, loadLink, purgeRange, savePins, loadPins, loadList, saveList, deleteLists };
