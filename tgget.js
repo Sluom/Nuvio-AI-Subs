@@ -128,13 +128,17 @@ async function fetchList(type, targetId) {
 async function onGetCmd(chatId, arg) {
   const send = (text, markup) => H.tg('sendMessage', { chat_id: chatId, text, reply_markup: markup, disable_web_page_preview: true });
   try {
-    let rq = arg ? H.parseRequest(arg) : null;
-    if (!rq && !arg) {
-      const l = await H.loadLast();
-      rq = l && l.targetId ? H.parseRequest(String(l.targetId).replace(/:/g, ' ')) : null;
-    }
+    const rq = arg ? H.parseRequest(arg) : null;
     if (!rq) {
-      await send([rtl('اكتب الأمر مع رقم العمل مثل:'), latin('/get tt33043892 2 1'), rtl('أو اكتب /get لحاله لآخر حلقة اشتغلت.')].join('\n'));
+      let ex = '/get tt33043892 2 1';
+      if (!arg) {
+        try {
+          const l = await H.loadLast();
+          const lq = l && l.targetId ? H.parseRequest(String(l.targetId).replace(/:/g, ' ')) : null;
+          if (lq) ex = '/get ' + lq.imdb + (lq.season ? ' ' + lq.season + ' ' + lq.episode : '');
+        } catch (e) {}
+      }
+      await send([rtl(arg ? 'ما فهمت رقم العمل. اكتب الأمر هيج:' : 'اكتب /get ثم رقم العمل والموسم والحلقة، مثلاً:'), latin(ex)].join('\n'));
       return;
     }
     const isEp = !!rq.season;
