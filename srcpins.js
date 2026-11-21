@@ -71,11 +71,13 @@ function applyPins(list, pins, kind) {
   }
   const maxIdx = Math.max(...locked.keys());
   const out = [];
+  const fill = dups.slice();
   for (let i = 0; i <= maxIdx || rest.length; i++) {
     if (locked.has(i)) out.push(locked.get(i));
     else if (rest.length) out.push(rest.shift());
+    else if (i < maxIdx && fill.length) out.push(fill.shift());
   }
-  const final = [...out, ...dups];
+  const final = [...out, ...fill];
   const placed = [...lockedItems].map(item => ({ pin: lockedBy.get(item), track: final.indexOf(item) + 1, item }));
   return { list: final, placed, missing };
 }

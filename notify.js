@@ -263,18 +263,24 @@ async function pinStatus(ev, slot) {
   await pins.forSeries(ev.targetId);
   const kind = slot === 'a' ? 'ass' : 'srt';
   const item = { url: ev.url };
+  let doc = null;
   if (typeof ev.loadDoc === 'function') {
     try {
       const tag = require('./corrector').TRACKS_TAG || '';
-      const doc = await ev.loadDoc('corr_pins_' + ev.targetId + tag);
+      doc = await ev.loadDoc('corr_pins_' + ev.targetId + tag);
       const it = doc && Array.isArray(doc[kind]) ? doc[kind][Number(ev.trackNum) - 1] : null;
       if (it && it.url && pins.packOf(it.url) === pins.packOf(ev.url)) {
         item.name = it.name;
         item._site = it._site || it._source;
       }
-    } catch (e) { /* لا شيء */ }
+    } catch (e) { doc = null; }
   }
-  return pins.statusFor(ev.targetId, kind, ev.trackNum, item);
+  const st = pins.statusFor(ev.targetId, kind, ev.trackNum, item);
+  if (st.state === 'missing' && st.pin && doc && Array.isArray(doc[kind])) {
+    const idx = doc[kind].findIndex(x => x && x.url && pins.matches(st.pin, { url: x.url, name: x.name, _site: x._site || x._source }));
+    if (idx >= 0) return { state: 'moved', pin: st.pin, at: idx + 1 };
+  }
+  return st;
 }
 
 async function report(ev) {
@@ -322,7 +328,11 @@ async function report(ev) {
       '⏱ الوقت: ' + arSeconds(secs) + (doneBy ? ' | بواسطة ' + latin(doneBy) : ''), ...spellDetail(ev.spell)];
     if (ev.healed) detail.push('🔁 ملف بديل (الأصلي فشل)');
     detail.push('🔔 ' + why);
-    if (pinSt.state === 'missing' && pinSt.pin) {
+    if (pinSt.state === 'moved' && pinSt.pin) {
+      warn = true; badge = '⚠️';
+      const si = detail.indexOf('src');
+      detail.splice(si + 1, 0, '📌 المثبّت (' + latin(pinSt.pin.site + ' ' + (pinSt.pin.pack || pinSt.pin.name)) + ') وقع بتراك ' + pinSt.at + ' بدل تراك ' + pinSt.pin.track + ' لقلة الترجمات المختلفة بالحلقة');
+    } else if (pinSt.state === 'missing' && pinSt.pin) {
       warn = true; badge = '⚠️';
       const si = detail.indexOf('src');
       detail.splice(si + 1, 0, '📌 المثبّت (' + latin(pinSt.pin.site + ' ' + (pinSt.pin.pack || pinSt.pin.name)) + ') غير موجود بهالحلقة ⟵ استعملت ترتيب الخانات العادي');
