@@ -899,6 +899,7 @@ const WANTED_TRACKS = 4;
 const settings = require('./settings');
 const showAiAlways = () => !!settings.get('show_ai_always');
 const READY_ASS_MAX = 3;
+const LIST_READ_MS = 1500;
 const TARGET_LANGS = ['en', 'eng', 'ja', 'jpn', 'jap', 'tr', 'tur', 'fa', 'per', 'fas', 'ru', 'rus', 'ko', 'kor', 'fr', 'fre', 'fra', 'es', 'spa', 'hi', 'hin', 'pt', 'por', 'pob', 'pb', 'pt-br', 'zh', 'zho', 'chi', 'cht', 'chs', 'de', 'ger', 'it', 'ita', 'id', 'ind'];
 const SOURCE_LABELS = {
     subdl: 'subdl',
@@ -1024,6 +1025,17 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
     targetId = targetId.replace(/[.\s]+$/, '');
     const baseUrl = getBaseUrl(req);
     try {
+        const wantsFresh = String(req.query.bgq || '') === '1';
+        const fromBatch = wantsFresh && !isPrefetch && String(req.query.batch || '') === '1';
+        const listKeyHash = crypto.createHash('md5').update([addonCfg.subdlKey || '', addonCfg.subsourceKey || ''].join('|')).digest('hex').slice(0, 8);
+        const urlPrefix = baseUrl + (configParam ? '/' + configParam : '');
+        if (!wantsFresh && !showAiAlways()) {
+            const saved = await Promise.race([db.loadList(targetId, listKeyHash), sleep(LIST_READ_MS).then(() => null)]).catch(() => null);
+            if (saved && saved.v === 1 && Array.isArray(saved.subs) && saved.subs.length && saved.subs.every(s => s && typeof s.path === 'string' && s.path.startsWith('/stream-'))) {
+                console.log('[قائمة محفوظة 📦] ' + targetId + ' ⟵ جاهزة من قاعدة التراكات بدون طلب للمواقع' + (isPrefetch ? ' (خلفية)' : ''));
+                return res.json({ subtitles: saved.subs.map(s => ({ id: s.id, url: urlPrefix + s.path, lang: s.lang, title: s.title })) });
+            }
+        }
         let subtitlesData = [];
         let finalTargetId = targetId;
         let finalType = req.params.type;
@@ -1138,7 +1150,8 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             want: WANTED_TRACKS
         }).catch(() => []);
         let extClean = [], extHi = [], subdlSubs = [], subsourceSubs = [], extFetched = false;
-        if (priSubs.length < WANTED_TRACKS && osClean.length < WANTED_TRACKS) {
+        const skipForeignExt = hasReadyArabic && !showAiAlways();
+        if (!skipForeignExt && priSubs.length < WANTED_TRACKS && osClean.length < WANTED_TRACKS) {
             extFetched = true;
             [subdlSubs, subsourceSubs] = await Promise.all([
                 getSubDL({ imdbId: assImdbId, season: assSeason, episode: assEpisode, apiKey: addonCfg.subdlKey }).catch(() => []),
@@ -1256,6 +1269,18 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
             }
         }
         logSiteSummary({ arabicSubs, corrSrtList, corrAssList, osClean, osHi, assOnly, subdlSubs, subsourceSubs, extFetched });
+        if (fromBatch && hasReadyArabic && !showAiAlways() && !arabicSubs.partial && transSubs.length > 0) {
+            const stored = [];
+            for (const s of transSubs) {
+                if (!s || typeof s.url !== 'string' || !s.url.startsWith(urlPrefix + '/stream-')) { stored.length = 0; break; }
+                stored.push({ id: s.id, lang: s.lang, title: s.title, path: s.url.slice(urlPrefix.length) });
+            }
+            if (stored.length) {
+                db.saveList(targetId, listKeyHash, finalTargetId, { v: 1, subs: stored })
+                    .then(ok => { if (ok) console.log('[قائمة محفوظة 💾] ' + targetId + ' ⟵ ' + stored.length + ' مسار (4 أيام)'); })
+                    .catch(() => {});
+            }
+        }
         return res.json({ subtitles: transSubs });
     } catch (err) {
         console.error('[Subtitles Error] ' + targetId + ' - ' + err.message);
