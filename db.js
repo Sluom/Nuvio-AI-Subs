@@ -317,7 +317,9 @@ async function loadList(ep, keyHash) {
   const d = await getTracksDb();
   if (!d) return null;
   try {
-    const doc = await d.collection(LISTS_COLL).findOne({ _id: listId(ep, keyHash) });
+    const coll = d.collection(LISTS_COLL);
+    let doc = await coll.findOne({ _id: listId(ep, keyHash) });
+    if (!doc) doc = await coll.findOne({ fin: String(ep), $or: [{ kh: String(keyHash) }, { kh: { $exists: false } }] });
     return doc ? doc.value : null;
   } catch (e) {
     console.log(`[MongoDB] فشلت قراءة القائمة المحفوظة: ${e.message}`);
@@ -331,7 +333,7 @@ async function saveList(ep, keyHash, fin, value) {
   try {
     await d.collection(LISTS_COLL).updateOne(
       { _id: listId(ep, keyHash) },
-      { $set: { ep: String(ep), fin: String(fin || ep), value, updatedAt: new Date() } },
+      { $set: { ep: String(ep), fin: String(fin || ep), kh: String(keyHash), value, updatedAt: new Date() } },
       { upsert: true }
     );
     return true;
