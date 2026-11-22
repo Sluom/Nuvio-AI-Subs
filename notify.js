@@ -29,11 +29,13 @@ function scrub(s) {
   return out;
 }
 
-async function sendOne(text, markup) {
+async function sendOne(text, markup, entities) {
   try {
+    const body = String(text).slice(0, 3500);
+    const ents = Array.isArray(entities) ? entities.filter(e => e && e.offset >= 0 && e.length > 0 && e.offset + e.length <= body.length) : [];
     await axios.post(
       'https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage',
-      { chat_id: TG_CHAT, text: String(text).slice(0, 3500), disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) },
+      { chat_id: TG_CHAT, text: body, disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}), ...(ents.length ? { entities: ents } : {}) },
       { timeout: 8000 }
     );
   } catch (e) {
@@ -58,14 +60,14 @@ async function pump() {
       if (wait > 0) await sleep(wait);
       const item = queue.shift();
       lastSentAt = Date.now();
-      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup);
+      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup, typeof item === 'string' ? null : item.entities);
     }
   } finally {
     pumping = false;
   }
 }
 
-function enqueue(text, markup) {
+function enqueue(text, markup, entities) {
   if (!ENABLED) return;
   try {
     const now = Date.now();
@@ -77,7 +79,7 @@ function enqueue(text, markup) {
       if (recentTexts.size > 200) recentTexts.clear();
     }
     if (queue.length >= MAX_QUEUE) queue.shift();
-    queue.push(markup ? { text, markup } : text);
+    queue.push(markup || (entities && entities.length) ? { text, markup, entities } : text);
     pump().catch(() => {});
   } catch (e) {}
 }
@@ -206,6 +208,24 @@ const LRI = '⁦';
 const PDI = '⁩';
 const rtl = t => RLM + t;
 const latin = t => LRI + t + PDI;
+
+function codeEntities(lines, wanted) {
+  const out = [];
+  for (const w of wanted) {
+    const needle = String(w.needle || '');
+    if (needle.length < 2) continue;
+    let base = 0;
+    for (const ln of lines) {
+      if (ln.includes(w.mark)) {
+        const i = ln.lastIndexOf(needle);
+        if (i >= 0) out.push({ type: 'code', offset: base + i, length: needle.length });
+        break;
+      }
+      base += ln.length + 1;
+    }
+  }
+  return out.sort((a, b) => a.offset - b.offset);
+}
 
 function arSeconds(n) {
   const x = Math.max(0, Math.round(Number(n) || 0));
@@ -425,7 +445,12 @@ async function report(ev) {
       markup = { inline_keyboard: rows };
     }
   }
-  enqueue(lines.join('\n'), markup);
+  let ents = [];
+  if (ev.kind === 'done') {
+    const sp = src.indexOf(' ');
+    ents = codeEntities(lines, [{ mark: '🎬', needle: workId }, { mark: '📦', needle: sp >= 0 ? src.slice(sp + 1) : '' }]);
+  }
+  enqueue(lines.join('\n'), markup, ents);
 }
 
 const modelSeen = new Map();
