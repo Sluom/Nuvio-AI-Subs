@@ -58,10 +58,14 @@ function classify(subs) {
       let m = /^trans-(.+)-ara-(srt|ass)-\d+$/.exec(id);
       let kind = 'trans';
       if (!m || !/\/stream-ara\.(srt|ass)$/i.test(u.pathname)) {
-        m = /^nuvio-(srt|ass)-(.+)-ara-\d+$/.exec(id);
-        if (!m || !/\/stream-raw\.(srt|ass)$/i.test(u.pathname)) continue;
+        const rp = /\/stream-raw\.(srt|ass)$/i.exec(u.pathname);
+        if (!rp) continue;
+        const old = /^nuvio-(?:srt|ass)-(.+)-ara-\d+$/.exec(id);
+        const cur = /^(?!trans-|nuvio-)([a-z0-9.]+)-[a-z0-9.-]+-(?:srt|ass)(?:-\d+)?$/.exec(id);
+        const rawSite = old ? old[1] : (cur ? cur[1] : '');
+        if (!rawSite) continue;
         kind = 'raw';
-        m = [m[0], m[2], m[1]];
+        m = [id, rawSite, rp[1].toLowerCase()];
       }
       const site = m[1];
       const ext = m[2];

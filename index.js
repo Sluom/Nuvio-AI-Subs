@@ -15,6 +15,7 @@ const {
     activatePendingNextEpTimer
 } = require('./prefetch');
 const db = require('./db');
+const srcpins = require('./srcpins');
 const notify = require('./notify');
 const crypto = require('crypto');
 const tgbot = require('./tgbot');
@@ -912,6 +913,26 @@ const SOURCE_LABELS = {
     wyzie: 'wyzie'
 };
 const getSourceLabel = src => SOURCE_LABELS[src] || src || 'source';
+
+function readyIdOf(sub) {
+    const clean = v => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    const osId = String((sub && sub._osFileId) || '').trim();
+    if (/^\d{3,}$/.test(osId)) return osId;
+    const sig = /^wyzie:(.+)$/.exec(String((sub && sub._sig) || ''));
+    if (sig && clean(sig[1])) return clean(sig[1]);
+    return clean(srcpins.packOf(sub && sub.url));
+}
+
+function makeReadyNamer() {
+    const used = new Set();
+    return (sub, site, fmt, pos) => {
+        const base = site + '-' + (readyIdOf(sub) || String(pos)) + '-' + fmt;
+        let name = base;
+        for (let n = 2; used.has(name); n++) name = base + '-' + n;
+        used.add(name);
+        return name;
+    };
+}
 const assExtRe = /\.(ass|ssa)$/i;
 const SITE_ORDER = ['subdl', 'subsource', 'opensubtitles', 'opensubtitles.org', 'opensubtitles.com', 'wyzie'];
 const isAssSub = s => !!s && (s.format === 'ass' || assLegacyFormatRe.test(s.subFormat || '') || assExtRe.test(String(s.fileName || s.title || s.url || '').split('?')[0]));
@@ -1176,6 +1197,7 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
         const streamPathAss = configParam ? '/' + configParam + '/stream-ai.ass' : '/stream-ai.ass';
         let extraParams = '&id=' + finalTargetId;
         if (originalKitsuId) extraParams += '&kitsu=' + originalKitsuId + (originalKitsuEp ? '&kep=' + originalKitsuEp : '');
+        const readyNamer = makeReadyNamer();
         const readyAssList = (arabicSubs.ass || []).slice(0, READY_ASS_MAX);
         if (readyAssList.length > 0) {
             const assSiteCounters = {};
@@ -1184,11 +1206,12 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 const srcLabel = getSourceLabel(sub._source);
                 assSiteCounters[srcLabel] = (assSiteCounters[srcLabel] || 0) + 1;
                 const siteIdx = assSiteCounters[srcLabel];
+                const readyName = readyNamer(sub, srcLabel, 'ass', siteIdx);
                 transSubs.push({
-                    id: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx,
+                    id: readyName,
                     url: baseUrl + streamRawAss + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'nuvio-ass-' + srcLabel + '-ara-' + siteIdx,
+                    title: readyName,
                     ...(fromBot ? { rel: nameOf(sub) } : {})
                 });
             }
@@ -1200,11 +1223,12 @@ app.get(['/subtitles/:type/:reqId(*)', '/:config/subtitles/:type/:reqId(*)'], as
                 const srcLabel = getSourceLabel(sub._source);
                 srtSiteCounters[srcLabel] = (srtSiteCounters[srcLabel] || 0) + 1;
                 const siteIdx = srtSiteCounters[srcLabel];
+                const readyName = readyNamer(sub, srcLabel, 'srt', siteIdx);
                 transSubs.push({
-                    id: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx,
+                    id: readyName,
                     url: baseUrl + streamRawSrt + '?url=' + encodeURIComponent(sub.url) + '&track=' + (i + 1) + extraParams,
                     lang: 'ara',
-                    title: 'nuvio-srt-' + srcLabel + '-ara-' + siteIdx,
+                    title: readyName,
                     ...(fromBot ? { rel: nameOf(sub) } : {})
                 });
             }
