@@ -599,7 +599,9 @@ async function askEpisode(chatId, it) {
     lines.push(rtl('المواسم المتوفرة (موسم:حلقات):'));
     lines.push(latin(ss.slice(0, 15).map(s => s + ':' + meta.all.get(s)).join('  ') + (ss.length > 15 ? '  …' : '')));
   }
-  await tg('sendMessage', { chat_id: chatId, text: lines.join('\n'), disable_web_page_preview: true });
+  const epText = lines.join('\n');
+  const idAt = epText.indexOf(String(it.id));
+  await tg('sendMessage', { chat_id: chatId, text: epText, ...(idAt >= 0 ? { entities: [{ type: 'code', offset: idAt, length: String(it.id).length }] } : {}), disable_web_page_preview: true });
 }
 
 async function onFindCallback(cq) {
