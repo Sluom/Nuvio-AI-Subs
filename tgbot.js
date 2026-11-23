@@ -88,8 +88,18 @@ function logErr(what, e) {
 }
 
 const answerCb = (cq, text) => tg('answerCallbackQuery', { callback_query_id: cq.id, text }).catch(() => {});
-const editMsg = (msg, text, markup) => (msg && msg.chat && msg.message_id)
-  ? tg('editMessageText', { chat_id: msg.chat.id, message_id: msg.message_id, text, reply_markup: markup, disable_web_page_preview: true }).catch(() => {})
+function codeIn(text, needles) {
+  const out = [];
+  for (const n of needles) {
+    const s = String(n || '');
+    const i = s ? text.lastIndexOf(s) : -1;
+    if (i >= 0) out.push({ type: 'code', offset: i, length: s.length });
+  }
+  return out.sort((a, b) => a.offset - b.offset);
+}
+
+const editMsg = (msg, text, markup, entities) => (msg && msg.chat && msg.message_id)
+  ? tg('editMessageText', { chat_id: msg.chat.id, message_id: msg.message_id, text, reply_markup: markup, ...(entities && entities.length ? { entities } : {}), disable_web_page_preview: true }).catch(() => {})
   : Promise.resolve();
 
 const LABELS = ['ARA-SRT', 'ARA-ASS'];
@@ -379,9 +389,11 @@ async function clearOrder(targetId) {
 
 async function askOrder(chatId) {
   pendingOrder = { at: Date.now() };
+  const orderText = rtl('🧹 مسح ترتيب التراكات') + '\n' + rtl('ابعث الـ tt ورقم الموسم والحلقة، مثال: ' + latin('tt1234567:2:5')) + '\n' + rtl('(للفلم ابعث الـ tt بس)');
   await tg('sendMessage', {
     chat_id: chatId,
-    text: rtl('🧹 مسح ترتيب التراكات') + '\n' + rtl('ابعث الـ tt ورقم الموسم والحلقة، مثال: tt1234567 2 5') + '\n' + rtl('(للفلم ابعث الـ tt بس)'),
+    text: orderText,
+    entities: codeIn(orderText, ['tt1234567:2:5']),
     reply_markup: { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'od:n:0' }]] }
   }).catch(() => {});
 }
@@ -551,11 +563,11 @@ async function startPath(path, nopf) {
 }
 
 async function onRequest(chatId, rq, count) {
-  const send = text => tg('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
+  const send = (text, codes) => tg('sendMessage', { chat_id: chatId, text, ...(codes && codes.length ? { entities: codeIn(text, codes) } : {}), disable_web_page_preview: true });
   try {
     const isEp = !!rq.season;
     if (count && !isEp) {
-      await send(rtl('الدفعة للمسلسلات فقط، اكتب الموسم والحلقة مثل:') + '\n' + latin(rq.imdb + ' 1 5'));
+      await send(rtl('الدفعة للمسلسلات فقط، اكتب الموسم والحلقة مثل:') + '\n' + latin(rq.imdb + ':1:5'), [rq.imdb + ':1:5']);
       return;
     }
     const title = notify && notify.titleOf ? await notify.titleOf(rq.targetId, isEp ? 'series' : 'movie') : null;
@@ -563,7 +575,7 @@ async function onRequest(chatId, rq, count) {
     if (!title && !isEp && notify && notify.titleOf) {
       const sTitle = await notify.titleOf(rq.imdb, 'series');
       if (sTitle) {
-        await send([rtl('🎬 ' + latin(sTitle) + ' ' + latin('(' + rq.imdb + ')')), rtl('هذا مسلسل، اكتب الموسم والحلقة مثل:'), latin(rq.imdb + ' 1 5')].join('\n'));
+        await send([rtl('🎬 ' + latin(sTitle) + ' ' + latin('(' + rq.imdb + ')')), rtl('هذا مسلسل، اكتب الموسم والحلقة مثل:'), latin(rq.imdb + ':1:5')].join('\n'), [rq.imdb + ':1:5']);
         return;
       }
     }
@@ -727,7 +739,8 @@ async function onCountCallback(cq) {
   if (!COUNTS.includes(n)) { await answerCb(cq, 'خيار غير صالح'); return; }
   pendingCount = { n, at: Date.now() };
   await answerCb(cq, 'تمام: ' + n + ' حلقات');
-  await editMsg(cq.message, [rtl('📦 دفعة: ' + n + ' حلقات'), rtl('الآن ابعث رقم العمل مع الموسم والحلقة اللي تبدأ منها، مثل:'), latin('tt0409591 1 5')].join('\n'));
+  const batchAsk = [rtl('📦 دفعة: ' + n + ' حلقات'), rtl('الآن ابعث رقم العمل مع الموسم والحلقة اللي تبدأ منها، مثل:'), latin('tt0409591:1:5')].join('\n');
+  await editMsg(cq.message, batchAsk, undefined, codeIn(batchAsk, ['tt0409591:1:5']));
 }
 
 const NAMES_AR_RE = /^[ء-ٰٟ-ۓ]+(?: [ء-ٰٟ-ۓ]+){0,2}$/;
@@ -813,14 +826,16 @@ async function onNamesCmd(chatId, arg) {
   if (tok) {
     sid = namesSidOf(tok);
     if (!sid) {
-      await tg('sendMessage', { chat_id: chatId, text: rtl('اكتب الأمر مع معرّف المسلسل، مثال:') + '\n' + latin('/names tt0409591') }).catch(() => {});
+      const namesEx1 = rtl('اكتب الأمر مع معرّف المسلسل، مثال:') + '\n' + latin('/names tt0409591');
+      await tg('sendMessage', { chat_id: chatId, text: namesEx1, entities: codeIn(namesEx1, ['/names tt0409591']) }).catch(() => {});
       return;
     }
   } else {
     const d = await loadLast();
     const info = d && seriesInfoFromTarget(d.targetId);
     if (!info) {
-      await tg('sendMessage', { chat_id: chatId, text: rtl(d ? 'آخر عمل اشتغلت عليه فلم، والأسماء المثبّتة للمسلسلات فقط.' : 'ما في مسلسل شغّلته بعد.') + '\n' + rtl('ابعث معرّف المسلسل مع الأمر، مثال:') + '\n' + latin('/names tt0409591') }).catch(() => {});
+      const namesEx2 = rtl(d ? 'آخر عمل اشتغلت عليه فلم، والأسماء المثبّتة للمسلسلات فقط.' : 'ما في مسلسل شغّلته بعد.') + '\n' + rtl('ابعث معرّف المسلسل مع الأمر، مثال:') + '\n' + latin('/names tt0409591');
+      await tg('sendMessage', { chat_id: chatId, text: namesEx2, entities: codeIn(namesEx2, ['/names tt0409591']) }).catch(() => {});
       return;
     }
     sid = info.seriesId;
@@ -831,7 +846,8 @@ async function onNamesCmd(chatId, arg) {
 async function namesAsk(cq, mode) {
   if (mode === 's') {
     pendingNames = { mode, at: Date.now() };
-    await editMsg(cq.message, [rtl('🔄 ابعث معرّف المسلسل:'), latin('tt0409591'), rtl('أو لمسلسلات kitsu:'), latin('kitsu:123')].join('\n'), { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'nm:n' }]] });
+    const namesAsk1 = [rtl('🔄 ابعث معرّف المسلسل:'), latin('tt0409591'), rtl('أو لمسلسلات kitsu:'), latin('kitsu:123')].join('\n');
+    await editMsg(cq.message, namesAsk1, { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'nm:n' }]] }, codeIn(namesAsk1, ['tt0409591', 'kitsu:123']));
     return;
   }
   if (!namesCur) { await answerCb(cq, 'ابعث /names من جديد'); return; }
