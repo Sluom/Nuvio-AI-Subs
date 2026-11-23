@@ -227,6 +227,14 @@ function codeEntities(lines, wanted) {
   return out.sort((a, b) => a.offset - b.offset);
 }
 
+function copyIdOf(idStr, ep) {
+  const id = String(idStr || '');
+  const m = /^(tt\d+):(\d+):(\d+)$/.exec(id);
+  if (!m) return id;
+  if (m[2] === '1' && ep && ep.alt && /^tt\d+:\d+:\d+$/.test(String(ep.alt.id || '')) && parseInt(String(ep.alt.id).split(':')[1], 10) > 1) return ep.alt.id;
+  return id;
+}
+
 function arSeconds(n) {
   const x = Math.max(0, Math.round(Number(n) || 0));
   const secWord = k => (k === 1 ? 'ثانية واحدة' : k === 2 ? 'ثانيتان' : k <= 10 ? k + ' ثوانٍ' : k + ' ثانية');
@@ -406,7 +414,8 @@ async function report(ev) {
   const epLog = title ? (isMovie ? 'فيلم ' + title : title + ' ' + ep.text) : ep.text;
   console.log('[ملخص التراك] ' + (warn ? '⚠️ ' : '✅ ') + line.replace(ep.text, epLog) + (dupText ? '\n⚠️ ' + dupText : ''));
 
-  const workLine = '🎬 ' + latin((title ? title + ' (' + workId + ')' : workId));
+  const shownId = ev.kind === 'done' ? workId : copyIdOf(idStr, ep);
+  const workLine = '🎬 ' + latin((title ? title + ' (' + shownId + ')' : shownId));
   const epLine = isMovie ? null : '📺 ' + ep.text;
   const lines = [rtl(badge + ' ' + title1)];
   for (const d of detail) {
@@ -449,6 +458,8 @@ async function report(ev) {
   if (ev.kind === 'done') {
     const sp = src.indexOf(' ');
     ents = codeEntities(lines, [{ mark: '🎬', needle: workId }, { mark: '📦', needle: sp >= 0 ? src.slice(sp + 1) : '' }]);
+  } else {
+    ents = codeEntities(lines, [{ mark: '🎬', needle: shownId }]);
   }
   enqueue(lines.join('\n'), markup, ents);
 }
@@ -488,11 +499,13 @@ async function modelReport(ev) {
   } else {
     return;
   }
-  out.push('🎬 ' + latin(title ? title + ' (' + workId + ')' : workId));
+  const shownId = copyIdOf(idStr, ep);
+  out.push('🎬 ' + latin(title ? title + ' (' + shownId + ')' : shownId));
   if (!isMovie && ep) out.push('📺 ' + ep.text + (trk ? ' — ' + trk : ''));
   else if (trk) out.push('📺 ' + trk);
   if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
-  enqueue(out.map(rtl).join('\n'));
+  const outLines = out.map(rtl);
+  enqueue(outLines.join('\n'), null, codeEntities(outLines, [{ mark: '🎬', needle: shownId }]));
 }
 
 function modelEvent(ev) {
@@ -675,7 +688,11 @@ async function sourcesReport(info) {
       if (m && parseInt(m[1], 10) > 1) shown = { ...info, season: parseInt(m[1], 10), episode: parseInt(m[2], 10), abs: e };
     }
   } catch (e) {}
-  enqueue(sourcesText({ ...shown, title }));
+  const txt = sourcesText({ ...shown, title });
+  const has = shown.season != null && shown.episode != null && shown.season !== '' && shown.episode !== '';
+  const idShown = String(shown.imdbId || '') + (has ? ':' + shown.season + ':' + shown.episode : '');
+  const at = idShown ? txt.lastIndexOf(idShown) : -1;
+  enqueue(txt, null, at >= 0 ? [{ type: 'code', offset: at, length: idShown.length }] : []);
 }
 function sourcesEvent(info) {
   try { sourcesReport(info).catch(() => {}); } catch (e) {}
@@ -696,4 +713,4 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { sourcesText, sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
+module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { codeEntities, copyIdOf, sourcesText, sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
