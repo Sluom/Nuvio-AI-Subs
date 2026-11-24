@@ -13,7 +13,7 @@ const settings = require('../core/settings');
 const search = require('./tgsearch');
 const getter = require('./tgget');
 const pinner = require('./tgpin');
-const { finds, latinDigits, clamp, maskKey, groundingBlockedMin, onFindCallback, onSmartCallback, IMAGE_MIMES, onImage, serpKeyCmd, onSerpKeyCmd, actorCmd, onActor, parseFind, parseEpisode, onFind, isPlainSearchText, parseQuery, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems } = search;
+const { finds, latinDigits, clamp, maskKey, onFindCallback, onSmartCallback, IMAGE_MIMES, onImage, serpKeyCmd, onSerpKeyCmd, actorCmd, onActor, parseFind, parseEpisode, onFind, isPlainSearchText, parseQuery, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems } = search;
 const { seriesInfoFromTarget, bookKey } = require('../ai/name-book');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -1229,14 +1229,7 @@ function settingsText() {
   L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
   const serp = String(settings.get('serpapi_key') || '').trim();
   L.push(rtl('🖼 Lens للبحث بالصورة (' + SRC_NAME[settings.source('serpapi_key')] + '): ') + (serp ? latin(maskKey(serp)) + rtl(' ✅') : rtl('غير مفعّل ⛔ (ابعث ') + latin('/serpkey KEY') + rtl(')')));
-  L.push(rtl('🌐 البحث بجوجل (' + SRC_NAME[settings.source('search_grounding')] + '): ' + onOff(settings.get('search_grounding'))) + (settings.get('search_grounding') && groundingBlockedMin() > 0 ? rtl(' ⏳ الحصة خلصت، يرجع بعد ') + latin(groundingBlockedMin() + '') + rtl(' دقيقة') : ''));
-  L.push(rtl('⏭ تخطي الحشو (' + SRC_NAME[settings.source('filler_skip')] + '): ' + onOff(settings.get('filler_skip'))));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
-  L.push(rtl('⏩ تجهيز ASS بالخلفية للحلقة التالية (' + SRC_NAME[settings.source('prefetch_ass')] + '): ' + onOff(settings.get('prefetch_ass'))));
-  L.push(rtl('⏩ تجهيز SRT بالخلفية للحلقة التالية (' + SRC_NAME[settings.source('prefetch_srt')] + '): ' + onOff(settings.get('prefetch_srt'))));
-  L.push(rtl('(الإيقاف يخص التجهيز التلقائي من المشغل فقط، ودفعات تلغرام تبقى شغالة)'));
-  L.push(rtl('🛡 حاجز الانفجار (' + SRC_NAME[settings.source('burst_guard')] + '): ' + onOff(settings.get('burst_guard'))));
-  L.push(rtl('(تراك جديد بنفس الحلقة يوصل خلال 10 ثوانٍ من تراك قبله يُتجاهل. الجاهز ما يتأثر، والبوت والدفعات مستثناة)'));
   L.push('');
   L.push(rtl('الترتيب يشمل الحلقات الجديدة فقط، والمثبتة تحتاج /clear.'));
   L.push(rtl('أو اكتب مثلاً: ') + latin('/slots subdl,subsource,wyzie,any'));
@@ -1256,10 +1249,7 @@ function settingsKeyboard() {
   rows.push([{ text: '↩️ ترتيب SRT الافتراضي', callback_data: 'st:rd' }]);
   const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
   rows.push(mp.slice(0, 2), mp.slice(2));
-  rows.push([tgl('🌐 البحث بجوجل', settings.get('search_grounding'), 'g')]);
-  rows.push([tgl('⏭ تخطي الحشو', settings.get('filler_skip'), 'f'), tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
-  rows.push([tgl('⏩ ASS بالخلفية', settings.get('prefetch_ass'), 'p'), tgl('⏩ SRT بالخلفية', settings.get('prefetch_srt'), 'q')]);
-  rows.push([tgl('🛡 حاجز الانفجار (10 ث)', settings.get('burst_guard'), 'h')]);
+  rows.push([tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
   return { inline_keyboard: rows };
 }
 
@@ -1290,18 +1280,8 @@ async function onSettingsCallback(cq) {
   } else if (op === 'm') {
     const m = MODEL_PRESETS[clamp(parseInt(arg, 10) || 0, 0, MODEL_PRESETS.length - 1)];
     r = await settings.set('search_model', m.id);
-  } else if (op === 'g') {
-    r = await settings.set('search_grounding', !settings.get('search_grounding'));
-  } else if (op === 'f') {
-    r = await settings.set('filler_skip', !settings.get('filler_skip'));
   } else if (op === 'a') {
     r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
-  } else if (op === 'p') {
-    r = await settings.set('prefetch_ass', !settings.get('prefetch_ass'));
-  } else if (op === 'q') {
-    r = await settings.set('prefetch_srt', !settings.get('prefetch_srt'));
-  } else if (op === 'h') {
-    r = await settings.set('burst_guard', !settings.get('burst_guard'));
   } else {
     await answerCb(cq);
     return;
@@ -1415,7 +1395,7 @@ let stopped = false;
 
 async function loop() {
   let offset = 0, fails = 0, drained = false;
-  tg('setMyCommands', { commands: [{ command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، البحث، الحشو)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }, { command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'actor', description: 'أعمال ممثل بالاسم' }, { command: 'get', description: 'حمّل ترجمات حلقة كملفات' }, { command: 'pin', description: 'التثبيتات الحالية (ألغِ تثبيت مصدر)' }] }).catch(() => {});
+  tg('setMyCommands', { commands: [{ command: 'settings', description: 'الإعدادات (ترتيب ASS وSRT، موديل البحث)' }, { command: 'clear', description: 'امسح ترجمة آخر حلقة' }, { command: 'batch', description: 'جهّز دفعة حلقات (4/6/8/10/20)' }, { command: 'order', description: 'امسح ترتيب تراكات حلقة' }, { command: 'stop', description: 'أوقف الدفعة الشغالة' }, { command: 'names', description: 'ثبّت أسماء وأماكن مسلسل للتنصيص' }, { command: 'purge', description: 'امسح ترجمات (الأساسي) أو تراكات (الثاني) بتاريخ' }, { command: 'find', description: 'ابحث عن فلم أو مسلسل بالاسم' }, { command: 'actor', description: 'أعمال ممثل بالاسم' }, { command: 'get', description: 'حمّل ترجمات حلقة كملفات' }, { command: 'pin', description: 'التثبيتات الحالية (ألغِ تثبيت مصدر)' }] }).catch(() => {});
   while (!stopped) {
     try {
       if (!drained) {

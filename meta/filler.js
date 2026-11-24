@@ -1,8 +1,5 @@
 const axios = require('axios');
 
-const settings = require('../core/settings');
-const isEnabled = () => !!settings.get('filler_skip');
-
 function normalizeBase(raw) {
     let u = String(raw || '').trim();
     if (!u) return '';
@@ -134,7 +131,7 @@ async function skipKitsu(targetId, kid, kepRaw, detail) {
 }
 
 async function skipFillerAhead(targetId, kitsuId, kitsuEp, detail) {
-    if (!isEnabled() || !targetId) return null;
+    if (!targetId) return null;
     if (!BASE) {
         if (!warnedNoUrl) {
             warnedNoUrl = true;

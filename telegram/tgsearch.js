@@ -51,7 +51,7 @@ const envList = v => String(v || '').split(/[\s,;]+/).map(s => s.trim()).filter(
 const searchEnv = () => ({
   keys: envList(process.env.SEARCH_GEMINI_KEYS),
   model: String(settings.get('search_model') || '').trim(),
-  grounding: !!settings.get('search_grounding')
+  grounding: true
 });
 
 const latinDigits = s => String(s == null ? '' : s).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660));

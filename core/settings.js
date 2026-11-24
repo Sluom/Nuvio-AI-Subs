@@ -16,12 +16,7 @@ const DEFS = {
   srt_slots: { env: 'SRT_SLOTS', fromEnv: trimEnv, def: '' },
   search_model: { env: 'SEARCH_GEMINI_MODEL', fromEnv: trimEnv, def: '' },
   serpapi_key: { env: 'SERPAPI_KEY', fromEnv: trimEnv, def: '' },
-  search_grounding: { env: 'SEARCH_GROUNDING', fromEnv: v => /^(1|true|yes|on)$/i.test(trimEnv(v)), def: false },
-  filler_skip: { env: 'FILLER_SKIP', fromEnv: v => v !== '0', def: true },
-  show_ai_always: { env: 'SHOW_AI_ALWAYS', fromEnv: v => v === '1', def: false },
-  prefetch_ass: { env: 'PREFETCH_ASS', fromEnv: v => v !== '0', def: true },
-  prefetch_srt: { env: 'PREFETCH_SRT', fromEnv: v => v !== '0', def: true },
-  burst_guard: { env: 'BURST_GUARD', fromEnv: v => v !== '0', def: true }
+  show_ai_always: { env: 'SHOW_AI_ALWAYS', fromEnv: v => v === '1', def: false }
 };
 
 let overrides = {};

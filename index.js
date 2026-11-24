@@ -1322,7 +1322,6 @@ const sendSub = (res, mime, name, body) => {
 
 const BURST_GUARD_MS = 10000;
 const burstLast = new Map();
-const burstGuardOn = () => settings.get('burst_guard') !== false;
 
 function burstSrc(req) {
     const h = (req && req.headers) || {};
@@ -1338,7 +1337,7 @@ function burstSrc(req) {
 function burstCheck(targetId, desc, exempt) {
     const now = Date.now();
     const last = burstLast.get(targetId);
-    if (!exempt && burstGuardOn() && last && now - last.at < BURST_GUARD_MS) {
+    if (!exempt && last && now - last.at < BURST_GUARD_MS) {
         return { blocked: true, ms: now - last.at, last };
     }
     burstLast.set(targetId, { at: now, desc });
