@@ -1,20 +1,20 @@
 'use strict';
 const axios = require('axios');
 const crypto = require('crypto');
-const db = require('./db');
-const { CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
+const db = require('../core/db');
+const { CORRECTOR_REV, TRACKS_TAG } = require('../ai/corrector');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 let filler = null;
-try { filler = require('./filler'); } catch (e) { filler = null; }
+try { filler = require('../meta/filler'); } catch (e) { filler = null; }
 let shared = null;
-try { shared = require('./ai').shared; } catch (e) { shared = null; }
-const settings = require('./settings');
+try { shared = require('../ai/ai').shared; } catch (e) { shared = null; }
+const settings = require('../core/settings');
 const search = require('./tgsearch');
 const getter = require('./tgget');
 const pinner = require('./tgpin');
 const { finds, latinDigits, clamp, maskKey, groundingBlockedMin, onFindCallback, onSmartCallback, IMAGE_MIMES, onImage, serpKeyCmd, onSerpKeyCmd, actorCmd, onActor, parseFind, parseEpisode, onFind, isPlainSearchText, parseQuery, cinemetaSearch, mergeResults, nameSim, foldText, osaDistance, jaroWinkler, trigramSim, extractJson, rankItems } = search;
-const { seriesInfoFromTarget, bookKey } = require('./name-book');
+const { seriesInfoFromTarget, bookKey } = require('../ai/name-book');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TG_CHAT = String(process.env.TELEGRAM_CHAT_ID || '').trim();

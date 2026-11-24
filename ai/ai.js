@@ -9,11 +9,11 @@ const {
   analyzeSubtitlesGender,
   logGenderDebug
 } = require('./genderRules');
-const { getTmdbCast } = require('./tmdb');
-const { getAnilistCast } = require('./anilist');
-const db = require('./db');
+const { getTmdbCast } = require('../meta/tmdb');
+const { getAnilistCast } = require('../meta/anilist');
+const db = require('../core/db');
 let httpAgent, httpsAgent;
-try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
+try { ({ httpAgent, httpsAgent } = require('../../../utils/httpAgents')); } catch (e) {}
 const ASS_DEFAULT_HEADER = [
   '[Script Info]',
   'ScriptType: v4.00+',

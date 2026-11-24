@@ -1,10 +1,10 @@
 'use strict';
 const axios = require('axios');
 const crypto = require('crypto');
-const settings = require('./settings');
+const settings = require('../core/settings');
 const imageSearch = require('./imageSearch');
 let shared = null;
-try { shared = require('./ai').shared; } catch (e) { shared = null; }
+try { shared = require('../ai/ai').shared; } catch (e) { shared = null; }
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const RLM = '‏';

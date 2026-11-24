@@ -1,6 +1,6 @@
 const axios = require('axios');
 let httpAgent, httpsAgent;
-try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
+try { ({ httpAgent, httpsAgent } = require('../../../utils/httpAgents')); } catch (e) {}
 const BASE = 'https://api.themoviedb.org/3';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CAST = 40;

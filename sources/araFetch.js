@@ -4,9 +4,9 @@ const { getSubDL } = require('./subdl');
 const { getSubSource } = require('./subsource');
 const { getOsCom, isOsComUrl, downloadOsComText } = require('./oscom');
 const { getWyzieAss } = require('./wyzie');
-const { hasEgyptianSpelling } = require('./arabic-spelling');
-const settings = require('./settings');
-const srcpins = require('./srcpins');
+const { hasEgyptianSpelling } = require('../ai/arabic-spelling');
+const settings = require('../core/settings');
+const srcpins = require('../core/srcpins');
 
 module.exports = { getArabicSubsForCorrection, getRawArabicSubContent, resolveEpInfoForUrl, verifyArabicSub, _t: { buildFinalArabicLists, applyAssSlots, applySiteSlots, parseAssSlots, markRetryRecovered } };
 
@@ -210,7 +210,7 @@ function resolveEpInfoForUrl(url, defaultEpInfo) {
 async function loadSubText(url, subsourceKey, epInfo) {
     const osComId = isOsComUrl(url);
     if (osComId) return downloadOsComText(osComId);
-    const { fetchAndExtractSub } = require('./ai').shared;
+    const { fetchAndExtractSub } = require('../ai/ai').shared;
     return fetchAndExtractSub(url, subsourceKey, epInfo);
 }
 
@@ -552,7 +552,7 @@ function detectAssContent(text, item) {
 async function verifyArabicSub(s, subsourceKey, epInfo = null, verifyTimeoutMs = VERIFY_TIMEOUT_MS) {
     let timer;
     try {
-        const { extractCuesUniversal } = require('./ai').shared;
+        const { extractCuesUniversal } = require('../ai/ai').shared;
         const effectiveEpInfo = s._epOverride || resolveEpInfoForUrl(s.url, epInfo);
         const primaryRawKey = makeRawKey(s.url, epInfo);
         const effectiveRawKey = makeRawKey(s.url, effectiveEpInfo);
@@ -1051,7 +1051,7 @@ async function getArabicSubsForCorrectionOnce({ imdbId, season, episode, type, s
     if (!noCache) try {
         const kept = {};
         for (const x of [...value.ass, ...value.srt]) if (x && x._site) kept[x._site] = (kept[x._site] || 0) + 1;
-        require('./notify').sourcesEvent({
+        require('../telegram/notify').sourcesEvent({
             imdbId, type, season, episode, isPrefetch, kept, abs: absUsedEp,
             fetched: { os_legacy: osLegacyList.length, opensubtitles: osMirrorList.length, subdl: subdlRawList.length, subsource: subsourceRawList.length, oscom: oscomRawList.length, wyzie: wyzieRawList.length }
         });

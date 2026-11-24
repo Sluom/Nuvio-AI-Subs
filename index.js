@@ -1,25 +1,25 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai');
-const { getSubDL } = require('./subdl');
-const { getSubSource } = require('./subsource');
-const { getHebHindiSubs } = require('./hebHindi');
-const { getArabicSubsForCorrection, getRawArabicSubContent, verifyArabicSub } = require('./araFetch');
-const { setOsComCreds } = require('./oscom');
-const { setWyzieKey } = require('./wyzie');
-const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai/ai');
+const { getSubDL } = require('./sources/subdl');
+const { getSubSource } = require('./sources/subsource');
+const { getHebHindiSubs } = require('./sources/hebHindi');
+const { getArabicSubsForCorrection, getRawArabicSubContent, verifyArabicSub } = require('./sources/araFetch');
+const { setOsComCreds } = require('./sources/oscom');
+const { setWyzieKey } = require('./sources/wyzie');
+const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./ai/corrector');
 const {
     cancelNextEpisodePrefetch,
     scheduleNextEpisodePrefetch,
     activatePendingNextEpTimer
-} = require('./prefetch');
-const db = require('./db');
-const srcpins = require('./srcpins');
-const notify = require('./notify');
+} = require('./core/prefetch');
+const db = require('./core/db');
+const srcpins = require('./core/srcpins');
+const notify = require('./telegram/notify');
 const crypto = require('crypto');
-const tgbot = require('./tgbot');
-const { resolveCeeId } = require('./ceeMap');
+const tgbot = require('./telegram/tgbot');
+const { resolveCeeId } = require('./meta/ceeMap');
 
 function urlKey(u) {
   const s = String(u || '').trim();
@@ -898,7 +898,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 const WANTED_TRACKS = 4;
-const settings = require('./settings');
+const settings = require('./core/settings');
 const showAiAlways = () => !!settings.get('show_ai_always');
 const READY_ASS_MAX = 3;
 const LIST_READ_MS = 1500;

@@ -1,8 +1,8 @@
 'use strict';
 const axios = require('axios');
 const crypto = require('crypto');
-const db = require('./db');
-const { CORRECTOR_REV, TRACKS_TAG } = require('./corrector');
+const db = require('../core/db');
+const { CORRECTOR_REV, TRACKS_TAG } = require('../ai/corrector');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 
@@ -48,7 +48,6 @@ function fileNameOf(slug, targetId, site, ext) {
   return slug + se + '.' + st + '.' + ext;
 }
 
-// تصنيف عناصر قائمة /subtitles: مصحّح SRT، مصحّح ASS، جاهز SRT، جاهز ASS (بنفس ترتيب صفحة الفحص)
 function classify(subs) {
   const out = { 'trans-srt': [], 'trans-ass': [], 'raw-srt': [], 'raw-ass': [] };
   for (const s of subs || []) {
@@ -271,7 +270,6 @@ async function sendLink(cq, chatId, g, it, res) {
 
 const SITE_LABELS = { subdl: 'subdl', subsource: 'subsource', os_legacy: 'opensubtitles.org', os_mirror: 'opensubtitles', opensubtitles: 'opensubtitles', oscom: 'opensubtitles.com', wyzie: 'wyzie' };
 
-// زر "📥 تحميل" تحت إشعار الاكتمال: callback_data = dl:<s|a>:<تراك>:<targetId> (بدون حالة، يشتغل حتى بعد إعادة تشغيل السيرفر)
 async function onDlCallback(cq) {
   const m = /^dl:([sa]):(\d+):(.+)$/.exec(String(cq.data || ''));
   if (!m) return;

@@ -287,14 +287,14 @@ function takeModelWon(ev) {
 }
 
 async function pinStatus(ev, slot) {
-  const pins = require('./srcpins');
+  const pins = require('../core/srcpins');
   await pins.forSeries(ev.targetId);
   const kind = slot === 'a' ? 'ass' : 'srt';
   const item = { url: ev.url };
   let doc = null;
   if (typeof ev.loadDoc === 'function') {
     try {
-      const tag = require('./corrector').TRACKS_TAG || '';
+      const tag = require('../ai/corrector').TRACKS_TAG || '';
       doc = await ev.loadDoc('corr_pins_' + ev.targetId + tag);
       const it = doc && Array.isArray(doc[kind]) ? doc[kind][Number(ev.trackNum) - 1] : null;
       if (it && it.url && pins.packOf(it.url) === pins.packOf(ev.url)) {
@@ -524,7 +524,7 @@ const SUMMARY_FIRST_CHECK_MS = 90 * 1000;
 const SUMMARY_FIRE_DELAY_MS = 5000;
 const STATS_MAX_EPS = 500;
 
-const getDb = () => { try { return require('./db'); } catch (e) { return null; } };
+const getDb = () => { try { return require('../core/db'); } catch (e) { return null; } };
 const baghdadDay = (t = Date.now()) => new Date(t + STATS_TZ_MS).toISOString().slice(0, 10);
 const emptyStats = day => ({ day, tracks: { ASS: 0, SRT: 0 }, eps: [], lines: 0, partial: 0, failed: 0, error: 0, src: {}, choke: 0, chokeBy: {}, fbwon: 0, rescue: 0, bothFailed: 0 });
 

@@ -1,6 +1,6 @@
 const axios = require('axios');
 let httpAgent, httpsAgent;
-try { ({ httpAgent, httpsAgent } = require('../../utils/httpAgents')); } catch (e) {}
+try { ({ httpAgent, httpsAgent } = require('../../../utils/httpAgents')); } catch (e) {}
 const ANILIST_URL = 'https://graphql.anilist.co';
 const KITSU_URL = 'https://kitsu.io/api/edge';
 const ARM_URL = 'https://arm.haglund.dev/api/v2/ids';

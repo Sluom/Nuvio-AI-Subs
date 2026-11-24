@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const settings = require('./settings');
+const settings = require('../core/settings');
 const isEnabled = () => !!settings.get('filler_skip');
 
 function normalizeBase(raw) {

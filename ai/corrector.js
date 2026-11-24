@@ -5,8 +5,8 @@ const {
   needsTranslation, loadLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
-const db = require('./db');
-const { resolveEpInfoForUrl, getRawArabicSubContent } = require('./araFetch');
+const db = require('../core/db');
+const { resolveEpInfoForUrl, getRawArabicSubContent } = require('../sources/araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
 const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames, applyPins } = require('./name-book');
 
@@ -600,7 +600,7 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null,
   return done;
 }
 const fallbackModelOf = m => (String(m || 'gemini-3.1-flash-lite').trim() === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL);
-const notifyModel = ev => { try { require('./notify').modelEvent(ev); } catch (e) { /* لا شيء */ } };
+const notifyModel = ev => { try { require('../telegram/notify').modelEvent(ev); } catch (e) {  } };
 function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}) {
   const fbModel = fallbackModelOf(primaryModel);
   const ids = items.map(it => it.id);
@@ -911,7 +911,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       ranges,
       chunks: [...new Set(ids.map(i => Math.floor(i / CHUNK) + 1))],
       totalChunks: Math.max(1, Math.ceil(cues.length / CHUNK)),
-      all: missing === toDo.length && fromCache === 0   // "فشل كلي" فقط اذا ما في اي سطر محفوظ؛ غير هيج يظهر زر "أكمل الناقص فقط"
+      all: missing === toDo.length && fromCache === 0
     };
   }
   return { texts: outTexts, missing, rejected, failInfo, spellInfo };
@@ -1033,7 +1033,6 @@ function applyAssFontSize(lines) {
     if (!sv) for (const [k2, v2] of styles) if (k2.toLowerCase() === nm.toLowerCase()) { sv = v2; break; }
     return sv || null;
   };
-  // نجمّع ستايلات الحوار حسب حجمها الأصلي، ونختار مجموعة الحجم اللي عليها أكثر أسطر
   const groups = new Map();
   for (const [nm, n] of counts) {
     const sv = findStyle(nm);

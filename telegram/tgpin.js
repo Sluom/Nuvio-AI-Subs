@@ -1,7 +1,7 @@
 'use strict';
-const db = require('./db');
-const srcpins = require('./srcpins');
-const { TRACKS_TAG } = require('./corrector');
+const db = require('../core/db');
+const srcpins = require('../core/srcpins');
+const { TRACKS_TAG } = require('../ai/corrector');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 
