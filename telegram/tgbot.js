@@ -711,6 +711,11 @@ const gapMinOf = (count, chosen) => chosen || (batchGapMs(count) / 60000);
 const batchLineText = (count, chosen) => '📦 دفعة: ' + count + ' حلقات (حلقة كل ' + gapMinOf(count, chosen) + ' دقائق، وتتوقف بنهاية الموسم)';
 const BATCH_PICK_TEXT = 'اختر التراك لبدء الدفعة (الموديل والفاصل من الأزرار تحت):';
 const READY_GAP_MS = 3000;
+const BATCH_LIST_RETRIES = 2;
+const BATCH_LIST_RETRY_MS = 60 * 1000;
+const BATCH_SKIP_GAP_MS = 15 * 1000;
+const BATCH_MAX_SKIPS = 3;
+const BATCH_NOTES_MAX = 12;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const META_TTL_MS = 6 * 3600 * 1000;
 
@@ -1062,24 +1067,64 @@ function pushBatch(b) {
   return editMsg({ chat: b.chat, message_id: b.messageId }, renderBatch(b));
 }
 
+function pickBatchTrack(tracks, ext, want) {
+  const same = (tracks || []).filter(x => x.ext === ext && x.track >= 1).sort((a, b) => a.track - b.track);
+  if (!same.length) return null;
+  const exact = same.find(x => x.track === want);
+  if (exact) return { t: exact, exact: true };
+  const lower = same.filter(x => x.track < want);
+  return { t: lower.length ? lower[lower.length - 1] : same[0], exact: false };
+}
+
 async function runBatch(b) {
   let cur = b.targetId;
   let left = await leftInSeason(cur);
   let started = 0;
+  let skipRun = 0;
+  const notes = [];
   try {
     while (started < b.count && !b.stopped) {
       let path = b.firstPath;
+      let fb = '';
       if (started > 0) {
         const nx = await nextOf(cur, left);
         if (nx.end) { b.final = '🏁 ' + nx.end + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
         await sleepFor(b, b.nextAt - Date.now());
         if (b.stopped) break;
-        const tracks = await fetchTracks('series', nx.id, b.rawOverride, true).catch(() => null);
-        const t = tracks && tracks.find(x => x.ext === b.ext && x.track === b.track);
-        if (!t) { b.final = '⏹ توقفت: ما لقيت ' + b.ext.toUpperCase() + ' ' + b.track + ' بالحلقة ' + nx.id.split(':').slice(1).join(':') + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
-        path = t.path;
+        const EXT = b.ext.toUpperCase();
+        const epNo = nx.id.split(':').slice(1).join(':');
+        let pick = null;
+        let listOk = false;
+        for (let a = 0; a <= BATCH_LIST_RETRIES && !b.stopped; a++) {
+          if (a > 0) { await sleepFor(b, BATCH_LIST_RETRY_MS); if (b.stopped) break; }
+          const tracks = await fetchTracks('series', nx.id, b.rawOverride, true).catch(() => null);
+          if (tracks) listOk = true;
+          pick = pickBatchTrack(tracks, b.ext, b.track);
+          if (pick) break;
+        }
+        if (b.stopped) break;
         left -= nx.consumed;
         cur = nx.id;
+        if (!pick) {
+          skipRun++;
+          const why = listOk ? 'ما لقيت أي ' + EXT : 'تعذر جلب القائمة';
+          const skipMsg = '⏭ ' + epNo + ': تخطيتها (' + why + ')';
+          b.lines.push(skipMsg);
+          notes.push(skipMsg);
+          if (nx.skipped > 0) b.lines.push('⏭ تجاوزت ' + arCount(nx.skipped, 'حلقة حشو', 'حلقتين حشو', 'حلقات حشو', 'حلقة حشو'));
+          console.log('[دفعة] ' + nx.id + ': تخطيتها (' + why + ')');
+          if (skipRun >= BATCH_MAX_SKIPS) { b.final = '⏹ توقفت: تخطيت ' + skipRun + ' حلقات ورا بعض (' + why + ') (جهزت ' + started + ' من ' + b.count + ')'; break; }
+          b.nextAt = Date.now() + BATCH_SKIP_GAP_MS;
+          await pushBatch(b);
+          continue;
+        }
+        skipRun = 0;
+        path = pick.t.path;
+        if (!pick.exact) {
+          fb = ' ⟵ ' + EXT + ' ' + pick.t.track + ' بدل ' + b.track;
+          notes.push('🔁 ' + epNo + ': صححت ' + EXT + ' ' + pick.t.track + ' بدل ' + EXT + ' ' + b.track + ' (ما لقيت ' + EXT + ' ' + b.track + ')');
+          console.log('[دفعة] ' + nx.id + ': ما لقيت ' + EXT + ' ' + b.track + ' ⟵ صححت ' + EXT + ' ' + pick.t.track);
+        }
         if (nx.skipped > 0) {
           const skippedText = arCount(nx.skipped, 'حلقة حشو', 'حلقتين حشو', 'حلقات حشو', 'حلقة حشو');
           b.lines.push('⏭ تجاوزت ' + skippedText);
@@ -1091,7 +1136,7 @@ async function runBatch(b) {
       const txt = await epText(cur);
       if (res === null) { b.final = '⏹ توقفت: تعذر بدء ' + txt + ' (جهزت ' + started + ' من ' + b.count + ')'; break; }
       started++;
-      b.lines.push((res ? '⏳ ' : '✅ جاهزة أصلاً: ') + started + '. ' + txt);
+      b.lines.push((res ? '⏳ ' : '✅ جاهزة أصلاً: ') + started + '. ' + txt + fb);
       console.log('[دفعة] ' + started + '/' + b.count + ' ' + cur + (res ? ': بدأ التجهيز' : ': جاهزة أصلاً'));
       b.nextAt = Date.now() + (res ? (b.gapMs || batchGapMs(b.count)) : READY_GAP_MS);
       if (started >= b.count) break;
@@ -1106,7 +1151,9 @@ async function runBatch(b) {
   b.nextAt = 0;
   if (activeBatch === b) activeBatch = null;
   await pushBatch(b);
-  await batchNotice(b, ['📦 انتهت الدفعة', ...b.head.slice(0, 1), b.final.replace(/^[^ ]+ /, '')]);
+  const shown = notes.slice(0, BATCH_NOTES_MAX);
+  if (notes.length > shown.length) shown.push('… و' + (notes.length - shown.length) + ' ملاحظات ثانية');
+  await batchNotice(b, ['📦 انتهت الدفعة', ...b.head.slice(0, 1), b.final.replace(/^[^ ]+ /, ''), ...(shown.length ? ['', ...shown] : [])]);
 }
 
 async function startBatch({ chat, messageId, targetId, head, track, count, model, gapMs }) {
