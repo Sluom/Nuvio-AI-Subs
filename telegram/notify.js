@@ -29,13 +29,13 @@ function scrub(s) {
   return out;
 }
 
-async function sendOne(text, markup, entities) {
+async function sendOne(text, markup, entities, silent) {
   try {
     const body = String(text).slice(0, 3500);
     const ents = Array.isArray(entities) ? entities.filter(e => e && e.offset >= 0 && e.length > 0 && e.offset + e.length <= body.length) : [];
     await axios.post(
       'https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage',
-      { chat_id: TG_CHAT, text: body, disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}), ...(ents.length ? { entities: ents } : {}) },
+      { chat_id: TG_CHAT, text: body, disable_web_page_preview: true, ...(silent ? { disable_notification: true } : {}), ...(markup ? { reply_markup: markup } : {}), ...(ents.length ? { entities: ents } : {}) },
       { timeout: 8000 }
     );
   } catch (e) {
@@ -60,14 +60,14 @@ async function pump() {
       if (wait > 0) await sleep(wait);
       const item = queue.shift();
       lastSentAt = Date.now();
-      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup, typeof item === 'string' ? null : item.entities);
+      await sendOne(typeof item === 'string' ? item : item.text, typeof item === 'string' ? null : item.markup, typeof item === 'string' ? null : item.entities, typeof item === 'string' ? false : !!item.silent);
     }
   } finally {
     pumping = false;
   }
 }
 
-function enqueue(text, markup, entities) {
+function enqueue(text, markup, entities, silent) {
   if (!ENABLED) return;
   try {
     const now = Date.now();
@@ -79,7 +79,7 @@ function enqueue(text, markup, entities) {
       if (recentTexts.size > 200) recentTexts.clear();
     }
     if (queue.length >= MAX_QUEUE) queue.shift();
-    queue.push(markup || (entities && entities.length) ? { text, markup, entities } : text);
+    queue.push(markup || (entities && entities.length) || silent ? { text, markup, entities, silent: !!silent } : text);
     pump().catch(() => {});
   } catch (e) {}
 }
@@ -347,6 +347,7 @@ async function report(ev) {
     try { pinSt = await pinStatus(ev, pinSlot); } catch (e) { pinSt = { state: 'none', pin: null }; }
   }
 
+  let loud = ev.kind === 'done' || ev.kind === 'failed';
   if (ev.kind === 'done') {
     line = head + ' | ' + ep.text + ' | ' + src + ' | ' + secs + ' ثانية | ' + (ev.total || 0) + ' سطر'
       + (ev.rejected > 0 ? ' | ' + ev.rejected + ' مرفوض' : '')
@@ -372,6 +373,7 @@ async function report(ev) {
     line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
     const fi = ev.failInfo;
     const allFailed = !!(fi && fi.all);
+    loud = allFailed;
     title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
     detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...(doneBy ? ['🧠 بواسطة ' + latin(doneBy)] : []), ...spellDetail(ev.spell)];
     if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
@@ -461,7 +463,7 @@ async function report(ev) {
   } else {
     ents = codeEntities(lines, [{ mark: '🎬', needle: shownId }]);
   }
-  enqueue(lines.join('\n'), markup, ents);
+  enqueue(lines.join('\n'), markup, ents, !loud);
 }
 
 const modelSeen = new Map();
@@ -505,7 +507,7 @@ async function modelReport(ev) {
   else if (trk) out.push('📺 ' + trk);
   if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
   const outLines = out.map(rtl);
-  enqueue(outLines.join('\n'), null, codeEntities(outLines, [{ mark: '🎬', needle: shownId }]));
+  enqueue(outLines.join('\n'), null, codeEntities(outLines, [{ mark: '🎬', needle: shownId }]), kind !== 'both-failed');
 }
 
 function modelEvent(ev) {
@@ -640,7 +642,7 @@ async function sendDailySummary(day) {
   s = Object.assign(emptyStats(day), s, { tracks: Object.assign({ ASS: 0, SRT: 0 }, s.tracks || {}), src: s.src || {}, eps: Array.isArray(s.eps) ? s.eps : [] });
   const total = (s.tracks.ASS || 0) + (s.tracks.SRT || 0) + s.partial + s.failed + s.error + (s.choke || 0);
   if (!total) return;
-  enqueue(summaryText(s));
+  enqueue(summaryText(s), null, null, true);
 }
 
 function msToNextBaghdadMidnight() {
@@ -692,7 +694,7 @@ async function sourcesReport(info) {
   const has = shown.season != null && shown.episode != null && shown.season !== '' && shown.episode !== '';
   const idShown = String(shown.imdbId || '') + (has ? ':' + shown.season + ':' + shown.episode : '');
   const at = idShown ? txt.lastIndexOf(idShown) : -1;
-  enqueue(txt, null, at >= 0 ? [{ type: 'code', offset: at, length: idShown.length }] : []);
+  enqueue(txt, null, at >= 0 ? [{ type: 'code', offset: at, length: idShown.length }] : [], true);
 }
 function sourcesEvent(info) {
   try { sourcesReport(info).catch(() => {}); } catch (e) {}
@@ -706,7 +708,7 @@ function trackEvent(ev) {
 
 if (ENABLED) {
   console.log('[إشعار] تيليغرام مفعّل ⟵ يصلك ملخص كل تراك يُصحَّح وتنبيهات المشاكل.');
-  const t = setTimeout(() => enqueue(rtl('🟢 ' + latin('Nuvio AI') + ' اشتغل') + '\n' + rtl('🔔 إشعارات التصحيح مفعّلة')), 8000);
+  const t = setTimeout(() => enqueue(rtl('🟢 ' + latin('Nuvio AI') + ' اشتغل') + '\n' + rtl('🔔 إشعارات التصحيح مفعّلة'), null, null, true), 8000);
   if (t && t.unref) t.unref();
   startDailySummary();
 } else {
