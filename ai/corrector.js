@@ -150,7 +150,7 @@ const leakScriptsOf = s => new Set(LEAK_SCRIPTS.filter(([, re]) => re.test(s)).m
 function fixForeignLeak(orig, out) {
   const origVis = String(orig == null ? '' : orig).replace(LEAK_MASK_RE, ' ');
   const held = [];
-  const masked = String(out == null ? '' : out).replace(LEAK_MASK_RE, m => { held.push(m); return ''; });
+  const masked = String(out == null ? '' : out).replace(LEAK_MASK_RE, m => { held.push(m); return '\uE000'; });
   const base = leakScriptsOf(origVis);
   const bad = LEAK_SCRIPTS.filter(([n, re]) => leakScriptsOf(masked).has(n) && !base.has(n));
   if (!bad.length) return { text: out, fixed: 0 };
@@ -174,7 +174,7 @@ function fixForeignLeak(orig, out) {
   });
   if (failed) return null;
   let k = 0;
-  return { text: res.replace(//g, () => (k < held.length ? held[k++] : '')), fixed };
+  return { text: res.replace(/\uE000/g, () => (k < held.length ? held[k++] : '')), fixed };
 }
 const LEAD_TAGS = /^(?:\{[^}]*\}|<[^>]*>|\s)*/;
 const LINE_SPLIT = /\\+[nN]|\r?\n/;
@@ -309,7 +309,7 @@ function fixLineParens(line) {
   if (!info.strayOpen.length && !info.strayClose.length) return line;
   const opens = (line.match(/\(/g) || []).length, closes = (line.match(/\)/g) || []).length;
   const pairs = opens - info.strayOpen.length;
-  if (pairs === 0 && opens === closes && line.search(/[()]/) === line.indexOf(')') ) {
+  if (pairs === 0 && opens === closes && line.search(/[()]/) === line.indexOf(')')) {
     return line.replace(/[()]/g, c => (c === '(' ? ')' : '('));
   }
   let out = line;
@@ -487,7 +487,10 @@ function analyzeEllipsis(cues) {
 }
 async function correctChunkStrict(items, keysArray, modelName, ctx = null, hook = null) {
   const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
-  const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
+  const isGemma = /^(?:models\/)?gemma-/i.test(String(cleanModel || '').trim());
+  const generationConfig = isGemma
+    ? { temperature: 0.1, thinkingConfig: { thinkingLevel: 'MINIMAL' } }
+    : { temperature: 0.1, responseMimeType: "application/json" };
   const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
     : '';
@@ -533,7 +536,9 @@ ${JSON.stringify(items)}`;
         maxContentLength: MAX_AI_RESPONSE_BYTES
       });
       const parts = r.data?.candidates?.[0]?.content?.parts || [];
-      const responseText = parts.map(p => p?.text || '').join('');
+      const finishReason = r.data?.candidates?.[0]?.finishReason || '';
+      let responseText = parts.filter(p => p && !p.thought).map(p => p.text || '').join('');
+      if (isGemma) responseText = responseText.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
       const map = parseIdTranslations(responseText);
       if (map) {
         const allowedIds = new Set(items.map(i => i.id));
@@ -546,17 +551,19 @@ ${JSON.stringify(items)}`;
         if (items.length >= 40) console.log(`[Success ✅] (${shortModel(cleanModel)}) طلب ${items.length} سطر، رجع ${map.size} عبر ...${cleanKey.slice(-4)}`);
         return { status: 'ok', map };
       }
+      console.log(`[صيغة غير صالحة - مصحح] (${shortModel(cleanModel)}) finish:${finishReason || '?'} | طول:${responseText.length}`);
       return { status: 'bad_format', map: new Map() };
     } catch (e) {
-      const status = e.response?.status || 0;
+      const status = e?.response?.status || 0;
+      const errMsg = String(e?.response?.data?.error?.message || e?.code || e?.message || 'unknown').replace(/\s+/g, ' ').slice(0, 180);
       if (isGeminiAuthFailure(e)) {
         deadKeys.add(activeKey);
-        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status})`);
+        console.log(`[مفتاح ميت] ...${cleanKey.slice(-4)} (status:${status}) | ${errMsg}`);
         continue;
       }
       const cd = cooldownForStatus(status);
       keyCooldowns.set(activeKey, Date.now() + cd);
-      console.log(`[تبريد طارئ - مصحح] (${shortModel(cleanModel)}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s`);
+      console.log(`[تبريد طارئ - مصحح] (${shortModel(cleanModel)}) ...${cleanKey.slice(-4)} -> ${Math.ceil(cd / 1000)}s | status:${status} | ${errMsg}`);
       if (hook && hook.onFail) hook.onFail();
       if (attempt < 3) await delay(2000 + (Math.random() * 2000));
     }
@@ -654,7 +661,7 @@ const startLineOf = (kind, extraKeys, cues, keysArray) => `\u200F[${kind}${extra
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
   .filter(Boolean);
-  
+
 async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const tStart = Date.now();
   const oldFile = isVisualOrderFile(cues);
@@ -679,7 +686,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
 
   const cache = await loadLineCache(lineCacheKey);
   const namesStored = await db.loadMap('names', nameCacheKey);
-  
+
   let book = null;
   let kinds = new Map();
   let namesLoadedFromCache = false;
@@ -700,7 +707,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const toDo = [];
   const sentText = new Map();
   let fromCache = 0;
-  
+
   cues.forEach((c, i) => {
     if (!needsCorrection(c.text)) { results[i] = c.text; return; }
     if (cache.has(i)) { results[i] = cache.get(i); fromCache++; return; }
@@ -711,9 +718,9 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     if (q) item.q = q;
     toDo.push(item);
   });
-  
+
   if (fromCache > 0) console.log(`\u200F[كاش الأسطر] ${fromCache} جاهز ⟵ أصحح الباقي (${toDo.length})`);
-  
+
   const namesDeps = {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
@@ -721,17 +728,17 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   };
   const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
     .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
-    
+
   let bookPromise = null;
   if (!namesLoadedFromCache && NAMES_PARALLEL && toDo.length > 0) {
     const sourceTexts = cues.filter(c => needsCorrection(c.text)).map(c => c.text);
     bookPromise = startBook(plainForBook(sourceTexts));
   }
-  
+
   let rejected = 0, leakFixed = 0, leakRejected = 0;
   const dirty = [];
   const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
-  
+
   const applyLine = (id, text) => {
     const orig = cues[id].text;
     text = spell.restoreFinalYa(orig, text);
@@ -750,15 +757,16 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     cache.set(id, clean);
     dirty.push([id, clean]);
   };
-  
+
   const persistDirty = () => {
     if (dirty.length === 0) return;
     db.saveMap('line', lineCacheKey, dirty.splice(0));
   };
-  
+
   const runBatchWithModel = async (itemsToRun, activeModel, hedge = false) => {
+    const modelChunk = /^(?:models\/)?gemma-/i.test(String(activeModel || '').trim()) ? 70 : CHUNK;
     const chunks = [];
-    for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
+    for (let i = 0; i < itemsToRun.length; i += modelChunk) chunks.push(itemsToRun.slice(i, i + modelChunk));
     const currentWorkers = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS, chunks.length));
     async function batchWorker() {
       while (chunks.length > 0) {
@@ -783,11 +791,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     }
     await Promise.all(Array.from({ length: currentWorkers }, () => batchWorker()));
   };
-  
+
   if (toDo.length > 0) {
     await runBatchWithModel(toDo, modelName, true);
   }
-  
+
   let unprocessed = toDo.filter(it => results[it.id] == null);
   if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
@@ -799,18 +807,18 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     unprocessed = toDo.filter(it => results[it.id] == null);
     if (unprocessed.length > 0) notifyModel({ ...opts.notifyCtx, kind: 'both-failed', model: shortModel(primaryClean), other: shortModel(fallbackModel) });
   }
-  
+
   const missing = unprocessed.length;
   if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من Gemini) | أرجعت ${leakRejected} سطر للأصلي`);
   const spellInfo = spell.flushLog();
-  
+
   const finalTexts = cues.map((c, i) =>
     needsCorrection(c.text) ? (results[i] != null ? results[i] : cleanCorrectorOutput(c.text)) : c.text
   );
-  
+
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
-  
+
   if (toDo.length > 0) {
     const tNames = Date.now();
     let tBookWait = 0, tCls = 0;
@@ -881,7 +889,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       book = applyPins(book, await pinsPromise);
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
-    
+
     outTexts = outTexts.map((t, i) => (eligible[i] ? wrapMaddaNames(cues[i].text, t) : t));
 
     const changed = [];
@@ -892,10 +900,10 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
-    
+
     if (Date.now() - tNames > 20000) console.log(`\u200F[مرحلة الأسماء ⏱ بطيئة] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
-  
+
   console.log(`\u200F[المصحح الكلي 📊] نواقص=${missing} ⟵ رفض=${rejected} ⟵ مفاتيح=${workerCount} ⟵ الوقت=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
   let failInfo = null;
   if (missing > 0) {
