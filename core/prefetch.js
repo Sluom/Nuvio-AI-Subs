@@ -178,7 +178,7 @@ async function runNextEpisodePrefetch(info) {
         });
 
         const subs = (r.data && Array.isArray(r.data.subtitles)) ? r.data.subtitles : [];
-        const matched = subs.find(s => {
+        let matched = subs.find(s => {
             if (!s || !s.url) return false;
             try {
                 const u = new URL(s.url);
@@ -187,6 +187,21 @@ async function runNextEpisodePrefetch(info) {
                 return false;
             }
         });
+
+        if (!matched && label.startsWith('ARA-')) {
+            const want = parseInt(trackNum, 10);
+            let nearest = 0;
+            for (const s of subs) {
+                if (!s || !s.url) continue;
+                try {
+                    const u = new URL(s.url);
+                    if (!u.pathname.toLowerCase().endsWith(expectedStreamPath)) continue;
+                    const n = parseInt(u.searchParams.get('track'), 10);
+                    if (n >= 1 && n < want && n > nearest) { nearest = n; matched = s; }
+                } catch {}
+            }
+            if (matched) console.log('[تجهيز تلقائي] ما لقيت ' + label + ' مسار ' + trackNum + ' للحلقة القادمة ' + nextTargetId + ' ⟵ أجهز مسار ' + nearest + ' (أقرب تراك)');
+        }
 
         if (!matched) {
             console.log('[تجهيز تلقائي] لم يتم العثور على ' + label + ' مسار ' + trackNum + ' للحلقة القادمة ' + nextTargetId);
