@@ -96,6 +96,31 @@ async function callJson(prompt, keysArray, model, d) {
   }
   return null;
 }
+async function callGroqNames(lines, hints, d) {
+  const empty = () => ({ persons: [], entities: [], ambiguous: [] });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await d.groqText(namesPrompt(lines, hints), { temperature: 0, expectedOutputTokens: Math.max(256, lines.length * 20) });
+    if (r.status === 'too_large') {
+      if (lines.length <= 1) return { value: empty(), complete: false };
+      const mid = Math.ceil(lines.length / 2);
+      const left = await callGroqNames(lines.slice(0, mid), hints, d);
+      const right = await callGroqNames(lines.slice(mid), hints, d);
+      const value = empty();
+      for (const field of Object.keys(value)) value[field] = [...new Set([...left.value[field], ...right.value[field]])];
+      return { value, complete: left.complete && right.complete };
+    }
+    if (r.status === 'no_keys' || r.status === 'api_exhausted' || r.status === 'config_error') break;
+    if (r.status !== 'ok') continue;
+    try {
+      const value = JSON.parse(r.text.replace(/```json|```/g, '').trim());
+      if (value && !Array.isArray(value) && ['persons', 'entities', 'ambiguous'].every(k => Array.isArray(value[k]))) {
+        console.log(`[Groq Names ✅] ${lines.length} lines | ...${r.keySuffix}`);
+        return { value, complete: true };
+      }
+    } catch {}
+  }
+  return { value: empty(), complete: false };
+}
 function namesPrompt(lines, hints) {
   const hintBlock = hints && hints.length
     ? `\nCHARACTER NAMES from the cast database (Latin spelling, reference only; the Arabic spelling in the lines is what counts): ${JSON.stringify(hints.slice(0, 60))}\n`
@@ -297,7 +322,7 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
   };
   const tasks = [];
   const tBook = Date.now();
-  const SLICE = lines.length <= SMALL_MAX_LINES ? SLICE_SMALL : SLICE_BIG;
+  const SLICE = deps.groqText ? deps.groqNamesChunk : (lines.length <= SMALL_MAX_LINES ? SLICE_SMALL : SLICE_BIG);
   const plannedSlices = Math.ceil(lines.length / SLICE);
   let okSlices = 0, totalSlices = 0;
   for (let i = 0; i < lines.length; i += SLICE) {
@@ -306,8 +331,9 @@ async function buildNameBook(lines, keysArray, modelName, deps, hints = [], conc
     const sliceNo = totalSlices;
     tasks.push(async () => {
       const tSlice = Date.now();
-      const r = await callJson(namesPrompt(part, hints), keysArray, model, deps);
-      if (!r || typeof r !== 'object') {
+      const groqResult = deps.groqText ? await callGroqNames(part, hints, deps) : null;
+      const r = groqResult ? groqResult.value : await callJson(namesPrompt(part, hints), keysArray, model, deps);
+      if (!r || !['persons', 'entities', 'ambiguous'].every(field => Array.isArray(r[field])) || (groqResult && !groqResult.complete)) {
         console.log(`\u200F[قاموس الأسماء ⚠] دفعة ${sliceNo}/${plannedSlices} فشلت بعد ${((Date.now() - tSlice) / 1000).toFixed(1)} ثانية`);
         return;
       }

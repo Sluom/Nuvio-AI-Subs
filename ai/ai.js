@@ -3,6 +3,9 @@ const axios = require('axios');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
+const dns = require('node:dns');
+const net = require('node:net');
+const zipUtils = require('adm-zip/util');
 const {
   applyVocativeRules,
   extractRuleEvidenceForCue,
@@ -592,7 +595,107 @@ const subTextCache = new Map();
 const SUB_CACHE_TTL = 30 * 60 * 1000;
 const SUB_CACHE_MAX = 60;
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-function safeDecode(u) { try { return decodeURIComponent(u); } catch (e) { return u; } }
+const MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024;
+const MAX_SUBTITLE_BYTES = 16 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 1024;
+
+// Provider-owned domains may use regional download hosts. Shared hosting uses exact names only.
+const subtitleDomains = ['opensubtitles.org', 'opensubtitles.com', 'subdl.com', 'subsource.net', 'wyzie.io'];
+const subtitleHosts = new Set([
+  'opensubtitles-v3.strem.io', 'dl.strem.io', 'subs.strem.io',
+  'subsource.strem.top', 'subdl.strem.top', 'subdl-stremio.vercel.app',
+  'stremiosubs.fusiontv.co', '4b139a4b7f94-wizdom-stremio-v2.baby-beamup.club',
+  ...String(process.env.SUBTITLE_DOWNLOAD_HOSTS || '').toLowerCase().split(/[\s,]+/).filter(Boolean)
+]);
+
+function subtitleUrl(raw, base) {
+  if (typeof raw !== 'string' || !raw.trim()) throw new Error('عنوان ترجمة غير صالح');
+  // Some older clients escaped the entire URL in addition to query-string encoding.
+  if (!base && /^https?%3a%2f%2f/i.test(raw)) raw = decodeURIComponent(raw);
+  const url = new URL(raw, base);
+  const host = url.hostname;
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port ||
+      net.isIP(host) || host.startsWith('[') ||
+      !(subtitleHosts.has(host) || /^subs\d+\.strem\.io$/.test(host) || subtitleDomains.some(domain => host === domain || host.endsWith('.' + domain)))) {
+    throw new Error('وجهة تنزيل الترجمة غير مسموحة');
+  }
+  return url;
+}
+
+const reservedV4 = new net.BlockList();
+for (const [network, bits] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+  ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
+  ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4]
+]) reservedV4.addSubnet(network, bits, 'ipv4');
+
+const globalV6 = new net.BlockList();
+globalV6.addSubnet('2000::', 3, 'ipv6');
+const reservedV6 = new net.BlockList();
+for (const [network, bits] of [['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['3fff::', 20]]) {
+  reservedV6.addSubnet(network, bits, 'ipv6');
+}
+
+function lookupSubtitleHost(host, options, callback) {
+  dns.lookup(host, { ...options, all: true }, (err, records) => {
+    if (err) return callback(err);
+    const valid = records.length && records.every(({ address, family }) => (
+      family === 4 ? !reservedV4.check(address, 'ipv4') :
+      family === 6 && globalV6.check(address, 'ipv6') && !reservedV6.check(address, 'ipv6')
+    ));
+    if (!valid) return callback(new Error('عنوان شبكة غير مسموح لتنزيل الترجمة'));
+    if (options.all) return callback(null, records);
+    callback(null, records[0].address, records[0].family);
+  });
+}
+
+// The DNS check is the lookup used by the socket for each new connection.
+const subtitleHttpAgent = new (require('node:http').Agent)({ lookup: lookupSubtitleHost });
+const subtitleHttpsAgent = new (require('node:https').Agent)({ lookup: lookupSubtitleHost });
+
+async function downloadSubtitleFile(rawUrl, headers, timeout = 15000) {
+  let url = subtitleUrl(rawUrl);
+  let requestHeaders = { ...headers, 'Accept-Encoding': 'identity' };
+  for (let hop = 0; hop <= 4; hop++) {
+    const response = await axios.get(url.href, {
+      headers: requestHeaders, timeout, responseType: 'arraybuffer', decompress: false,
+      proxy: false, maxRedirects: 0, maxContentLength: MAX_DOWNLOAD_BYTES,
+      httpAgent: subtitleHttpAgent, httpsAgent: subtitleHttpsAgent,
+      validateStatus: status => status === 200 || [301, 302, 303, 307, 308].includes(status)
+    });
+    if (response.status === 200) {
+      const bytes = Buffer.from(response.data);
+      if (bytes.length > MAX_DOWNLOAD_BYTES) throw new Error('ملف التنزيل أكبر من الحد');
+      const encoding = String(response.headers?.['content-encoding'] || 'identity').trim().toLowerCase();
+      const options = { maxOutputLength: MAX_SUBTITLE_BYTES };
+      if (encoding === 'identity') return bytes;
+      if (encoding === 'gzip' || encoding === 'x-gzip') return zlib.gunzipSync(bytes, options);
+      if (encoding === 'deflate') return zlib.inflateSync(bytes, options);
+      if (encoding === 'br') return zlib.brotliDecompressSync(bytes, options);
+      throw new Error('ترميز تنزيل غير مدعوم');
+    }
+    const next = subtitleUrl(response.headers?.location, url);
+    if (url.protocol === 'https:' && next.protocol !== 'https:') throw new Error('تحويل تنزيل غير آمن');
+    if (next.origin !== url.origin) {
+      requestHeaders = { 'User-Agent': headers['User-Agent'], Accept: '*/*', 'Accept-Encoding': 'identity' };
+    }
+    url = next;
+  }
+  throw new Error('عدد تحويلات التنزيل تجاوز الحد');
+}
+
+function boundedZipEntry(entry) {
+  const { size, method, flags, crc } = entry.header;
+  if (size > MAX_SUBTITLE_BYTES || (flags & 1) || (method !== 0 && method !== 8)) {
+    throw new Error('ملف الترجمة المضغوط غير مدعوم أو أكبر من الحد');
+  }
+  const data = entry.getCompressedData();
+  const result = method === 0 ? data : zlib.inflateRawSync(data, { maxOutputLength: MAX_SUBTITLE_BYTES });
+  if (result.length !== size || zipUtils.crc32(result) !== crc) throw new Error('بيانات ZIP غير سليمة');
+  return result;
+}
+
 function zipEpisodeOf(name) {
   const base = String(name).split(/[\\/]/).pop().replace(/\.(srt|ass|ssa)$/i, '').trim();
   if (!base) return null;
@@ -640,44 +743,19 @@ function downloadShared(url, run) {
   if (dlCache.size > 30) dlCache.delete(dlCache.keys().next().value);
   return entry.promise;
 }
-async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null, srcLang = '') {
-  const decodedUrl = safeDecode(subUrl);
-  const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
-  const hit = subTextCache.get(memKey);
-  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
-  const ssKey = String(subsourceKey || '').trim();
-  const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
-  const isSubsource = /^https?:\/\/api\.subsource\.net\//i.test(decodedUrl);
-  const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
-  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
-  const response = await downloadShared(decodedUrl, async () => {
-    let res = null;
-    let lastErr = null;
-    for (let i = 0; i < agents.length; i++) {
-      const ua = agents[i];
-      const headers = isOsOrg
-        ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
-        : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
-      if (isSubdl) headers['Referer'] = 'https://subdl.com/';
-      if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
-      try {
-        res = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000, headers });
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-        const st = e.response?.status || e.code || 'ERR';
-        console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
-        if (!(e.response?.status === 403 && i < agents.length - 1)) break;
-      }
-    }
-    if (!res) throw lastErr;
-    return res;
-  });
-  let buffer = Buffer.from(response.data);
-  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
+function unpackSubtitle(buffer, epInfo) {
+  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer, { maxOutputLength: MAX_SUBTITLE_BYTES });
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-    const zip = new AdmZip(buffer);
+    const zip = new AdmZip(buffer, { decoder: {
+      ...zipUtils.decoder,
+      decode(data) {
+        if (data.length > 1024) throw new Error('اسم ملف ZIP أطول من الحد');
+        const name = data.toString('utf8');
+        if (name.split('/').length > 32) throw new Error('تداخل مجلدات ZIP أكبر من الحد');
+        return name;
+      }
+    } });
+    if (zip.getEntryCount() > MAX_ARCHIVE_ENTRIES) throw new Error('عدد ملفات ZIP أكبر من الحد');
     const cands = zip.getEntries().filter(e => !e.isDirectory && /\.(srt|ass|ssa)$/i.test(e.entryName));
     if (cands.length === 0) {
       throw new Error('ملف الـ ZIP لا يحتوي على أي ملف ترجمة صالح (srt/ass/ssa)');
@@ -691,8 +769,45 @@ async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null, srcL
         throw new Error(`ملف الـ ZIP (${entry.entryName}) ليس للحلقة ${epInfo.episode}`);
       }
     }
-    if (entry) buffer = entry.getData();
+    buffer = boundedZipEntry(entry);
   }
+  return buffer;
+}
+async function fetchAndExtractSub(subUrl, subsourceKey = '', epInfo = null, srcLang = '') {
+  const decodedUrl = subtitleUrl(subUrl).href;
+  const memKey = decodedUrl + '#' + (epInfo ? epInfo.episode : '');
+  const hit = subTextCache.get(memKey);
+  if (hit && Date.now() - hit.time < SUB_CACHE_TTL) return hit.text;
+  const ssKey = String(subsourceKey || '').trim();
+  const isOsOrg = /^https?:\/\/dl\.opensubtitles\.org\//i.test(decodedUrl);
+  const isSubsource = /^https:\/\/api\.subsource\.net\//i.test(decodedUrl);
+  const isSubdl = /^https?:\/\/dl\.subdl\.com\//i.test(decodedUrl);
+  const agents = isOsOrg ? ['VLSub 0.10.3', 'TemporaryUserAgent'] : [BROWSER_UA, 'Mozilla/5.0'];
+  const payload = await downloadShared(decodedUrl, async () => {
+    let res = null;
+    let lastErr = null;
+    for (let i = 0; i < agents.length; i++) {
+      const ua = agents[i];
+      const headers = isOsOrg
+        ? { 'User-Agent': ua, 'X-User-Agent': ua, 'Accept': '*/*' }
+        : { 'User-Agent': ua, 'Accept': '*/*', 'Accept-Language': 'en-US,en;q=0.9' };
+      if (isSubdl) headers['Referer'] = 'https://subdl.com/';
+      if (isSubsource && ssKey) headers['X-API-Key'] = ssKey;
+      try {
+        res = await downloadSubtitleFile(decodedUrl, headers);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const st = e.response?.status || e.code || 'ERR';
+        console.log(`[Download] ${st} (${ua.slice(0, 18)}) <- ${decodedUrl}`);
+        if (!(e.response?.status === 403 && i < agents.length - 1)) break;
+      }
+    }
+    if (!res) throw lastErr;
+    return res;
+  });
+  const buffer = unpackSubtitle(payload, epInfo);
   const text = (srcLang === 'he' ? fixHebrewEncoding(buffer) : fixArabicEncoding(buffer)).toString('utf-8');
   subTextCache.set(memKey, { time: Date.now(), text });
   if (subTextCache.size > SUB_CACHE_MAX) subTextCache.delete(subTextCache.keys().next().value);
@@ -970,6 +1085,7 @@ module.exports = {
   parseIdTranslations,
   translateItemsWithRecovery,
   shared: {
+    subtitleUrl, downloadSubtitleFile, unpackSubtitle,
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
     MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent, parseIdTranslations, buildChunkContext,

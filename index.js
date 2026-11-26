@@ -1,14 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { handleTranslationSrtDetailed, handleTranslationAssDetailed } = require('./ai/ai');
+const { handleTranslationSrtDetailed, handleTranslationAssDetailed, shared: { subtitleUrl } } = require('./ai/ai');
 const { getSubDL } = require('./sources/subdl');
 const { getSubSource } = require('./sources/subsource');
 const { getHebHindiSubs } = require('./sources/hebHindi');
 const { getArabicSubsForCorrection, getRawArabicSubContent, verifyArabicSub } = require('./sources/araFetch');
 const { setOsComCreds } = require('./sources/oscom');
 const { setWyzieKey } = require('./sources/wyzie');
-const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG } = require('./ai/corrector');
+const { handleCorrectionSrt, handleCorrectionAss, CORRECTOR_REV, TRACKS_TAG, correctorRoundPlan, isGroqModel, geminiModelFor, GROQ_MODEL, groqAvailable, CORRECTOR_MODEL_CHOICES, selectCorrectorModel } = require('./ai/corrector');
 const {
     cancelNextEpisodePrefetch,
     scheduleNextEpisodePrefetch,
@@ -85,7 +85,7 @@ function shortRateOk(ip) {
     if (shortRate.size > 2000) shortRate.clear();
     return true;
 }
-const SHORT_STR_FIELDS = ['model', 'tmdbKey', 'subdlKey', 'subsourceKey', 'oscomKey', 'oscomUser', 'oscomPass', 'wyzieKey'];
+const SHORT_STR_FIELDS = ['model', 'translationModel', 'tmdbKey', 'subdlKey', 'subsourceKey', 'oscomKey', 'oscomUser', 'oscomPass', 'wyzieKey'];
 app.post('/api/short-config', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
@@ -95,7 +95,8 @@ app.post('/api/short-config', async (req, res) => {
     if (!c || typeof c !== 'object' || !Array.isArray(c.keys) || !c.keys.length || !c.keys.every(k => typeof k === 'string' && k.length < 300) || c.keys.length > 200) {
         return res.status(400).json({ error: 'إعداد غير صالح.' });
     }
-    const clean = { keys: c.keys.map(k => k.trim()).filter(Boolean) };
+    const clean = { keys: [...new Set(c.keys.map(k => k.trim()).filter(k => k && !/^gsk_/i.test(k)))] };
+    if (!clean.keys.length) return res.status(400).json({ error: 'Gemini API key required.' });
     for (const f of SHORT_STR_FIELDS) if (typeof c[f] === 'string' && c[f] && c[f].length < 500) clean[f] = c[f];
     const json = JSON.stringify(clean);
     if (json.length > 60000) return res.status(400).json({ error: 'الإعداد كبير جداً.' });
@@ -108,7 +109,9 @@ app.post('/api/short-config', async (req, res) => {
     const ok = await db.saveLink(id, json);
     if (!ok) return res.status(503).json({ error: 'تعذر الحفظ بقاعدة البيانات.' });
     shortCachePut(id, json);
-    res.json({ id });
+    const selected = selectCorrectorModel(clean.model, settings.get('corrector_model'), '');
+    const groqFallback = isGroqModel(selected) && !groqAvailable(clean.keys);
+    res.json({ id, groqFallback });
 });
 
 const PORT = process.env.PORT || 7000;
@@ -312,6 +315,15 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
         let curUrl = targetUrl;
         let curExtra = { ...(extraKeys || {}) };
         let lastR = null;
+        const roundPlan = healKind ? correctorRoundPlan(userKeys, userModel) : Array.from({ length: MAX_BACKGROUND_ROUNDS }, (_, i) => ({ model: geminiModelFor(userModel), phase: 'primary', round: i + 1 }));
+        let activeModel = roundPlan[0].model;
+        if (healKind && isGroqModel(userModel) && !isGroqModel(activeModel)) {
+            notify.modelEvent({ kind: 'groq-unavailable', label, trackNum, targetId, model: userModel, other: activeModel });
+        }
+        let lastCompletedModel = null;
+        let roundsRun = 0;
+        const attemptedModels = new Set();
+        const phaseAttempts = new Set();
         let healTried = false;
         let healed = false;
         const spellAcc = new Map();
@@ -319,18 +331,28 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
             if (!healKind) return;
             try {
                 notify.trackEvent({
-                    kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey, model: userModel,
-                    ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, rejected: r && r.rejected, failInfo: r && r.failInfo,
+                    kind, label, trackNum, targetId, url: curUrl, isPrefetch, cacheKey, model: lastCompletedModel, actualModel: true,
+                    ms: Date.now() - t0, total: r && r.total, missing: r && r.missing, namesComplete: r && r.namesComplete, rejected: r && r.rejected, failInfo: r && r.failInfo,
                     spell: spellAcc.size ? [...spellAcc.entries()].sort((a, b) => b[1] - a[1]) : null,
-                    healTried, healed, rounds: MAX_BACKGROUND_ROUNDS,
+                    healTried, healed, rounds: roundsRun,
                     loadDoc: k => db.loadDoc('job', k),
                     ...(extra || {})
                 });
             } catch { }
         };
         try {
-            for (let round = 1; round <= MAX_BACKGROUND_ROUNDS; round++) {
-                let r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
+            for (let round = 1; round <= roundPlan.length; round++) {
+                const step = roundPlan[round - 1];
+                activeModel = step.model;
+                if (step.round === 1) phaseAttempts.clear();
+                if (step.phase === 'rescue' && step.round === 1) {
+                    if (isGroqModel(activeModel) && !groqAvailable(userKeys)) { activeModel = roundPlan[0].model; break; }
+                    console.log(`[Provider rescue] ${roundPlan[0].model} -> ${activeModel} | missing=${lastR?.missing || 0}`);
+                    if (healKind) notify.modelEvent({ kind: 'provider-rescue', label, trackNum, targetId, model: roundPlan[0].model, other: activeModel });
+                }
+                if (healKind) console.log(`[Corrector round] ${step.phase} ${step.round} | ${activeModel}`);
+                const roundExtra = { ...curExtra, round, namesModel: step.namesModel };
+                let r = await handler(curUrl, userKeys, activeModel, userTmdbKey, targetId, kitsuId, roundExtra);
                 if (r.failed && healKind && round === 1) {
                     healTried = true;
                     const alt = await healFailedTrack({ label, kind: healKind, targetId, trackNum, failedUrl: curUrl, extraKeys: curExtra, cacheKey });
@@ -338,29 +360,43 @@ function startTranslationJob({ cacheKey, handler, targetUrl, userKeys, userModel
                         healed = true;
                         curUrl = alt.url;
                         curExtra = { ...curExtra, preloadedText: alt.text };
-                        r = await handler(curUrl, userKeys, userModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round });
+                        r = await handler(curUrl, userKeys, activeModel, userTmdbKey, targetId, kitsuId, { ...curExtra, round, namesModel: step.namesModel });
                     }
                 }
                 lastR = r;
+                roundsRun = round;
+                if (r.lastModel) lastCompletedModel = r.lastModel;
+                for (const m of r.attemptedModels || []) { attemptedModels.add(m); phaseAttempts.add(m); }
                 if (r && Array.isArray(r.spellInfo)) for (const [k, n] of r.spellInfo) spellAcc.set(k, Math.max(spellAcc.get(k) || 0, n));
                 if (r.failed) {
                     failNow(r);
                     note('failed', r);
                     return;
                 }
-                translationCache[cacheKey] = { status: 'done', content: r.content, complete: r.missing === 0 };
+                const complete = r.missing === 0 && r.namesComplete !== false;
+                translationCache[cacheKey] = { status: 'done', content: r.content, complete };
                 activatePendingNextEpTimer(targetId, label, trackNum);
-                if (r.missing === 0) {
+                if (complete) {
                     const saved = await db.saveDoc('job', cacheKey, { content: r.content });
                     if (saved) console.log('💾 [MongoDB] ' + label + ' Track ' + trackNum + ': تم حفظ النتيجة دائماً في mongo');
                     if (round > 1) console.log('[' + label + '] Track ' + trackNum + ': اكتملت الترجمة/التصحيح بعد ' + round + ' جولات ✅');
                     note('done', r);
                     return;
                 }
-                console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + MAX_BACKGROUND_ROUNDS + ')');
-                if (round < MAX_BACKGROUND_ROUNDS) await sleep(ROUND_PAUSE_MS);
+                console.log('[' + label + '] Track ' + trackNum + ': ناقص ' + r.missing + ' من ' + r.total + ' سطر (جولة ' + round + '/' + roundPlan.length + ')');
+                const nextStep = roundPlan[round];
+                if (healKind && isGroqModel(activeModel) && nextStep && nextStep.phase !== step.phase && phaseAttempts.size) {
+                    notify.modelEvent({ kind: 'provider-failed', label, trackNum, targetId, models: [...phaseAttempts] });
+                }
+                if (nextStep && nextStep.phase === step.phase) await sleep(ROUND_PAUSE_MS);
             }
-            if (lastR && lastR.missing > 0) note('partial', lastR);
+            if (lastR && (lastR.missing > 0 || lastR.namesComplete === false)) {
+                if (lastR.missing > 0 && healKind && [...attemptedModels].some(isGroqModel)) notify.modelEvent({ kind: 'provider-failed', label, trackNum, targetId, models: [...attemptedModels] });
+                if (lastR.namesComplete === false && translationCache[cacheKey]?.complete === false) {
+                    translationCache[cacheKey].retryAfter = Date.now() + ROUND_PAUSE_MS;
+                }
+                note('partial', lastR);
+            }
         } catch (e) {
             console.error('[Background Error - ' + label + '] Track ' + trackNum + ':', e.message);
             dropIfNotDone();
@@ -708,12 +744,15 @@ function getBaseUrl(req) {
 }
 
 function parseConfig(raw, onError) {
-    const cfg = { keys: [], model: DEFAULT_MODEL, tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '', wyzieKey: '' };
+    const cfg = { keys: [], model: DEFAULT_MODEL, translationModel: DEFAULT_MODEL, batchCorrectorModel: '', tmdbKey: '', subdlKey: '', subsourceKey: '', oscomKey: '', oscomUser: '', oscomPass: '', wyzieKey: '' };
     if (!raw) return cfg;
     try {
-        const d = JSON.parse(decodeURIComponent(raw));
-        if (Array.isArray(d.keys)) cfg.keys = d.keys;
-        if (d.model) cfg.model = d.model;
+        let d;
+        try { d = JSON.parse(raw); } catch { d = JSON.parse(decodeURIComponent(raw)); }
+        if (Array.isArray(d.keys)) cfg.keys = [...new Set(d.keys.filter(k => typeof k === 'string').map(k => k.trim()).filter(k => k && !/^gsk_/i.test(k)))];
+        if (d.model) cfg.model = isGroqModel(d.model) ? 'groq' : d.model;
+        cfg.translationModel = isGroqModel(cfg.model) ? geminiModelFor(d.translationModel) : geminiModelFor(cfg.model);
+        if (CORRECTOR_MODEL_CHOICES.includes(d.batchCorrectorModel)) cfg.batchCorrectorModel = d.batchCorrectorModel;
         if (d.tmdbKey) cfg.tmdbKey = d.tmdbKey;
         if (d.subdlKey) cfg.subdlKey = String(d.subdlKey).trim();
         if (d.subsourceKey) cfg.subsourceKey = String(d.subsourceKey).trim();
@@ -730,6 +769,7 @@ function parseConfig(raw, onError) {
 }
 
 const MODELS = [
+    ['groq', 'Groq - ' + GROQ_MODEL],
     ['gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite'],
     ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'],
     ['gemma-4-31b-it', 'Gemma 4 31B'],
@@ -741,24 +781,18 @@ const MODELS = [
     ['gemini-2.5-flash', 'Gemini 2.5 Flash']
 
 ];
-const attr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
+const attr = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const {
-        keys: existingKeys, model: existingModel, tmdbKey: existingTmdbKey,
+        keys: existingKeys, model: existingModel, translationModel: existingTranslationModel, tmdbKey: existingTmdbKey,
         subdlKey: existingSubdlKey, subsourceKey: existingSubsourceKey,
         oscomKey: existingOsComKey, oscomUser: existingOsComUser, oscomPass: existingOsComPass,
         wyzieKey: existingWyzieKey
     } = parseConfig(req.params.config, e => console.error('[Configure] Failed to parse existing config:', e.message));
-    const keyRowsHtml = existingKeys.length > 0
-        ? existingKeys.map((key, i) => {
-            const k = attr(key);
-            return i === 0
-                ? '<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)" value="' + k + '"></div>'
-                : '<div class="key-row"><input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)" value="' + k + '"><button class="remove-btn" onclick="this.parentElement.remove()">X</button></div>';
-        }).join('\n')
-        : '<div class="key-row"><input type="text" class="api-key" placeholder="المفتاح الأساسي (AIzaSy...)"></div>';
+    const escapeText = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const keyRowsHtml = '<details><summary>مفاتيح Gemini (<span id="key-count">' + existingKeys.length + '</span>)</summary><textarea id="gemini-keys" rows="7" style="width:100%;box-sizing:border-box;padding:10px;border-radius:6px;background:#0f172a;color:#fff;border:1px solid #334155;direction:ltr" placeholder="API keys (one per line or comma-separated)">' + escapeText(existingKeys.join('\n')) + '</textarea></details>';
     const modelOptions = MODELS.map(([v, n]) => '<option value="' + v + '"' + (existingModel === v ? ' selected' : '') + '>' + n + '</option>').join('');
     const bannerHtml = existingKeys.length > 0
         ? '<div class="status-banner">✅ تم تحميل ' + existingKeys.length + ' مفتاح موجود مسبقًا — عدّل حسب حاجتك</div>'
@@ -793,7 +827,6 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 ` + bannerHtml + `
 <p style="text-align:center;font-size:14px;color:#cbd5e1;margin-bottom:25px">أضف مفاتيح Gemini API الخاصة بك هنا. النظام سيبدل بينها تلقائياً.</p>
 <div id="keys-container">` + keyRowsHtml + `</div>
-<button type="button" class="btn btn-secondary" onclick="addKeyField()">+ إضافة مفتاح آخر</button>
 <div class="input-group" style="margin-top:20px">
 <label>مفتاح TMDB API (اختياري - لمعرفة أسماء وجنس الشخصيات)</label>
 <input type="text" id="tmdb-key" placeholder="المفتاح القصير v3 أو التوكن v4" value="` + attr(existingTmdbKey) + `">
@@ -823,8 +856,9 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 <input type="text" id="wyzie-key" placeholder="wyzie-..." value="` + attr(existingWyzieKey) + `">
 </div>
 <div class="input-group" style="margin-top:20px">
-<label>نموذج الترجمة (Translation Model)</label>
+<label>نموذج المصحح (Gemini / Groq)</label>
 <select id="model-select" style="width:100%;padding:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff">` + modelOptions + `</select>
+<small>Groq يحتاج مفتاح سيرفر وصلاحية لهذا الإعداد. عند تعذّره يرجع المصحح إلى Gemini.</small>
 </div>
 <button class="btn" onclick="generateInstallLink()">` + btnText + `</button>
 <div id="test-link-box" style="display:none;margin-top:20px;padding:12px;background:#0f172a;border-radius:8px;border:1px solid #334155">
@@ -835,15 +869,13 @@ input[type="text"],input[type="password"]{width:100%;padding:10px;border-radius:
 </div>
 <script>
 const CUR_ID=${JSON.stringify(req.shortId || '')};
-function addKeyField(){
-const row=document.createElement('div');
-row.className='key-row';
-row.innerHTML='<input type="text" class="api-key" placeholder="مفتاح إضافي (AIzaSy...)"><button class="remove-btn" onclick="this.parentElement.remove()">X</button>';
-document.getElementById('keys-container').appendChild(row);
-}
+let LAST_GEMINI_MODEL=${JSON.stringify(existingTranslationModel).replace(/</g, '\\u003c')};
+const parseGeminiKeys=()=>[...new Set(document.getElementById('gemini-keys').value.split(/[\\s,]+/).map(s=>s.trim()).filter(Boolean))];
+document.getElementById('gemini-keys').addEventListener('input',()=>{document.getElementById('key-count').textContent=parseGeminiKeys().length;});
+document.getElementById('model-select').addEventListener('change',e=>{if(e.target.value!=='groq')LAST_GEMINI_MODEL=e.target.value;});
 function buildConfigObj(){
-const keys=[];
-document.querySelectorAll('.api-key').forEach(i=>{const v=i.value.trim();if(v)keys.push(v);});
+const keys=parseGeminiKeys();
+if(keys.some(k=>/^gsk_/i.test(k))){alert('مفاتيح Groq توضع في Render فقط.');return null;}
 if(keys.length===0){alert('الرجاء إدخال مفتاح API واحد على الأقل!');return null;}
 const tmdbKey=document.getElementById('tmdb-key').value.trim();
 const subdlKey=document.getElementById('subdl-key').value.trim();
@@ -852,7 +884,7 @@ const oscomKey=document.getElementById('oscom-key').value.trim();
 const oscomUser=document.getElementById('oscom-user').value.trim();
 const oscomPass=document.getElementById('oscom-pass').value;
 const wyzieKey=document.getElementById('wyzie-key').value.trim();
-const config={keys:keys,model:document.getElementById('model-select').value};
+const config={keys:keys,model:document.getElementById('model-select').value,translationModel:LAST_GEMINI_MODEL};
 if(tmdbKey)config.tmdbKey=tmdbKey;
 if(subdlKey)config.subdlKey=subdlKey;
 if(subsourceKey)config.subsourceKey=subsourceKey;
@@ -869,7 +901,7 @@ let c=encodeURIComponent(JSON.stringify(config));
 let short=false;
 try{
 const r=await fetch('/api/short-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:config,id:CUR_ID})});
-if(r.ok){const j=await r.json();if(j&&j.id){c=j.id;short=true;}}
+if(r.ok){const j=await r.json();if(j&&j.id){c=j.id;short=true;if(j.groqFallback)alert('Groq غير متاح لهذا الإعداد. المصحح راح يستخدم Gemini.');}}
 }catch(e){}
 if(!short)alert('تعذر إنشاء الرابط القصير (القاعدة غير متاحة)، تم استعمال الرابط الطويل.');
 document.getElementById('test-link-input').value=window.location.origin+'/'+c+'/manifest.json';
@@ -1361,12 +1393,11 @@ function parseEpInfoFromTargetId(targetId) {
 
 const rawStreamRoute = (ext, mime) => async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
-    const targetUrl = req.query.url;
+    let targetUrl;
+    try { targetUrl = subtitleUrl(req.query.url).href; }
+    catch { return res.status(400).send('Invalid subtitle source'); }
     const targetId = req.query.id || '';
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
-    if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
-        return res.status(400).send('Invalid or Missing URL');
-    }
     if (targetId && !req.query.prefetch) {
         cancelNextEpisodePrefetch(targetId, 'التحويل إلى مسار جاهز بدون تصحيح');
     }
@@ -1377,23 +1408,21 @@ const rawStreamRoute = (ext, mime) => async (req, res) => {
         return sendSub(res, mime, 'Ready-Track' + trackNum + '.' + ext, content);
     } catch (e) {
         console.error('[Raw Sub Error] Track ' + trackNum + ':', e.message);
-        if (!/\.zip(\?|$)/i.test(targetUrl) && !/\/oscom\/file\//i.test(targetUrl)) {
-            return res.redirect(302, targetUrl);
-        }
         return res.status(502).send('Failed to load ready subtitle');
     }
 };
 
 const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async (req, res) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
-    const targetUrl = req.query.url;
+    let targetUrl;
+    try { targetUrl = subtitleUrl(req.query.url).href; }
+    catch { return res.status(400).send('Invalid subtitle source'); }
     const targetId = req.query.id || '';
     const kitsuId = req.query.kitsu || '';
     const kitsuEp = req.query.kep || '';
     const trackNum = String(req.query.track || '1').replace(/[^0-9a-zA-Z_-]/g, '');
     const srcLang = /^(he|hi)$/.test(String(req.query.src || '')) ? String(req.query.src) : '';
     const isPrefetch = String(req.query.prefetch || '') === '1';
-    if (!targetUrl) return res.status(400).send('Missing URL');
     const isCorrector = label === 'ARA-SRT' || label === 'ARA-ASS';
     const isPinnedCorrector = isCorrector && targetId;
     const srcCacheTag = srcLang ? '_' + srcLang + 'v2' : '';
@@ -1403,6 +1432,11 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
         : [label, targetId, targetUrl].join('_') + srcCacheTag) + revTag;
     const legacyUrlCacheKey = [label, targetId, targetUrl].join('_') + srcCacheTag + revTag;
     let cached = translationCache[primaryCacheKey] || translationCache[legacyUrlCacheKey];
+    if (cached?.retryAfter && Date.now() >= cached.retryAfter) {
+        delete translationCache[primaryCacheKey];
+        delete translationCache[legacyUrlCacheKey];
+        cached = undefined;
+    }
     if (cached && cached.status === 'failed') {
         delete translationCache[primaryCacheKey];
         delete translationCache[legacyUrlCacheKey];
@@ -1437,7 +1471,7 @@ const streamRoute = (ext, label, mime, handler, waitBody, altWaitBody) => async 
                 }
                 startTranslationJob({
                     cacheKey: primaryCacheKey, handler, targetUrl,
-                    userKeys: cfg.keys, userModel: cfg.model, userTmdbKey: cfg.tmdbKey,
+                    userKeys: cfg.keys, userModel: isCorrector ? selectCorrectorModel(cfg.model, settings.get('corrector_model'), cfg.batchCorrectorModel) : cfg.translationModel, userTmdbKey: cfg.tmdbKey,
                     extraKeys: { subdlKey: cfg.subdlKey, subsourceKey: cfg.subsourceKey, trackNum, srcLang },
                     trackNum, label, targetId, kitsuId, isPrefetch
                 });

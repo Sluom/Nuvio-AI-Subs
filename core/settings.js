@@ -15,6 +15,7 @@ const DEFS = {
   ass_slots: { env: 'ASS_SLOTS', fromEnv: trimEnv, def: '' },
   srt_slots: { env: 'SRT_SLOTS', fromEnv: trimEnv, def: '' },
   search_model: { env: 'SEARCH_GEMINI_MODEL', fromEnv: trimEnv, def: '' },
+  corrector_model: { env: null, fromEnv: trimEnv, def: '' },
   serpapi_key: { env: 'SERPAPI_KEY', fromEnv: trimEnv, def: '' },
   show_ai_always: { env: 'SHOW_AI_ALWAYS', fromEnv: v => v === '1', def: false }
 };
@@ -43,6 +44,10 @@ function validate(key, value) {
   if (!d) return { ok: false };
   if (key === 'ass_slots') return normalizeSlots(value);
   if (key === 'srt_slots') return normalizeSlots(value, SRT_SLOT_CHOICES);
+  if (key === 'corrector_model') {
+    const v = trimEnv(value);
+    return ['', 'gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.6-flash', 'groq'].includes(v) ? { ok: true, value: v } : { ok: false };
+  }
   if (key === 'search_model') {
     const v = trimEnv(value);
     return /^[A-Za-z0-9._\-\/]{0,80}$/.test(v) ? { ok: true, value: v } : { ok: false };
@@ -56,7 +61,7 @@ function validate(key, value) {
 
 function envRaw(key) {
   const d = DEFS[key];
-  return d ? process.env[d.env] : undefined;
+  return d && d.env ? process.env[d.env] : undefined;
 }
 
 function get(key) {

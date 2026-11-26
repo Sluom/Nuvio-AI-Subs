@@ -261,11 +261,18 @@ const modelWon = new Map();
 const MODEL_WON_TTL_MS = 6 * 3600 * 1000;
 function shortModelName(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
+  if (s === 'groq' || /^qwen\//i.test(s)) return 'Groq';
+  try { if (require('../ai/corrector').isGroqModel(s)) return 'Groq'; } catch {}
   let r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash-lite/i);
   if (r) return r[1] + ' لايت';
   r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash/i);
   if (r) return r[1] + ' فلاش';
   return s;
+}
+function providerFailureText(models) {
+  const names = [...new Set((models || []).filter(Boolean).map(shortModelName))].map(latin);
+  if (!names.length) return '';
+  return names.length === 1 ? '❌ الموديل ' + names[0] + ' فشل' : names.length === 2 ? '❌ الموديلان ' + names.join(' و') + ' فشلا' : '❌ الموديلات ' + names.join(' و') + ' فشلت';
 }
 function modelWonKey(ev) { return [ev && ev.label, ev && ev.targetId, ev && ev.trackNum].join('|'); }
 function rememberModelWon(ev, name) {
@@ -282,6 +289,7 @@ function takeModelWon(ev) {
   const key = modelWonKey(ev);
   const hit = modelWon.get(key);
   modelWon.delete(key);
+  if (ev && ev.actualModel) return ev.model ? shortModelName(ev.model) : '';
   if (hit && Date.now() - hit.at < MODEL_WON_TTL_MS) return hit.name;
   return ev && ev.model ? shortModelName(ev.model) : '';
 }
@@ -371,11 +379,14 @@ async function report(ev) {
   } else if (ev.kind === 'partial') {
     warn = true; badge = '⚠️';
     line = head + ' | ' + ep.text + ' | ' + src + ' | اكتمل جزئيا: ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات | ' + why;
+    const namesPending = ev.namesComplete === false;
+    if (namesPending) line += ' | معالجة الأسماء غير مكتملة';
     const fi = ev.failInfo;
     const allFailed = !!(fi && fi.all);
     loud = allFailed;
     title1 = (allFailed ? 'فشل كلي: ' : 'اكتمل جزئياً: ') + tgHead;
     detail = ['src', 'work', 'ep', '📄 ناقص ' + ev.missing + ' من ' + ev.total + ' سطر بعد ' + (ev.rounds || '?') + ' جولات', ...(doneBy ? ['🧠 بواسطة ' + latin(doneBy)] : []), ...spellDetail(ev.spell)];
+    if (namesPending) detail.push('📖 معالجة الأسماء غير مكتملة');
     if (fi && Array.isArray(fi.ranges) && fi.ranges.length) {
       detail.push('🧩 الأسطر الناقصة: ' + fi.ranges.slice(0, 6).map(r => latin(r[0] === r[1] ? String(r[0]) : r[0] + '–' + r[1])).join('، ') + (fi.ranges.length > 6 ? ' ...' : ''));
       if (fi.totalChunks > 1 && Array.isArray(fi.chunks)) detail.push('🔹 القطع: ' + fi.chunks.slice(0, 8).join(' و') + ' من ' + fi.totalChunks);
@@ -472,8 +483,8 @@ async function modelReport(ev) {
   if (!ENABLED) return;
   const kind = String(ev && ev.kind || '');
   statModel(kind, ev && ev.model);
-  if (kind === 'choke' || kind === 'fallback-won') return;
-  const key = [kind, ev.label, ev.targetId, ev.trackNum].join('|');
+  if (kind === 'choke' || kind === 'fallback-won' || kind === 'provider-won') return;
+  const key = [kind, ev.label, ev.targetId, ev.trackNum, ...(Array.isArray(ev.models) ? ev.models.slice().sort() : [])].join('|');
   const now = Date.now();
   const last = modelSeen.get(key);
   if (last && now - last < MODEL_EVENT_GAP_MS) return;
@@ -493,7 +504,16 @@ async function modelReport(ev) {
   const trk = (KIND[ev.label] || ev.label || '') ? 'تراك ' + (ev.trackNum || '؟') + ' ' + latin(KIND[ev.label] || ev.label) : '';
 
   const out = [];
-  if (kind === 'both-failed') {
+  if (kind === 'groq-unavailable') {
+    out.push('Groq غير متاح لهذا الإعداد. المصحح يستخدم ' + latin(shortModelName(ev.other)) + '.');
+  } else if (kind === 'provider-failed') {
+    const msg = providerFailureText(Array.isArray(ev.models) ? ev.models : [ev.model, ev.other]);
+    if (!msg) return;
+    out.push(msg);
+  } else if (kind === 'provider-rescue') {
+    out.push('🚑 إنقاذ تلقائي');
+    out.push('🧠 حوّلت الباقي من الموديل ' + latin(shortModelName(ev.model)) + ' إلى ' + latin(shortModelName(ev.other)));
+  } else if (kind === 'both-failed') {
     out.push('❌ الموديلان ' + m1 + ' و' + m2 + ' فشلا');
   } else if (kind === 'rescue') {
     out.push('🚑 إنقاذ تلقائي');
@@ -505,15 +525,20 @@ async function modelReport(ev) {
   out.push('🎬 ' + latin(title ? title + ' (' + shownId + ')' : shownId));
   if (!isMovie && ep) out.push('📺 ' + ep.text + (trk ? ' — ' + trk : ''));
   else if (trk) out.push('📺 ' + trk);
-  if (kind === 'both-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
+  if (kind === 'both-failed' || kind === 'provider-failed') out.push('🔁 ستُعاد المحاولة لاحقاً');
   const outLines = out.map(rtl);
-  enqueue(outLines.join('\n'), null, codeEntities(outLines, [{ mark: '🎬', needle: shownId }]), kind !== 'both-failed');
+  enqueue(outLines.join('\n'), null, codeEntities(outLines, [{ mark: '🎬', needle: shownId }]), kind !== 'both-failed' && kind !== 'provider-failed');
+}
+
+function groqKeyEvent(suffix) {
+  if (!/^[A-Za-z0-9_-]{1,4}$/.test(String(suffix))) return;
+  enqueue('Groq: API key ...' + suffix + ' rejected (HTTP 401).', null, null, false);
 }
 
 function modelEvent(ev) {
   try {
     const k = ev && ev.kind;
-    if (k === 'fallback-won') rememberModelWon(ev, ev.model);
+    if (k === 'fallback-won' || k === 'provider-won') rememberModelWon(ev, ev.model);
     else if (k === 'rescue') rememberModelWon(ev, ev.other);
     modelReport(ev || {}).catch(() => {});
   } catch (e) {}
@@ -596,7 +621,7 @@ function statTrack(ev) {
 }
 
 function statModel(kind, model) {
-  const field = { choke: 'choke', 'fallback-won': 'fbwon', rescue: 'rescue', 'both-failed': 'bothFailed' }[kind];
+  const field = { choke: 'choke', 'fallback-won': 'fbwon', rescue: 'rescue', 'both-failed': 'bothFailed', 'provider-rescue': 'rescue', 'provider-failed': 'bothFailed' }[kind];
   if (field) statBump(s => {
     s[field] = (s[field] || 0) + 1;
     if (kind === 'choke' && model) {
@@ -715,4 +740,4 @@ if (ENABLED) {
   console.log('[إشعار] تيليغرام غير مفعّل (أحد المتغيرين غير موجود) ⟵ أكتفي بسطر الملخص في اللوغ.');
 }
 
-module.exports = { trackEvent, modelEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { codeEntities, copyIdOf, sourcesText, sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };
+module.exports = { trackEvent, modelEvent, groqKeyEvent, sourcesEvent, enabled: ENABLED, describeEpisode, siteOfUrl, titleOf, arSeconds, _t: { codeEntities, copyIdOf, sourcesText, sendDailySummary, summaryText, baghdadDay, msToNextBaghdadMidnight } };

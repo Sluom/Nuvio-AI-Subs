@@ -345,7 +345,9 @@ async function classifyNames(cands, keysArray, modelName, deps) {
     MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent } = deps;
   const model = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const parts = [];
-  for (let i = 0; i < cands.length; i += CLASSIFY_BATCH) parts.push(cands.slice(i, i + CLASSIFY_BATCH));
+  const batch = deps.groqText ? deps.groqClassifyBatch : CLASSIFY_BATCH;
+  const workers = deps.groqText ? deps.groqClassifyWorkers : CLASSIFY_CONC;
+  for (let i = 0; i < cands.length; i += batch) parts.push(cands.slice(i, i + batch));
   let nextPart = 0, noKeys = false;
   const tCls = Date.now();
   let okParts = 0;
@@ -359,6 +361,39 @@ Return ONLY a JSON array: [{"w": "<same word>", "k": "person" | "entity" | "none
 
 Words:
 ${JSON.stringify(part)}`;
+    const expected = new Set(part.map(x => nameKey(x.w)));
+    function acceptLabels(arr) {
+      if (!Array.isArray(arr)) return false;
+      for (const it of arr) {
+        if (!it || typeof it.w !== 'string' || !['person', 'entity', 'none'].includes(it.k)) continue;
+        const word = nameKey(it.w);
+        if (expected.has(word)) out.set(word, it.k);
+      }
+      return [...expected].every(word => out.has(word));
+    }
+    if (deps.groqText) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const r = await deps.groqText(prompt, { temperature: 0, expectedOutputTokens: Math.max(256, part.length * 24) });
+        if (r.status === 'too_large') {
+          if (part.length <= 1) return false;
+          const mid = Math.ceil(part.length / 2);
+          const a = await runPart(part.slice(0, mid));
+          const b = await runPart(part.slice(mid));
+          return a && b;
+        }
+        if (r.status === 'no_keys') { noKeys = true; return false; }
+        if (r.status === 'config_error' || r.status === 'api_exhausted') return false;
+        if (r.status !== 'ok') continue;
+        try {
+          const arr = JSON.parse(r.text.replace(/```json|```/g, '').trim());
+          if (acceptLabels(arr)) {
+            console.log(`[Groq Classify ✅] ${part.length} names | ...${r.keySuffix}`);
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    }
     let partOk = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       const activeKey = await acquireKey(keysArray);
@@ -375,9 +410,7 @@ ${JSON.stringify(part)}`;
         });
         const txt = (r.data?.candidates?.[0]?.content?.parts || []).map(p => p?.text || '').join('');
         const arr = JSON.parse(txt.replace(/```json|```/g, '').trim());
-        for (const it of Array.isArray(arr) ? arr : []) {
-          if (it && typeof it.w === 'string' && ['person', 'entity', 'none'].includes(it.k)) out.set(nameKey(it.w), it.k);
-        }
+        if (!acceptLabels(arr)) continue;
         partOk = true;
         break;
       } catch (e) {
@@ -390,9 +423,14 @@ ${JSON.stringify(part)}`;
     if (partOk) okParts++;
     else console.log(`\u200F[تصنيف الأسماء ⚠] دفعة فشلت (${part.length} كلمة)`);
   };
-  await Promise.all(Array.from({ length: Math.min(CLASSIFY_CONC, parts.length) }, async () => {
-    while (!noKeys && nextPart < parts.length) await runPart(parts[nextPart++]);
+  await Promise.all(Array.from({ length: Math.min(workers, parts.length) }, async () => {
+    while (!noKeys && nextPart < parts.length) {
+      const part = parts[nextPart++];
+      const ok = await runPart(part);
+      if (deps.groqText && ok) okParts++;
+    }
   }));
+  out.complete = okParts === parts.length;
   console.log(`\u200F[تصنيف الأسماء 🏷] كلمات=${cands.length} | دفعات=${parts.length} | نجحت=${okParts} | فشلت=${parts.length - okParts} | الزمن=${((Date.now() - tCls) / 1000).toFixed(1)} ثانية`);
   return out;
 }

@@ -5,6 +5,7 @@ const {
   needsTranslation, loadLineCache, aliveKeyCount, MAX_MISSING_RETRIES, fetchAndExtractSub,
   extractCuesUniversal, normalizeLineBreakArtifacts, ASS_DEFAULT_HEADER
 } = require('./ai').shared;
+const { createGroqProvider, authorized, estimateTokens } = require('./groq-provider');
 const db = require('../core/db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('../sources/araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
@@ -12,6 +13,7 @@ const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames, 
 
 function shortModel(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
+  if (isGroqModel(s)) return 'Groq';
   let r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash-lite/i);
   if (r) return r[1] + ' لايت';
   r = s.match(/^gemini-(\d+(?:\.\d+)?)-flash/i);
@@ -26,6 +28,59 @@ const CORRECTOR_MAX_WORKERS = 8;
 const CORRECTOR_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const FALLBACK_WAIT_MS = 10000;
 const HEDGE_AFTER_FAILS = 2;
+const GEMINI_PROVIDER_ROUNDS = 3;
+const GEMINI_RESCUE_ROUNDS = 3;
+
+const GROQ_MODEL = 'qwen/qwen3.8-27b';
+const GROQ_CORRECTOR_CHUNK = 60;
+const GROQ_CORRECTOR_WORKERS = 6;
+const GROQ_NAMES_CHUNK = 60;
+const GROQ_NAMES_WORKERS = 3;
+const GROQ_CLASSIFY_BATCH = 60;
+const GROQ_CLASSIFY_WORKERS = 3;
+const GROQ_PROVIDER_ROUNDS = 3;
+const GROQ_RESCUE_ROUNDS = 3;
+const GROQ_MAX_COMPLETION_TOKENS = 4096;
+const GROQ_REASONING_EFFORT = 'none';
+const GROQ_TOKENS_PER_MINUTE = 8000;
+const GROQ_REQUESTS_PER_MINUTE = 30;
+const GROQ_GEMINI_RESCUE_MODEL = 'gemini-3.1-flash-lite';
+const GROQ_ALLOWED_GEMINI_KEY_HASHES = String(process.env.GROQ_ALLOWED_GEMINI_KEY_HASHES || '')
+  .toLowerCase().split(/[\s,]+/).filter(hash => /^[0-9a-f]{64}$/.test(hash));
+
+const isGroqModel = m => String(m || '').trim() === 'groq' || String(m || '').trim() === GROQ_MODEL || /^qwen\//i.test(String(m || '').trim());
+const geminiModelFor = m => isGroqModel(m) ? GROQ_GEMINI_RESCUE_MODEL : (m || GROQ_GEMINI_RESCUE_MODEL);
+const CORRECTOR_MODEL_CHOICES = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.6-flash', 'groq'];
+const selectCorrectorModel = (siteModel, savedModel, batchModel) => CORRECTOR_MODEL_CHOICES.includes(batchModel) ? batchModel : (CORRECTOR_MODEL_CHOICES.includes(savedModel) ? savedModel : (siteModel || GROQ_GEMINI_RESCUE_MODEL));
+const groqClient = createGroqProvider({
+  axios, model: GROQ_MODEL, keys: process.env.GROQ_KEYS,
+  maxWorkers: GROQ_CORRECTOR_WORKERS, maxOutputTokens: GROQ_MAX_COMPLETION_TOKENS,
+  reasoningEffort: GROQ_REASONING_EFFORT, tpm: GROQ_TOKENS_PER_MINUTE, rpm: GROQ_REQUESTS_PER_MINUTE,
+  httpAgent, httpsAgent,
+  onDeadKey: suffix => { try { require('../telegram/notify').groqKeyEvent(suffix); } catch {} }
+});
+const groqAuthorized = keys => authorized(keys, GROQ_ALLOWED_GEMINI_KEY_HASHES);
+const groqAvailable = keys => groqAuthorized(keys) && groqClient.enabled();
+const modelKeyCount = (keys, model) => isGroqModel(model) ? (groqAuthorized(keys) ? groqClient.alive() : 0) : aliveKeyCount(keys);
+const modelChunk = model => isGroqModel(model) ? GROQ_CORRECTOR_CHUNK : CORRECTOR_CHUNK;
+const modelWorkers = model => isGroqModel(model) ? GROQ_CORRECTOR_WORKERS : CORRECTOR_MAX_WORKERS;
+
+function correctorRoundPlan(keys, model) {
+  const wantsGroq = isGroqModel(model);
+  const canGroq = groqAvailable(keys);
+  if (wantsGroq && !canGroq) console.log(`[Groq unavailable] ${groqAuthorized(keys) ? 'No live keys' : 'Unauthorized configuration'} -> ${GROQ_GEMINI_RESCUE_MODEL}`);
+  const primary = wantsGroq ? (canGroq ? GROQ_MODEL : GROQ_GEMINI_RESCUE_MODEL) : geminiModelFor(model);
+  const plan = [];
+  const add = (m, phase, count) => {
+    for (let round = 1; round <= count; round++) plan.push({ model: m, namesModel: m, phase, round });
+  };
+  add(primary, 'primary', isGroqModel(primary) ? GROQ_PROVIDER_ROUNDS : GEMINI_PROVIDER_ROUNDS);
+  if (isGroqModel(primary)) {
+    if (aliveKeyCount(keys) > 0) add(GROQ_GEMINI_RESCUE_MODEL, 'rescue', GEMINI_RESCUE_ROUNDS);
+  } else if (canGroq) add(GROQ_MODEL, 'rescue', GROQ_RESCUE_ROUNDS);
+  return plan;
+}
+
 const CORRECTOR_REV = String(process.env.CORRECTOR_REV || 'r2').trim();
 const TRACKS_REV = String(process.env.TRACKS_REV || '').trim();
 const TRACKS_TAG = (TRACKS_REV && TRACKS_REV !== '0') ? '_t' + TRACKS_REV : '';
@@ -486,7 +541,7 @@ function analyzeEllipsis(cues) {
   return { total, startN, endN, pairOk, pairRev, reversed };
 }
 async function correctChunkStrict(items, keysArray, modelName, ctx = null, hook = null) {
-  const cleanModel = normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
+  const cleanModel = isGroqModel(modelName) ? GROQ_MODEL : normalizeGeminiModelId(modelName || 'gemini-3.1-flash-lite');
   const generationConfig = { temperature: 0.1, responseMimeType: "application/json" };
   const ctxBlock = ctx && (ctx.before.length || ctx.after.length)
     ? `\nCONTEXT (READ-ONLY): Use these lines ONLY to understand if a sentence continues across entries.\ncontext_before: ${JSON.stringify(ctx.before)}\ncontext_after: ${JSON.stringify(ctx.after)}\n`
@@ -515,6 +570,27 @@ Output: [{"id": 1, "text": "هل أخبرت \\"مصطفى\\" عن شركة (أب
 ${ctxBlock}
 Content to punctuate:
 ${JSON.stringify(items)}`;
+  if (isGroqModel(cleanModel)) {
+    if (!groqAuthorized(keysArray)) return { status: 'no_keys', map: new Map() };
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const r = await groqClient.request(prompt, { expectedOutputTokens: estimateTokens(JSON.stringify(items)) + 256, cancelled: () => !!hook?.cancelled, onAttempt: () => hook?.attempted?.add(cleanModel) });
+      if (r.status === 'retry') { hook?.onGroqFail?.(); continue; }
+      if (r.status !== 'ok') {
+        if (r.status === 'api_exhausted') hook?.onGroqFail?.();
+        const status = r.status === 'too_large' ? 'bad_format' : r.status === 'config_error' ? 'api_exhausted' : r.status;
+        return { status, map: new Map() };
+      }
+      const map = parseIdTranslations(r.text);
+      if (!map) return { status: 'bad_format', map: new Map() };
+      const allowed = new Set(items.map(i => i.id));
+      let extra = 0;
+      for (const id of map.keys()) if (!allowed.has(id)) extra++;
+      if (extra > Math.max(3, Math.floor(items.length * 0.02))) return { status: 'bad_ids', map: new Map() };
+      console.log(`[Success ✅] (Groq) طلب ${items.length} سطر، رجع ${map.size} عبر ...${r.keySuffix}`);
+      return { status: 'ok', map };
+    }
+    return { status: 'api_exhausted', map: new Map() };
+  }
   for (let attempt = 0; attempt < 4; attempt++) {
     if (hook && hook.cancelled) return { status: 'cancelled', map: new Map() };
     const activeKey = await acquireKey(keysArray);
@@ -522,6 +598,8 @@ ${JSON.stringify(items)}`;
     const cleanKey = String(activeKey).trim();
     const url = `${DEFAULT_GEMINI_API_URL}/models/${cleanModel}:generateContent`;
     try {
+      if (hook?.cancelled) return { status: 'cancelled', map: new Map() };
+      hook?.attempted?.add(cleanModel);
       const r = await axios.post(url, {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig,
@@ -565,6 +643,7 @@ ${JSON.stringify(items)}`;
 }
 async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null, hook = null) {
   const done = new Map();
+  done.modelById = new Map();
   if (!items || items.length === 0) return done;
   let pending = items;
   for (let round = 0; round <= MAX_MISSING_RETRIES && pending.length > 0; round++) {
@@ -580,15 +659,15 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null,
       console.log(`[عزل مسموم - مصحح] الموديل مختنق بـ (${pending.length}) سطر. أقسمها لنصفين وأعيد.`);
       const left = await correctItemsWithRecovery(pending.slice(0, mid), keysArray, modelName, ctx, hook);
       const right = await correctItemsWithRecovery(pending.slice(mid), keysArray, modelName, ctx, hook);
-      for (const [id, text] of left) done.set(id, text);
-      for (const [id, text] of right) done.set(id, text);
+      for (const [id, text] of left) { done.set(id, text); done.modelById.set(id, left.modelById.get(id)); }
+      for (const [id, text] of right) { done.set(id, text); done.modelById.set(id, right.modelById.get(id)); }
       pending = pending.filter(it => !done.has(it.id));
       break;
     }
     if (result.status === 'ok') {
       const wanted = new Set(pending.map(it => it.id));
       for (const [id, text] of result.map) {
-        if (wanted.has(id) && text) done.set(id, text);
+        if (wanted.has(id) && text) { done.set(id, text); done.modelById.set(id, isGroqModel(modelName) ? GROQ_MODEL : normalizeGeminiModelId(modelName)); }
       }
     }
     const before = pending.length;
@@ -601,12 +680,12 @@ async function correctItemsWithRecovery(items, keysArray, modelName, ctx = null,
 }
 const fallbackModelOf = m => (String(m || 'gemini-3.1-flash-lite').trim() === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL);
 const notifyModel = ev => { try { require('../telegram/notify').modelEvent(ev); } catch (e) {  } };
-function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}) {
+function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}, attempted = new Set()) {
   const fbModel = fallbackModelOf(primaryModel);
   const ids = items.map(it => it.id);
   const isComplete = m => !!m && ids.every(id => m.get(id));
-  const priHook = { cancelled: false, fails: 0, onFail: null };
-  const fbHook = { cancelled: false };
+  const priHook = { cancelled: false, fails: 0, onFail: null, attempted };
+  const fbHook = { cancelled: false, attempted };
   return new Promise(resolve => {
     let priMap = null, fbMap = null, fbStarted = false, settled = false;
     const finish = (map, winner) => {
@@ -628,7 +707,8 @@ function hedgedCorrectItems(items, keysArray, primaryModel, ctx, ntf = {}) {
       if (isComplete(fbMap)) return finish(fbMap, 'fb');
       if (priMap !== null && (!fbStarted || fbMap !== null)) {
         const merged = new Map(fbMap || []);
-        for (const [id, text] of priMap) if (text) merged.set(id, text);
+        merged.modelById = new Map(fbMap?.modelById || []);
+        for (const [id, text] of priMap) if (text) { merged.set(id, text); merged.modelById.set(id, priMap.modelById?.get(id) || primaryModel); }
         finish(merged, 'merge');
       }
     };
@@ -650,7 +730,7 @@ const NAMES_PARALLEL = true;
 const secsOf = ms => (ms / 1000).toFixed(1);
 const namesCountOf = book => { try { const m = /\] (\d+):/.exec(describeBook(book) || ''); return m ? Number(m[1]) : null; } catch (e) { return null; } };
 const fileDurOf = cues => { try { const m = /(\d+):(\d{1,2}):(\d{1,2})/.exec(String(cues[cues.length - 1].end)); return m ? Number(m[1]) + ':' + m[2].padStart(2, '0') + ':' + m[3].padStart(2, '0') : ''; } catch (e) { return ''; } };
-const startLineOf = (kind, extraKeys, cues, keysArray) => `\u200F[${kind}${extraKeys && extraKeys.trackNum ? ' ' + extraKeys.trackNum : ''}] ${cues.length} سطر${fileDurOf(cues) ? ' | مدة الملف ' + fileDurOf(cues) : ''} | دفعة ${CORRECTOR_CHUNK} | مفاتيح ${keysArray.length}`;
+const startLineOf = (kind, extraKeys, cues, keysArray, modelName) => `\u200F[${kind}${extraKeys && extraKeys.trackNum ? ' ' + extraKeys.trackNum : ''}] ${cues.length} سطر${fileDurOf(cues) ? ' | مدة الملف ' + fileDurOf(cues) : ''} | دفعة ${modelChunk(modelName)} | مفاتيح ${modelKeyCount(keysArray, modelName)} | ${shortModel(modelName)}`;
 const plainForBook = texts => texts
   .map(t => String(t).replace(TAG_RE, '').replace(/"([^"\n]*)"|\(([^()\n]*)\)/g, '$1$2').split(LINE_SPLIT).join(' ').replace(/\s+/g, ' ').trim())
   .filter(Boolean);
@@ -664,7 +744,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     if (oldFile) console.log('\u200F[مصحح 🔃] ملف معكوس: أقلب مكان الثلاث نقاط (...)');
     cues = cues.map(c => ({ ...c, text: flipEllipsisText(c.text) }));
   }
-  const CHUNK = CORRECTOR_CHUNK;
+  const CHUNK = modelChunk(modelName);
+  const namesModel = opts.namesModel || modelName;
   const cacheVersion = 'ARB2';
   const lineCacheKey = cacheVersion + '_' + CORRECTOR_REV + '_' + cacheKey;
   const nameCacheKey = cacheVersion + '_names_' + cacheKey;
@@ -717,9 +798,14 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const namesDeps = {
     axios, delay, acquireKey, deadKeys, keyCooldowns, cooldownForStatus, isGeminiAuthFailure,
     normalizeGeminiModelId, SAFETY_SETTINGS_OFF, DEFAULT_GEMINI_API_URL, GEMINI_CLIENT_HEADER,
-    MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent
+    MAX_AI_RESPONSE_BYTES, httpAgent, httpsAgent,
+    ...(isGroqModel(namesModel) ? {
+      groqText: (prompt, opts) => groqAuthorized(keysArray) ? groqClient.request(prompt, opts) : Promise.resolve({ status: 'no_keys' }),
+      groqNamesChunk: GROQ_NAMES_CHUNK, groqClassifyBatch: GROQ_CLASSIFY_BATCH, groqClassifyWorkers: GROQ_CLASSIFY_WORKERS
+    } : {})
   };
-  const startBook = texts => buildNameBook(texts, keysArray, modelName, namesDeps, [], Math.min(3, Math.max(1, aliveKeyCount(keysArray))))
+  const namesWorkers = isGroqModel(namesModel) ? GROQ_NAMES_WORKERS : 3;
+  const startBook = texts => buildNameBook(texts, keysArray, namesModel, namesDeps, [], Math.min(namesWorkers, Math.max(1, modelKeyCount(keysArray, namesModel))))
     .catch(e => { console.log(`[مصحح] تعذر بناء قاموس الأسماء: ${e && e.message}`); return null; });
     
   let bookPromise = null;
@@ -728,9 +814,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     bookPromise = startBook(plainForBook(sourceTexts));
   }
   
+  const attemptedModels = new Set();
+  let lastModel = null;
   let rejected = 0, leakFixed = 0, leakRejected = 0;
   const dirty = [];
-  const workerCount = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS));
+  const workerCount = Math.max(1, Math.min(modelKeyCount(keysArray, modelName), modelWorkers(modelName)));
   
   const applyLine = (id, text) => {
     const orig = cues[id].text;
@@ -758,22 +846,33 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   
   const runBatchWithModel = async (itemsToRun, activeModel, hedge = false) => {
     const chunks = [];
-    for (let i = 0; i < itemsToRun.length; i += CHUNK) chunks.push(itemsToRun.slice(i, i + CHUNK));
-    const currentWorkers = Math.max(1, Math.min(aliveKeyCount(keysArray), CORRECTOR_MAX_WORKERS, chunks.length));
+    const chunkSize = modelChunk(activeModel);
+    for (let i = 0; i < itemsToRun.length; i += chunkSize) chunks.push(itemsToRun.slice(i, i + chunkSize));
+    const currentWorkers = Math.max(1, Math.min(modelKeyCount(keysArray, activeModel), modelWorkers(activeModel), chunks.length));
     async function batchWorker() {
       while (chunks.length > 0) {
-        if (keysArray.every(k => deadKeys.has(k))) return;
+        if (!modelKeyCount(keysArray, activeModel)) return;
         const chunk = chunks.shift();
         if (!chunk) break;
         try {
           const ctx0 = buildChunkContext(cues, chunk);
           const ctx = { before: ctx0.before.map(prepareForModel).filter(Boolean), after: ctx0.after.map(prepareForModel).filter(Boolean) };
-          const map = hedge
-            ? await hedgedCorrectItems(chunk, keysArray, activeModel, ctx, opts.notifyCtx)
-            : await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx);
+          let groqFailures = 0;
+          const groqHook = { attempted: attemptedModels, onGroqFail: () => {
+            if (++groqFailures === HEDGE_AFTER_FAILS) {
+              console.log(`[Groq choke] ${chunk.length} lines | ${groqFailures} failed requests`);
+              notifyModel({ ...opts.notifyCtx, kind: 'choke', model: 'Groq', fails: groqFailures });
+            }
+          } };
+          const map = hedge && !isGroqModel(activeModel)
+            ? await hedgedCorrectItems(chunk, keysArray, activeModel, ctx, opts.notifyCtx, attemptedModels)
+            : await correctItemsWithRecovery(chunk, keysArray, activeModel, ctx, isGroqModel(activeModel) ? groqHook : { attempted: attemptedModels });
           for (const it of chunk) {
             const text = map.get(it.id);
-            if (text) applyLine(it.id, text);
+            if (text && results[it.id] == null) {
+              applyLine(it.id, text);
+              lastModel = map.modelById?.get(it.id) || activeModel;
+            }
           }
           persistDirty();
         } catch (e) {
@@ -789,7 +888,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   }
   
   let unprocessed = toDo.filter(it => results[it.id] == null);
-  if (unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
+  if (!isGroqModel(modelName) && unprocessed.length > 0 && !keysArray.every(k => deadKeys.has(k))) {
     const primaryClean = String(modelName || 'gemini-3.1-flash-lite').trim();
     const fallbackModel = primaryClean === CORRECTOR_FALLBACK_MODEL ? 'gemini-3.1-flash-lite' : CORRECTOR_FALLBACK_MODEL;
     console.log(`\u200F[إنقاذ تلقائي 🚑] بقى ${unprocessed.length} سطر باختناق (${shortModel(primaryClean)}) ⟵ أنتظر ${FALLBACK_WAIT_MS / 1000} ث وأحوّل إلى (${shortModel(fallbackModel)})`);
@@ -797,11 +896,11 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     await delay(FALLBACK_WAIT_MS);
     await runBatchWithModel(unprocessed, fallbackModel);
     unprocessed = toDo.filter(it => results[it.id] == null);
-    if (unprocessed.length > 0) notifyModel({ ...opts.notifyCtx, kind: 'both-failed', model: shortModel(primaryClean), other: shortModel(fallbackModel) });
+    if (unprocessed.length > 0 && attemptedModels.has(normalizeGeminiModelId(primaryClean)) && attemptedModels.has(fallbackModel)) notifyModel({ ...opts.notifyCtx, kind: 'both-failed', model: shortModel(primaryClean), other: shortModel(fallbackModel) });
   }
   
   const missing = unprocessed.length;
-  if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من Gemini) | أرجعت ${leakRejected} سطر للأصلي`);
+  if (leakFixed || leakRejected) console.log(`\u200F[حارس الأحرف الغريبة 🛡] أصلحت ${leakFixed} سطر (حرف غريب دخل من الموديل) | أرجعت ${leakRejected} سطر للأصلي`);
   const spellInfo = spell.flushLog();
   
   const finalTexts = cues.map((c, i) =>
@@ -811,7 +910,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const eligible = cues.map(c => needsCorrection(c.text) && !quoteHint(c.text));
   let outTexts = finalTexts;
   
-  if (toDo.length > 0) {
+  let namesComplete = true;
+  if (toDo.length > 0 || fromCache > 0) {
     const tNames = Date.now();
     let tBookWait = 0, tCls = 0;
     let dictInfo = '', dictFailed = false, memAdded = 0;
@@ -830,6 +930,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       dictInfo = 'قاموس من الكاش' + (n != null ? ' (' + n + ' اسم)' : '');
     }
 
+    namesComplete = !!book && book.complete !== false;
     if (seriesKey) {
       try {
         const stored = await db.loadMap('names', seriesKey);
@@ -850,33 +951,37 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       tflags = cues.map((c, i) => (eligible[i] ? translatorFlags(c.text, finalTexts[i]) : null));
       if (book) {
         try {
+          let classificationComplete = true;
           const cands = collectNameCandidatesT(finalTexts, eligible, tflags, 300, book).filter(x => !kinds.has(nameKey(x.w)));
           if (cands.length) {
             const tC = Date.now();
-            const nk = await classifyNames(cands, keysArray, modelName, namesDeps);
+            const nk = await classifyNames(cands, keysArray, namesModel, namesDeps);
             tCls = Date.now() - tC;
             for (const [k, v] of nk) kinds.set(k, v);
+            classificationComplete = nk.complete !== false;
+            namesComplete = namesComplete && classificationComplete;
           }
-          if ((!namesLoadedFromCache || cands.length) && book.complete !== false) {
+          if ((!namesLoadedFromCache || cands.length) && book.complete !== false && classificationComplete) {
             db.saveMap('names', nameCacheKey, [
               [1, JSON.stringify(Array.from(book.map.entries()))],
               [2, JSON.stringify(Array.from(kinds.entries()))]
             ]);
           }
-        } catch (e) { console.log(`[مصحح - حفظ الأسماء] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+        } catch (e) { namesComplete = false; console.log(`[مصحح - حفظ الأسماء] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
       book = applyPins(book, await pinsPromise);
       outTexts = applyNameBook(propagateNamesT(finalTexts, eligible, kinds, book, tflags), eligible, book, tflags);
     } else {
       if (!namesLoadedFromCache && book) {
         try {
-          kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, modelName, namesDeps);
+          kinds = await classifyNames(collectNameCandidates(finalTexts, eligible, 300, book), keysArray, namesModel, namesDeps);
+          namesComplete = namesComplete && kinds.complete !== false;
           const dataToSave = [
             [1, JSON.stringify(Array.from(book.map.entries()))],
             [2, JSON.stringify(Array.from(kinds.entries()))]
           ];
-          if (book.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
-        } catch (e) { console.log(`[مصحح - حفظ الأسماء (القديم)] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
+          if (book.complete !== false && kinds.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
+        } catch (e) { namesComplete = false; console.log(`[مصحح - حفظ الأسماء (القديم)] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
       book = applyPins(book, await pinsPromise);
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
@@ -886,7 +991,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
 
     const changed = [];
     outTexts.forEach((t, i) => {
-      if (t !== finalTexts[i] && cache.has(i)) {
+      if (namesComplete && t !== finalTexts[i] && cache.has(i)) {
         cache.set(i, t);
         changed.push([i, t]);
       }
@@ -896,7 +1001,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     if (Date.now() - tNames > 20000) console.log(`\u200F[مرحلة الأسماء ⏱ بطيئة] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
   
-  console.log(`\u200F[المصحح الكلي 📊] نواقص=${missing} ⟵ رفض=${rejected} ⟵ مفاتيح=${workerCount} ⟵ الوقت=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
+  console.log(`\u200F[المصحح الكلي 📊] نواقص=${missing} ⟵ رفض=${rejected} ⟵ مفاتيح=${workerCount} ⟵ ${shortModel(lastModel || modelName)} ⟵ الوقت=${Math.round((Date.now() - tStart) / 1000)} ثانية`);
   let failInfo = null;
   if (missing > 0) {
     const ids = unprocessed.map(it => it.id).sort((a, b) => a - b);
@@ -914,7 +1019,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       all: missing === toDo.length && fromCache === 0
     };
   }
-  return { texts: outTexts, missing, rejected, failInfo, spellInfo };
+  return { texts: outTexts, missing, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels: [...attemptedModels] };
 }
 
 const epInfoOf = id => {
@@ -944,8 +1049,8 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
   }
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return { content: "1\n00:00:01,000 --> 00:00:08,000\n[نظام Nuvio AI] فشل استخراج النصوص.\n\n", missing: 0, total: 0, failed: true };
-  console.log(startLineOf('SRT', extraKeys, cues, keysArray));
-  const { texts: finalCorrections, missing, rejected, failInfo, spellInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-SRT', trackNum: extraKeys.trackNum, targetId } });
+  console.log(startLineOf('SRT', extraKeys, cues, keysArray, modelName));
+  const { texts: finalCorrections, missing, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, namesModel: extraKeys.namesModel, notifyCtx: { label: 'ARA-SRT', trackNum: extraKeys.trackNum, targetId } });
   let srtOutput = '';
   let counter = 1;
   cues.forEach((c, idx) => {
@@ -960,7 +1065,7 @@ async function handleCorrectionSrt(subUrl, keysArray, modelName, userTmdbKey, ta
     srtOutput += `${counter}\n${sTime} --> ${eTime}\n${text.trim()}\n\n`;
     counter++;
   });
-  return { content: srtOutput, missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
+  return { content: srtOutput, missing, total: cues.length, failed: false, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels };
 }
 const ASS_DLG_RE = /^(Dialogue:\s*[^,]*,[^,]*,[^,]*,(?:[^,]*,){6})(.*)$/i;
 const ASS_RTL_MARKS = true;
@@ -1134,10 +1239,10 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
   const isRealAss = parsed.cues.length > 0;
   const cues = isRealAss ? parsed.cues : extractCuesUniversal(originalText);
   if (!cues.length) return { content: ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[نظام Nuvio AI] فشل الاستخراج.`, missing: 0, total: 0, failed: true };
-  console.log(startLineOf('ASS', extraKeys, cues, keysArray) + (isRealAss ? '' : ' | المصدر SRT (حوّلته لـ ASS)'));
-  const { texts, missing, rejected, failInfo, spellInfo } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, notifyCtx: { label: 'ARA-ASS', trackNum: extraKeys.trackNum, targetId } });
+  console.log(startLineOf('ASS', extraKeys, cues, keysArray, modelName) + (isRealAss ? '' : ' | المصدر SRT (حوّلته لـ ASS)'));
+  const { texts, missing, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels } = await correctAllCues(cues, keysArray, modelName, `${targetId}|${subUrl}`, { round: extraKeys.round, namesModel: extraKeys.namesModel, notifyCtx: { label: 'ARA-ASS', trackNum: extraKeys.trackNum, targetId } });
   if (isRealAss) {
-    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
+    return { content: rebuildAss(parsed, texts) + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels };
   }
   const assLines = [];
   cues.forEach((c, idx) => {
@@ -1145,7 +1250,7 @@ async function handleCorrectionAss(subUrl, keysArray, modelName, userTmdbKey, ta
     if (!text || text.replace(/<[^>]+>|\{[^}]+\}|-|"|”|“|'|\s/g, '').length === 0) return;
     assLines.push(`Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${addRlm(text.trim().replace(/\r?\n/g, '\\N'))}`);
   });
-  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo };
+  return { content: ASS_DEFAULT_HEADER + assLines.join('\n') + '\n', missing, total: cues.length, failed: false, rejected, failInfo, spellInfo, namesComplete, lastModel, attemptedModels };
 }
 module.exports = {
   handleCorrectionSrt,
@@ -1155,5 +1260,12 @@ module.exports = {
   analyzeEllipsis,
   flipEllipsisText,
   isVisualOrderFile,
-  correctAllCues
+  correctAllCues,
+  correctorRoundPlan,
+  isGroqModel,
+  geminiModelFor,
+  GROQ_MODEL,
+  groqAvailable,
+  CORRECTOR_MODEL_CHOICES,
+  selectCorrectorModel
 };

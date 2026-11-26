@@ -8,7 +8,7 @@ const TEXT_TTL = 2 * 60 * 60 * 1000;
 const MAX_TEXT_CACHE = 60;
 const badExtRe = /\.(rar|7z|zip|sub|idx|vtt|smi|txt)$/i;
 const assFileRe = /\.(ass|ssa)$/i;
-const fileUrlRe = /\/oscom\/file\/(\d+)/i;
+const fileUrlRe = /^https:\/\/api\.opensubtitles\.com\/oscom\/file\/(\d+)\/?(?:[?#].*)?$/i;
 let session = null;
 let loginPromise = null;
 let blockedUntil = 0;
@@ -55,6 +55,8 @@ async function doLogin() {
         const res = await axios.post('https://' + DEFAULT_HOST + '/api/v1/login', { username, password }, {
             headers: buildHeaders(),
             timeout: 5000,
+            maxRedirects: 0,
+            maxContentLength: 2 * 1024 * 1024,
             validateStatus: () => true
         });
         if (res.status !== 200 || !res.data || !res.data.token) {
@@ -62,7 +64,10 @@ async function doLogin() {
             console.log('[جلب عربي - opensubtitles.com] فشل تسجيل الدخول HTTP ' + res.status + (msg ? ' - ' + msg : ''));
             return null;
         }
-        const host = String(res.data.base_url || DEFAULT_HOST).replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+        const endpoint = new URL(/^https:\/\//i.test(res.data.base_url || '') ? res.data.base_url : 'https://' + (res.data.base_url || DEFAULT_HOST));
+        if (endpoint.protocol !== 'https:' || endpoint.port || endpoint.username || endpoint.password ||
+            !(endpoint.hostname === DEFAULT_HOST || endpoint.hostname.endsWith('.opensubtitles.com'))) return null;
+        const host = endpoint.hostname;
         session = { token: res.data.token, host, exp: Date.now() + LOGIN_TTL };
         return session;
     } catch (e) {
@@ -112,6 +117,8 @@ async function getOsCom({ imdbId, season, episode }) {
         const res = await axios.get('https://' + host + '/api/v1/subtitles?' + buildQuery(params), {
             headers: buildHeaders(),
             timeout: SEARCH_TIMEOUT,
+            maxRedirects: 0,
+            maxContentLength: 2 * 1024 * 1024,
             validateStatus: () => true
         });
         if (res.status !== 200) {
@@ -180,6 +187,8 @@ async function downloadOsComText(fileId) {
         res = await axios.post('https://' + s.host + '/api/v1/download', { file_id: Number(id) }, {
             headers: buildHeaders({ Authorization: 'Bearer ' + s.token }),
             timeout: 4000,
+            maxRedirects: 0,
+            maxContentLength: 2 * 1024 * 1024,
             validateStatus: () => true
         });
         if (res.status === 401 && attempt === 0) {
@@ -199,14 +208,9 @@ async function downloadOsComText(fileId) {
         }
         throw new Error('OS.com download HTTP ' + res.status + (d.message ? ' - ' + d.message : ''));
     }
-    const file = await axios.get(d.link, {
-        responseType: 'arraybuffer',
-        timeout: 5000,
-        headers: { 'User-Agent': APP_UA },
-        validateStatus: () => true
-    });
-    if (file.status !== 200) throw new Error('OS.com file HTTP ' + file.status);
-    const text = decodeSubBuffer(file.data);
+    const { downloadSubtitleFile, unpackSubtitle } = require('../ai/ai').shared;
+    const file = await downloadSubtitleFile(d.link, { 'User-Agent': APP_UA }, 5000);
+    const text = decodeSubBuffer(unpackSubtitle(file, null));
     if (!text.trim()) throw new Error('OS.com: الملف فارغ');
     setTextCache(id, text);
     return text;

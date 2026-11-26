@@ -179,10 +179,17 @@ function nameSim(q, t) {
 }
 const titleSim = (a, b) => Math.max(nameSim(a, b), 0.9 * nameSim(b, a));
 
+function searchGeminiModel(model) {
+  const m = String(model || '').trim();
+  return /^groq$/i.test(m) || /^qwen\//i.test(m) ? DEFAULT_SEARCH_MODEL : (m || DEFAULT_SEARCH_MODEL);
+}
+
 function geminiCfg() {
   try {
-    const d = JSON.parse(decodeURIComponent(getCtx().rawConfig));
-    return { keys: Array.isArray(d.keys) ? d.keys.filter(k => k && String(k).trim()) : [], model: d.model || DEFAULT_SEARCH_MODEL };
+    const raw = getCtx().rawConfig;
+    let d;
+    try { d = JSON.parse(raw); } catch { d = JSON.parse(decodeURIComponent(raw)); }
+    return { keys: Array.isArray(d.keys) ? d.keys.filter(k => k && String(k).trim()) : [], model: searchGeminiModel(d.model === 'groq' || /^qwen\//i.test(String(d.model || '')) ? d.translationModel : d.model) };
   } catch (e) {
     return { keys: [], model: '' };
   }
@@ -192,12 +199,12 @@ async function searchKeys() {
   const env = searchEnv();
   if (env.keys.length) {
     const cfgModel = (getCtx() && getCtx().rawConfig) ? geminiCfg().model : '';
-    return { keys: env.keys, model: env.model || cfgModel || DEFAULT_SEARCH_MODEL, src: 'env' };
+    return { keys: env.keys, model: searchGeminiModel(env.model || cfgModel), src: 'env' };
   }
   if (!getCtx()) await loadCtx();
   if (!getCtx() || !getCtx().rawConfig) return { keys: [], err: 'nocfg' };
   const c = geminiCfg();
-  return { keys: c.keys, model: env.model || c.model || DEFAULT_SEARCH_MODEL, src: 'cfg', err: c.keys.length ? '' : 'nokeys' };
+  return { keys: c.keys, model: searchGeminiModel(env.model || c.model), src: 'cfg', err: c.keys.length ? '' : 'nokeys' };
 }
 
 function cleanTitle(t) {

@@ -2,7 +2,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const db = require('../core/db');
-const { CORRECTOR_REV, TRACKS_TAG } = require('../ai/corrector');
+const { CORRECTOR_REV, TRACKS_TAG, isGroqModel, geminiModelFor } = require('../ai/corrector');
 let notify = null;
 try { notify = require('./notify'); } catch (e) { notify = null; }
 let filler = null;
@@ -618,7 +618,8 @@ async function onRequest(chatId, rq, count) {
 const BATCH_MODELS = [
   { code: 'd', model: '', label: 'الافتراضي' },
   { code: '1', model: 'gemini-3.1-flash-lite', label: '3.1 لايت' },
-  { code: '5', model: 'gemini-3.5-flash-lite', label: '3.5 لايت' }
+  { code: '5', model: 'gemini-3.5-flash-lite', label: '3.5 لايت' },
+  { code: 'g', model: 'groq', label: 'Groq' }
 ];
 
 function trackRows(h, r) {
@@ -629,13 +630,16 @@ function trackRows(h, r) {
     }));
     for (let k = 0; k < row.length; k += 2) rows.push(row.slice(k, k + 2));
   }
-  if (r.count) rows.push(BATCH_MODELS.map(m => ({ text: ((r.model || '') === m.model ? '✅ ' : '') + '🧠 ' + m.label, callback_data: 'bm:' + h + ':' + m.code })));
+  if (r.count) {
+    const models = BATCH_MODELS.map(m => ({ text: ((r.model || '') === m.model ? '✅ ' : '') + '🧠 ' + m.label, callback_data: 'bm:' + h + ':' + m.code }));
+    rows.push(models.slice(0, 2), models.slice(2));
+  }
   if (r.count) rows.push(GAP_CHOICES_MIN.map(min => ({ text: (gapMinOf(r.count, r.gapMin) === min ? '✅ ' : '') + '⏱ ' + min + ' دقائق', callback_data: 'bg:' + h + ':' + min })));
   return rows;
 }
 
 async function onModelCallback(cq) {
-  const m = /^bm:([0-9a-f]{8}):([d15])$/.exec(String(cq.data || ''));
+  const m = /^bm:([0-9a-f]{8}):([d15g])$/.exec(String(cq.data || ''));
   const r = m && reqs.get(m[1]);
   const opt = m && BATCH_MODELS.find(x => x.code === m[2]);
   if (!r || !opt || !r.count) { await answerCb(cq, 'انتهت صلاحية هذي القائمة، ابعث الرقم من جديد'); return; }
@@ -659,7 +663,7 @@ function configWithModel(raw, model) {
     let d;
     try { d = JSON.parse(decodeURIComponent(raw)); } catch (e) { d = JSON.parse(raw); }
     if (!d || typeof d !== 'object') return null;
-    d.model = model;
+    d.batchCorrectorModel = model;
     return JSON.stringify(d);
   } catch (e) { return null; }
 }
@@ -1250,6 +1254,22 @@ const MODEL_PRESETS = [
   { id: 'gemini-3.1-flash-lite', label: '3.1 lite' },
   { id: '', label: 'موديل الإضافة' }
 ];
+const CORRECTOR_PRESETS = [
+  { id: 'gemini-3.1-flash-lite', label: '3.1 لايت' },
+  { id: 'gemini-3.5-flash-lite', label: '3.5 لايت' },
+  { id: 'gemini-3.6-flash', label: '3.6 فلاش' },
+  { id: 'groq', label: 'Groq' }
+];
+function currentCorrectorModel() {
+  const saved = String(settings.get('corrector_model') || '').trim();
+  if (saved) return saved;
+  try {
+    const raw = ctx && ctx.rawConfig;
+    let d;
+    try { d = JSON.parse(raw); } catch { d = JSON.parse(decodeURIComponent(raw)); }
+    return isGroqModel(d.model) ? 'groq' : String(d.model || 'gemini-3.1-flash-lite');
+  } catch { return 'gemini-3.1-flash-lite'; }
+}
 const SRC_NAME = { tg: 'من تلغرام', env: 'من ريندر', def: 'افتراضي' };
 const isSettingsCmd = t => /^\/(settings|setting)(@\w+)?$/i.test(t) || t === 'الاعدادات' || t === 'الإعدادات' || t === 'اعدادات';
 const slotsCmd = t => { const m = /^\/slots(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(t); return m ? String(m[1] || '').trim() : null; };
@@ -1274,6 +1294,9 @@ function settingsText() {
   L.push(rtl('🎞 ترتيب ASS (' + SRC_NAME[settings.source('ass_slots')] + '): ') + (slots.length ? latin(slots.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('📄 ترتيب SRT (' + SRC_NAME[settings.source('srt_slots')] + '): ') + (srtS.length ? latin(srtS.join(', ')) : rtl('الترتيب الافتراضي')));
   L.push(rtl('🔎 موديل البحث (' + SRC_NAME[settings.source('search_model')] + '): ') + (model ? latin(model) : rtl('موديل الإضافة')));
+  const cm = currentCorrectorModel();
+  const cp = CORRECTOR_PRESETS.find(m => m.id === cm);
+  L.push(rtl('🧠 موديل المصحح الأساسي: ') + latin(cp ? cp.label : cm));
   const serp = String(settings.get('serpapi_key') || '').trim();
   L.push(rtl('🖼 Lens للبحث بالصورة (' + SRC_NAME[settings.source('serpapi_key')] + '): ') + (serp ? latin(maskKey(serp)) + rtl(' ✅') : rtl('غير مفعّل ⛔ (ابعث ') + latin('/serpkey KEY') + rtl(')')));
   L.push(rtl('🤖 عرض AI دائماً (' + SRC_NAME[settings.source('show_ai_always')] + '): ' + onOff(settings.get('show_ai_always'))));
@@ -1296,6 +1319,10 @@ function settingsKeyboard() {
   rows.push([{ text: '↩️ ترتيب SRT الافتراضي', callback_data: 'st:rd' }]);
   const mp = MODEL_PRESETS.map((m, i) => ({ text: (m.id === model ? '✅ ' : '') + m.label, callback_data: 'st:m:' + i }));
   rows.push(mp.slice(0, 2), mp.slice(2));
+  rows.push([{ text: '🧠 موديل المصحح الأساسي', callback_data: 'st:cmh' }]);
+  const cm = currentCorrectorModel();
+  const cp = CORRECTOR_PRESETS.map((m, i) => ({ text: (m.id === cm ? '✅ ' : '') + m.label, callback_data: 'st:cm:' + i }));
+  rows.push(cp.slice(0, 2), cp.slice(2));
   rows.push([tgl('🤖 AI دائماً', settings.get('show_ai_always'), 'a')]);
   return { inline_keyboard: rows };
 }
@@ -1327,6 +1354,12 @@ async function onSettingsCallback(cq) {
   } else if (op === 'm') {
     const m = MODEL_PRESETS[clamp(parseInt(arg, 10) || 0, 0, MODEL_PRESETS.length - 1)];
     r = await settings.set('search_model', m.id);
+  } else if (op === 'cmh') {
+    await answerCb(cq, 'اختر موديل المصحح الأساسي من الأزرار تحته.');
+    return;
+  } else if (op === 'cm') {
+    if (!/^[0-3]$/.test(String(arg))) { await answerCb(cq); return; }
+    r = await settings.set('corrector_model', CORRECTOR_PRESETS[Number(arg)].id);
   } else if (op === 'a') {
     r = await settings.set('show_ai_always', !settings.get('show_ai_always'));
   } else {
