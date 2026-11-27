@@ -42,7 +42,7 @@ const ALWAYS_AMBIG_RAW = 'علي نور امل سعيد جميل كريم رحم
 const ALWAYS_AMBIG = new Set(ALWAYS_AMBIG_RAW.split(/\s+/).map(bookKey));
 const NEVER_STRONG_RAW = 'سعيد نور امل حياة سلام جميل غالي عزيز حبيب كريم صالح رحمة خير فرح ورد';
 const NEVER_STRONG = new Set(NEVER_STRONG_RAW.split(/\s+/).map(bookKey));
-const EXCLUDE_EXTRA_RAW = 'انا انت انتي انتم انتن نحن هو هي هم هن لي له لك لنا لها لهم إلي الي كيف ماذا لماذا اين أين هل بات مات الله الرب على إلى الى حتى متى لدى سوى عدا';
+const EXCLUDE_EXTRA_RAW = 'بين انا انت انتي انتم انتن نحن هو هي هم هن لي له لك لنا لها لهم إلي الي كيف ماذا لماذا اين أين هل بات مات الله الرب على إلى الى حتى متى لدى سوى عدا';
 const EXCLUDE_RAW = [ALWAYS_AMBIG_RAW, NEVER_STRONG_RAW, EXCLUDE_EXTRA_RAW].join(' ');
 const NO_BARE = new Set(EXCLUDE_RAW.split(/\s+/).filter(Boolean).map(bookKey));
 const DENY_COMBINED = new Set(
@@ -553,6 +553,107 @@ function applyNameBook(texts, eligible, book, flagsArr = null) {
   const allowUnwrap = book.complete !== false;
   return texts.map((t, i) => (eligible[i] ? book.apply(t, flagsArr ? flagsArr[i] : null, allowUnwrap) : t));
 }
+// Work in the visible text, but apply edits at the original positions so ASS and HTML tags survive.
+function nameMarkSpans(text) {
+  const offsets = [];
+  let visible = '';
+  for (const part of text.matchAll(/\{[^}]*\}|<[^>]*>|([^<{]+|[<{])/g)) {
+    if (part[1] == null) continue;
+    visible += part[0];
+    for (let i = 0; i < part[0].length; i++) offsets.push(part.index + i);
+  }
+  const words = [...visible.matchAll(TOKEN_RE)].map(m => ({
+    key: bookKey(m[0]), raw: m[0], start: m.index, end: m.index + m[0].length
+  }));
+  const pairs = [], parens = [];
+  let quote = -1;
+  function pair(open, close, left, right) {
+    const inside = visible.slice(open + 1, close);
+    if (!/^[\u0621-\u065F\u0670-\u06D3\s"'“”«»().،؛!؟…:,\u200e\u200f]+$/u.test(inside.replace(/\\[Nn]/g, ' '))) return;
+    const first = words.findIndex(w => w.start > open && w.end <= close);
+    if (first < 0) return;
+    let last = first;
+    while (last + 1 < words.length && words[last + 1].end <= close) last++;
+    pairs.push({ open: offsets[open], close: offsets[close], left, right, first, last });
+  }
+  for (let i = 0; i < visible.length; i++) {
+    const ch = visible[i];
+    if (/["“”„«»]/u.test(ch)) {
+      if (quote < 0) quote = i;
+      else { pair(quote, i, visible[quote], ch); quote = -1; }
+    } else if (ch === '(') parens.push(i);
+    else if (ch === ')' && parens.length) pair(parens.pop(), i, '(', ')');
+  }
+  return { visible, words, pairs, offsets };
+}
+
+const isBain = key => /^(?:[وف][بلك]?|[بلك])?بين$/u.test(key);
+function applyNameExclusions(original, corrected, blocked) {
+  const maybeBain = /ب[\u064B-\u065F\u0670\u0640]*[يى][\u064B-\u065F\u0670\u0640]*ن/u.test(corrected.replace(TAG_RE, ''));
+  if (!maybeBain && (!blocked.size || !/[()"“”„«»]/u.test(corrected))) return corrected;
+  const out = nameMarkSpans(corrected);
+  const group = new Map();
+  for (let i = 0; blocked.size && i < out.words.length; i++) {
+    const first = out.words[i];
+    const variants = splits(first.key).map(s => s.base);
+    let tail = '';
+    let end = -1;
+    for (let j = i; j < out.words.length && j < i + 3; j++) {
+      if (j > i) {
+        const gap = out.visible.slice(out.words[j - 1].end, out.words[j].start).replace(/\\[Nn]/g, ' ');
+        if (!/^[\s"“”„«»()\u200e\u200f]+$/u.test(gap)) break;
+        tail += ' ' + out.words[j].key;
+      }
+      if (variants.some(v => blocked.has(v + tail))) end = j;
+    }
+    if (end >= i) {
+      for (let j = i; j <= end; j++) group.set(j, i);
+      i = end;
+    }
+  }
+
+  const edits = [];
+  const remove = p => {
+    edits.push([p.open, 1, ''], [p.close, 1, '']);
+  };
+  const neutralMarks = new Map();
+  for (const p of out.pairs) {
+    if (group.has(p.first) && group.get(p.first) === group.get(p.last)) remove(p);
+    else if (p.first === p.last && isBain(out.words[p.first].key)) {
+      if (!neutralMarks.has(p.first)) neutralMarks.set(p.first, []);
+      neutralMarks.get(p.first).push(p);
+    }
+  }
+  const neutralWords = out.words.map((w, i) => isBain(w.key) ? i : -1).filter(i => i >= 0);
+  if (neutralWords.length) {
+    // Some RTL subtitle files encode paired parentheses in visual order.
+    const source = nameMarkSpans(original.replace(/\)((?:[وف][بلك]?|[بلك])?ب[\u064B-\u065F\u0670\u0640]*[يى][\u064B-\u065F\u0670\u0640]*ن[\u064B-\u065F\u0670\u0640]*)\(/gu, '($1)'));
+    const originals = source.words.map((w, i) => isBain(w.key) ? i : -1).filter(i => i >= 0);
+    const authored = new Map(source.pairs.filter(p => p.first === p.last).map(p => [p.first, p]));
+    neutralWords.forEach((idx, n) => {
+      if (group.has(idx)) return;
+      const src = originals.length === neutralWords.length ? originals[n] : -1;
+      const keep = authored.get(src);
+      const marks = neutralMarks.get(idx) || [];
+      if (!keep) { marks.forEach(remove); return; }
+      const w = out.words[idx];
+      const stem = source.words[src].key === 'بين' ? w.raw.search(/ب[\u064B-\u065F\u0670\u0640]*[يى][\u064B-\u065F\u0670\u0640]*ن[\u064B-\u065F\u0670\u0640]*$/u) : 0;
+      const start = out.offsets[w.start + Math.max(0, stem)], end = out.offsets[w.end - 1] + 1;
+      // Already matched pairs keep their original position relative to tags and punctuation.
+      if (marks.length === 1 && stem <= 0) {
+        edits.push([marks[0].open, 1, keep.left], [marks[0].close, 1, keep.right]);
+      } else {
+        marks.forEach(remove);
+        edits.push([start, 0, keep.left], [end, 0, keep.right]);
+      }
+    });
+  }
+  for (const [at, length, value] of edits.sort((a, b) => b[0] - a[0] || b[1] - a[1])) {
+    corrected = corrected.slice(0, at) + value + corrected.slice(at + length);
+  }
+  return corrected;
+}
+
 function applyPins(book, pins) {
   if (!pins || typeof pins !== 'object') return book;
   const persons = Array.isArray(pins.p) ? pins.p : [];
@@ -581,6 +682,6 @@ function applyPins(book, pins) {
   return book;
 }
 module.exports = {
-  applyPins, buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
+  applyPins, applyNameExclusions, buildNameBook, applyNameBook, makeBook, bookKey, EXCLUDE_RAW, describeBook,
   updateSeriesMemory, mergeSeriesMemory, seriesInfoFromTarget, mergeSeriesNames
 };

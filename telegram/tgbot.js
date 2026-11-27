@@ -770,7 +770,7 @@ async function loadNamePins(sid) {
   const r = await withTimeout(db.loadPins(sid), 4000).catch(() => null);
   const v = r && r.ok && r.value && typeof r.value === 'object' ? r.value : {};
   const clean = a => (Array.isArray(a) ? a.filter(x => typeof x === 'string' && x) : []);
-  return { p: clean(v.p), c: clean(v.c), ok: !!(r && r.ok) };
+  return { p: clean(v.p), c: clean(v.c), blocked: clean(v.blocked), ok: !!(r && r.ok) };
 }
 
 async function listAutoNames(sid, pinned) {
@@ -793,11 +793,22 @@ async function listAutoNames(sid, pinned) {
   return out;
 }
 
-const namesKeyboard = () => ({ inline_keyboard: [
-  [{ text: '➕ اسم شخص', callback_data: 'nm:p' }, { text: '➕ مكان / منظمة', callback_data: 'nm:c' }],
-  [{ text: '🗑 شيل اسم', callback_data: 'nm:d' }, { text: '🔄 غيّر المسلسل', callback_data: 'nm:s' }]
+const namesKeyboard = sid => ({ inline_keyboard: [
+  [{ text: '➕ اسم شخص', callback_data: 'nm:p:' + sid }, { text: '➕ مكان / منظمة', callback_data: 'nm:c:' + sid }],
+  [{ text: '🗑 شيل التنصيص والأقواس', callback_data: 'nm:d:' + sid }, { text: '↩ رجّع كلمة للتلقائي', callback_data: 'nm:a:' + sid }],
+  [{ text: '🔄 غيّر المسلسل', callback_data: 'nm:s:' + sid }]
 ] });
 
+function namesPreview(words) {
+  const shown = [];
+  let size = 0;
+  for (const w of words) {
+    if (size + w.length > 400) break;
+    shown.push(w);
+    size += w.length + 3;
+  }
+  return shown.join(' · ') + (shown.length < words.length ? ' … (+' + (words.length - shown.length) + ')' : '');
+}
 async function namesViewText(sid, head) {
   const pins = await loadNamePins(sid);
   let title = null;
@@ -808,24 +819,25 @@ async function namesViewText(sid, head) {
   lines.push(rtl(title ? latin(title) + ' ' + latin('(' + sid + ')') : latin(sid)));
   lines.push('');
   lines.push(rtl('🔒 المثبّتة (تنطبق من الحلقة الجاية):'));
-  lines.push(rtl('👤 الأسماء: ' + (pins.p.length ? pins.p.join(' · ') : '—')));
-  lines.push(rtl('📍 الأماكن والمنظمات: ' + (pins.c.length ? pins.c.join(' · ') : '—')));
-  const auto = await listAutoNames(sid, new Set([...pins.p, ...pins.c].map(bookKey)));
+  lines.push(rtl('👤 الأسماء: ' + (pins.p.length ? namesPreview(pins.p) : '—')));
+  lines.push(rtl('📍 الأماكن والمنظمات: ' + (pins.c.length ? namesPreview(pins.c) : '—')));
+  if (pins.blocked.length) lines.push(rtl('🚫 بدون تنصيص أو أقواس: ' + namesPreview(pins.blocked)));
+  const auto = await listAutoNames(sid, new Set([...pins.p, ...pins.c, ...pins.blocked, 'بين'].map(bookKey)));
   if (auto.p.length || auto.c.length) {
     lines.push('');
     lines.push(rtl('🤖 المكتشفة تلقائياً من الحلقات:'));
-    if (auto.p.length) lines.push(rtl('👤 ' + auto.p.join(' · ')));
-    if (auto.c.length) lines.push(rtl('📍 ' + auto.c.join(' · ')));
+    if (auto.p.length) lines.push(rtl('👤 ' + namesPreview(auto.p)));
+    if (auto.c.length) lines.push(rtl('📍 ' + namesPreview(auto.c)));
   }
   lines.push('');
-  lines.push(rtl('اضغط الزر وابعث الكلمة، وتنثبّت للحلقات القادمة.'));
+  lines.push(rtl('اختَر الإجراء وابعث الكلمة. التعديل ينطبق على التراكات اللي تنصحّح بعدها.'));
   return { text: lines.join('\n'), pins };
 }
 
 async function sendNamesView(chatId, sid, head) {
   namesCur = { sid, at: Date.now() };
   const v = await namesViewText(sid, head);
-  await tg('sendMessage', { chat_id: chatId, text: v.text, reply_markup: namesKeyboard(), disable_web_page_preview: true }).catch(() => {});
+  await tg('sendMessage', { chat_id: chatId, text: v.text, reply_markup: namesKeyboard(sid), disable_web_page_preview: true }).catch(() => {});
 }
 
 async function onNamesCmd(chatId, arg) {
@@ -861,47 +873,28 @@ async function namesAsk(cq, mode) {
   }
   if (!namesCur) { await answerCb(cq, 'ابعث /names من جديد'); return; }
   pendingNames = { mode, sid: namesCur.sid, at: Date.now() };
-  const what = mode === 'p' ? '👤 ابعث اسم الشخص' : '📍 ابعث اسم المكان أو المنظمة';
+  const what = {
+    p: '👤 ابعث اسم الشخص', c: '📍 ابعث اسم المكان أو المنظمة',
+    d: '🗑 اكتب الكلمة اللي تريدها بدون تنصيص أو أقواس، حتى لو مو موجودة بالقائمة.',
+    a: '↩ اكتب الكلمة حتى تلغي تثبيتها أو منعها وترجع للتعامل التلقائي.'
+  }[mode];
   await editMsg(cq.message, [rtl(what), rtl('(ممكن أكثر من واحد، كل اسم بسطر)'), rtl('عربي فقط، لحد 3 كلمات للاسم الواحد.')].join('\n'), { inline_keyboard: [[{ text: 'إلغاء', callback_data: 'nm:n' }]] });
 }
 
-async function showNamesDelete(cq) {
-  if (!namesCur) { await answerCb(cq, 'ابعث /names من جديد'); return; }
-  const pins = await loadNamePins(namesCur.sid);
-  const all = [...pins.p.map((w, i) => ({ w, k: 'p', i })), ...pins.c.map((w, i) => ({ w, k: 'c', i }))];
-  if (!all.length) { await answerCb(cq, 'ما في أسماء مثبّتة'); return; }
-  const rows = [];
-  all.slice(0, 40).forEach((x, j) => {
-    const b = { text: '🗑 ' + (x.k === 'p' ? '👤 ' : '📍 ') + x.w, callback_data: 'nm:x:' + x.k + ':' + x.i };
-    if (j % 2 === 0) rows.push([b]); else rows[rows.length - 1].push(b);
-  });
-  rows.push([{ text: 'رجوع', callback_data: 'nm:b' }]);
-  await editMsg(cq.message, rtl('اضغط على اللي تريد تشيل تثبيته:'), { inline_keyboard: rows });
-}
-
 async function onNamesCallback(cq) {
-  const m = /^nm:([pcdsnbx])(?::([pc]):(\d+))?$/.exec(String(cq.data || ''));
-  if (!m) { await answerCb(cq, 'خيار غير صالح'); return; }
-  const op = m[1];
+  const data = String(cq.data || '');
+  const m = /^nm:([pcdasnb])(?::(tt\d+|kitsu:\d+))?$/i.exec(data);
+  const oldDelete = /^nm:x:[pc]:\d+$/.test(data);
+  if (!m && !oldDelete) { await answerCb(cq, 'خيار غير صالح'); return; }
+  const op = oldDelete ? 'a' : m[1];
+  if (m && m[2]) namesCur = { sid: namesSidOf(m[2]), at: Date.now() };
   await answerCb(cq);
-  if (op === 'n') { pendingNames = null; await editMsg(cq.message, rtl('تم الإلغاء، ما تغيّر شي.')); return; }
-  if (op === 'p' || op === 'c' || op === 's') { await namesAsk(cq, op); return; }
-  if (op === 'd') { pendingNames = null; await showNamesDelete(cq); return; }
-  if (!namesCur) { await editMsg(cq.message, rtl('انتهت صلاحية الرسالة، ابعث /names من جديد.')); return; }
-  if (op === 'x') {
-    const pins = await loadNamePins(namesCur.sid);
-    const list = m[2] === 'p' ? pins.p : pins.c;
-    const w = list[Number(m[3])];
-    if (w == null) { await showNamesDelete(cq); return; }
-    list.splice(Number(m[3]), 1);
-    const ok = await db.savePins(namesCur.sid, { p: pins.p, c: pins.c });
-    if (!ok) { await editMsg(cq.message, rtl('⚠️ ما انحفظ التعديل (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.')); return; }
-    const v = await namesViewText(namesCur.sid, [rtl('🗑 انشال التثبيت: ' + w)]);
-    await editMsg(cq.message, v.text, namesKeyboard());
-    return;
-  }
+  if (op === 'n') { pendingNames = null; await editMsg(cq.message, rtl('تم الإلغاء.')); return; }
+  if (op !== 'b') { await namesAsk(cq, op); return; }
+  pendingNames = null;
+  if (!namesCur) { await editMsg(cq.message, rtl('ابعث /names من جديد.')); return; }
   const v = await namesViewText(namesCur.sid);
-  await editMsg(cq.message, v.text, namesKeyboard());
+  await editMsg(cq.message, v.text, namesKeyboard(namesCur.sid));
 }
 
 async function onNamesText(chatId, text) {
@@ -921,42 +914,44 @@ async function onNamesText(chatId, text) {
     await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ ما قدرت أقرأ الأسماء المثبّتة (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.') }).catch(() => {});
     return true;
   }
-  const same = kind === 'p' ? pins.p : pins.c;
-  const other = kind === 'p' ? pins.c : pins.p;
-  const added = [], moved = [], dup = [], bad = [];
+  const changed = [], bad = [];
+  const groups = ['p', 'c', 'blocked'];
+  const target = kind === 'd' ? 'blocked' : kind;
   for (const raw of latinDigits(String(text)).split(/\r?\n/)) {
     const w = raw.replace(/["'“”«»()\[\]]/g, '').replace(/[ً-ٰٟـ]/g, '').replace(/\s+/g, ' ').trim();
     if (!w) continue;
-    if (!NAMES_AR_RE.test(w) || bookKey(w).replace(/ /g, '').length < 2) { bad.push(raw.trim()); continue; }
+    if (!NAMES_AR_RE.test(w) || bookKey(w).replace(/ /g, '').length < (kind === 'd' || kind === 'a' ? 1 : 2)) { bad.push(raw.trim()); continue; }
     const key = bookKey(w);
-    if (same.some(x => bookKey(x) === key)) { dup.push(w); continue; }
-    const oi = other.findIndex(x => bookKey(x) === key);
-    if (oi >= 0) { other.splice(oi, 1); moved.push(w); } else added.push(w);
-    same.push(w);
+    let updated = false;
+    for (const g of groups) {
+      if (g === target) continue;
+      const kept = pins[g].filter(x => bookKey(x) !== key);
+      if (kept.length < pins[g].length) { pins[g] = kept; updated = true; }
+    }
+    if (kind !== 'a' && !pins[target].some(x => bookKey(x) === key)) {
+      pins[target].push(w);
+      updated = true;
+    }
+    if (updated) changed.push(w);
   }
-  if (pins.p.length + pins.c.length > NAMES_MAX_PINS) {
-    await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ وصلت الحد الأعلى للأسماء المثبّتة (' + NAMES_MAX_PINS + ').') }).catch(() => {});
-    pendingNames = null;
+  if (pins.p.length + pins.c.length > NAMES_MAX_PINS || pins.blocked.length > NAMES_MAX_PINS) {
+    await tg('sendMessage', { chat_id: chatId, text: rtl('وصلت الحد الأعلى لهالقائمة (' + NAMES_MAX_PINS + ').') }).catch(() => {});
     return true;
   }
   const head = [];
-  const icon = kind === 'p' ? '👤' : '📍';
-  if (added.length || moved.length) {
-    const ok = await db.savePins(pn.sid, { p: pins.p, c: pins.c });
+  if (changed.length) {
+    const ok = await db.savePins(pn.sid, { p: pins.p, c: pins.c, blocked: pins.blocked });
     if (!ok) {
-      await tg('sendMessage', { chat_id: chatId, text: rtl('⚠️ ما انحفظ (قاعدة البيانات ما ردّت)، جرّب مرة ثانية.') }).catch(() => {});
+      await tg('sendMessage', { chat_id: chatId, text: rtl('تعذّر حفظ التعديل، جرّب مرة ثانية.') }).catch(() => {});
       return true;
     }
-    head.push(rtl('✅ تثبّت للحلقات القادمة'));
-    for (const w of [...added, ...moved]) head.push(rtl(icon + ' ' + w));
-    if (moved.length) head.push(rtl('(' + moved.length + ' منها انتقل من القسم الثاني)'));
+    const note = kind === 'd' ? 'راح ينشال تنصيص وتقويس' : kind === 'a' ? 'رجع للتعامل التلقائي' : 'تثبّت للحلقات القادمة';
+    head.push(rtl('✅ ' + note + ' — ' + namesPreview(changed)));
   } else if (!bad.length) {
-    head.push(rtl('ما في جديد، الأسماء هذي مثبّتة أصلاً بهذا القسم.'));
-  } else {
-    head.push(rtl('⚠️ ما انثبّت شي.'));
+    head.push(rtl('هذي الكلمات على الإعداد المطلوب أصلاً.'));
   }
-  if (bad.length) head.push(rtl('⚠️ تجاهلت (عربي فقط، لحد 3 كلمات): ' + bad.join(' ، ')));
-  pendingNames = (added.length || moved.length || dup.length) ? null : pn;
+  if (bad.length) head.push(rtl('تجاهلت (عربي فقط، لحد 3 كلمات): ' + namesPreview(bad)));
+  pendingNames = null;
   await sendNamesView(chatId, pn.sid, head);
   return true;
 }

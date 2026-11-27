@@ -9,7 +9,7 @@ const { createGroqProvider, authorized, estimateTokens } = require('./groq-provi
 const db = require('../core/db');
 const { resolveEpInfoForUrl, getRawArabicSubContent } = require('../sources/araFetch');
 const { fixMarks, propagateNames, collectNameCandidates, classifyNames, nameKey, TRANSLATOR_MODE, translatorFlags, splitGluedPrefixes, wrapMaddaNames, collectNameCandidatesT, propagateNamesT } = require('./corrector-marks');
-const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames, applyPins } = require('./name-book');
+const { buildNameBook, applyNameBook, makeBook, describeBook, mergeSeriesNames, applyPins, applyNameExclusions, bookKey } = require('./name-book');
 
 function shortModel(m) {
   const s = String(m || '').replace(/^models\//, '').trim();
@@ -754,9 +754,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
   const seriesKey = seriesParts.length >= 3 ? cacheVersion + '_snames_' + (/^tt\d+$/.test(seriesParts[0]) ? seriesParts[0] : seriesParts[0] + ':' + seriesParts[1]) : null;
   const seriesEp = seriesTid;
   const pinSid = seriesParts.length >= 3 ? (/^tt\d+$/.test(seriesParts[0]) ? seriesParts[0] : seriesParts[0] + ':' + seriesParts[1]) : null;
-  const pinsPromise = pinSid
-    ? Promise.race([db.loadPins(pinSid).then(r => (r && r.ok ? r.value : null)), new Promise(res => setTimeout(() => res(null), 3000))]).catch(() => null)
-    : Promise.resolve(null);
+  const pinsPromise = pinSid ? db.loadPins(pinSid).catch(() => null) : null;
 
   const cache = await loadLineCache(lineCacheKey);
   const namesStored = await db.loadMap('names', nameCacheKey);
@@ -945,6 +943,16 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
     }
     console.log(`\u200F[الأسماء ${dictFailed ? '⚠' : '📖'}] ${dictFailed ? 'فشل بناء القاموس' : dictInfo}${memAdded ? ` | +${memAdded} من ذاكرة المسلسل` : ''}`);
 
+    let pins = null;
+    if (pinsPromise) {
+      let timer;
+      const read = await Promise.race([
+        pinsPromise, new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })
+      ]).finally(() => clearTimeout(timer));
+      if (read?.ok) pins = read.value;
+      else if (String(process.env.MONGODB_URI || '').trim()) namesComplete = false;
+    }
+    const blocked = new Set((Array.isArray(pins?.blocked) ? pins.blocked : []).map(bookKey));
     let tflags = null;
     if (TRANSLATOR_MODE) {
       cues.forEach((c, i) => { if (eligible[i]) finalTexts[i] = splitGluedPrefixes(c.text, finalTexts[i]); });
@@ -969,7 +977,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           }
         } catch (e) { namesComplete = false; console.log(`[مصحح - حفظ الأسماء] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
-      book = applyPins(book, await pinsPromise);
+      book = applyPins(book, pins);
       outTexts = applyNameBook(propagateNamesT(finalTexts, eligible, kinds, book, tflags), eligible, book, tflags);
     } else {
       if (!namesLoadedFromCache && book) {
@@ -983,7 +991,7 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
           if (book.complete !== false && kinds.complete !== false) db.saveMap('names', nameCacheKey, dataToSave);
         } catch (e) { namesComplete = false; console.log(`[مصحح - حفظ الأسماء (القديم)] تعذر تصنيف/حفظ الأسماء: ${e && e.message}`); }
       }
-      book = applyPins(book, await pinsPromise);
+      book = applyPins(book, pins);
       outTexts = applyNameBook(propagateNames(finalTexts, eligible, kinds, book), eligible, book);
     }
     
@@ -997,6 +1005,8 @@ async function correctAllCues(cues, keysArray, modelName, cacheKey, opts = {}) {
       }
     });
     if (changed.length) db.saveMap('line', lineCacheKey, changed);
+    // Keep reversible series preferences out of the reusable line cache.
+    outTexts = outTexts.map((t, i) => applyNameExclusions(cues[i].text, t, blocked));
     
     if (Date.now() - tNames > 20000) console.log(`\u200F[مرحلة الأسماء ⏱ بطيئة] ${secsOf(Date.now() - tNames)} ثانية (انتظار القاموس ${secsOf(tBookWait)} + تصنيف ${secsOf(tCls)} + تطبيق وحفظ) | ${namesLoadedFromCache ? 'قاموس من الكاش' : 'قاموس جديد'}`);
   }
